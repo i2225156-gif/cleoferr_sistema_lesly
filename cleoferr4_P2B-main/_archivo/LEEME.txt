@@ -1,0 +1,22 @@
+ARCHIVO - Archivos movidos y its propÓpositos:
+
+- nuevas_tablas_pago.sql - Migración de nuevas tablas de pago
+- setup_nuevas_tablas.sql - Setup para nuevas tablas
+- migracion_verificacion.sql - Verificación de migración
+
+SCRIPTS - Scripts ejecutables (importan app.py, requieren ajustes para funcionar solos):
+
+- seed_data.py - Carga datos de prueba en las bases de datos (Supabase auth y tienda). Requiere contexto de app Flask.
+- test_smtp.py - Prueba de conexión SMTP con credenciales de .env. Requiere variables de entorno SMTP_USER/SMTP_PASS.
+
+TESTS - Pruebas automatizadas (importan app.py, requieren base de datos con datos):
+
+- test_alertas_stock.py - Valida consistencia de alertas de stock. Ejecutar después de seed_data.py.
+
+NOTA: Varios scripts y pruebas importan `app` desde app.py y no funcionan sin el contexto de la aplicación Flask levantada o sin haber ejecutado seed_data.py primero.
+
+SQL CRUD + ORM (Productos): No quitar SQLAlchemy. La app es híbrida.
+
+Volcado de esquema: Opcional al final de la Fase 3, usar `--schema-only` sin datos ni credenciales.
+
+static/img - No tocar.

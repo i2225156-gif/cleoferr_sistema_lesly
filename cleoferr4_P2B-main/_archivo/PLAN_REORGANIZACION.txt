@@ -1,0 +1,112 @@
+ROUTE GROUPING BY MODULE (with line numbers):
+
+=== MAIN ===
+L265: /
+
+=== API ===
+L3249: /api/consultar_ruc/<ruc>
+L3260: /api/consultar_dni/<dni>
+
+=== AUTH ===
+L270: /login
+L306: /login_cliente
+L356: /logout
+
+=== AUTH_MISC ===
+L2376: /registro_cliente
+L2637: /recuperar_contrasena
+L2715: /restablecer_contrasena
+
+=== ALERTAS ===
+L2209: /alertas
+L2257: /alertas/resolver/<int:id>
+
+=== CARRITO ===
+L2276: /carrito
+L2284: /carrito/agregar
+L3041: /carrito/confirmar_v2
+
+=== CLIENTES ===
+L900: /clientes
+L918: /clientes/nuevo
+L952: /clientes/editar/<int:id>
+L986: /clientes/eliminar/<int:id>
+L1012: /clientes/registrar_pos
+
+=== INVENTARIO ===
+L1096: /inventario
+L1144: /inventario/registrar
+
+=== MAIN (otros) ===
+L882: /catalogo
+L2324: /cambiar_clave
+L2525: /verificar_registro
+L2817: /mis_pedidos
+L2870: /pedido_aceptado
+
+=== PEDIDOS ===
+L1305: /pedidos
+L1895: /pedidos/detalle/<int:id>
+L2897: /pedidos/<int:id>/estado
+
+=== PRODUCTOS ===
+L365: /productos
+L438: /productos/detalle/<int:id>
+L796: /productos/nuevo
+L810: /productos/guardar
+L831: /productos/editar/<int:id>
+L846: /productos/actualizar/<int:id>
+L870: /productos/eliminar/<int:id>
+
+=== PROVEEDORES ===
+L1215: /proveedores
+L1227: /proveedores/nuevo
+L1255: /proveedores/editar/<int:id>
+L1286: /proveedores/eliminar/<int:id>
+
+=== REPORTES ===
+L473: /reportes/pedidos/exportar
+L633: /reportes/productos/exportar
+L655: /reportes/clientes/exportar
+L674: /reportes/proveedores/exportar
+L693: /reportes/inventario/exportar
+L743: /reportes/dia/exportar
+L788: /reportes/exportar
+L2127: /reportes
+
+=== VENTAS ===
+L1389: /ventas/nueva
+L1426: /ventas/nueva
+L1979: /ventas/<int:id_venta>/comprobante
+
+=== CAJA ===
+L1587: /caja
+L1708: /caja/abrir
+L1754: /caja/egreso
+L1796: /caja/cerrar
+
+RISK-ORDERED REORGANIZATION PLAN (modules from MINOR to MAJOR risk):
+
+1. MAIN        - L265: /                               (low: simple redirect)
+2. API         - L3249, L3260: /api/*                (low: read-only consultas)
+3. ALERTAS     - L2209, L2257: /alertas/*        (low-medium: alert management)
+4. INVENTARIO  - L1096, L1144: /inventario/*     (low-medium: inventory CRUD)
+5. PROVEEDORES - L1215-L1286: /proveedores/*    (medium: supplier CRUD)
+6. CARRITO     - L2276-L3041: /carrito/*         (medium: cart operations)
+7. AUTH        - L270, L306, L356: /login/*      (medium: auth flows)
+8. AUTH_MISC   - L2376, L2637, L2715: /registro/* (medium: password/registration)
+9. CLIENTES    - L900-L1012: /clientes/*       (medium: client CRUD)
+10. PRODUCTOS  - L365-L870: /productos/*       (medium-high: product + stock)
+11. PEDIDOS    - L1305, L1895, L2897: /pedidos/*  (high: orders + status changes)
+12. VENTAS     - L1389, L1426, L1979: /ventas/*   (high: sales + comprobantes)
+13. CAJA       - L1587-L1796: /caja/*           (very-high: cash/financial ops)
+14. REPORTES   - L473-L788, L2127: /reportes/*   (very-high: exports + reports)
+15. OTRO       - L882, L2324, L2525, L2817, L2870: misc (various: catalogo, cambiar_clave, verificar_registro, mis_pedidos, pedido_aceptado)
+
+NOTAS:
+- static/img no tocar (conservado tal como está)
+- Volcado de esquema: OPCIONAL al final de la Fase 3, solo --schema-only, sin datos ni credenciales
+- La app es híbrida (SQL crudo + ORM en Productos): No quitar SQLAlchemy
+- _archivo/ contiene los 3 .sql ya aplicados + seed_data.py y test_smtp.py en scripts/ + LEEME.txt explicando cada archivo
+- .pytest_cache/ añadido al .gitignore; __pycache__ y .pytest_cache no borrar
+- test_alertas_stock.py movido a tests/ (2 tests fallan por datos, no por imports)

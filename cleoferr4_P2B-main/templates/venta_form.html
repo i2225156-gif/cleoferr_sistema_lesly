@@ -1,0 +1,512 @@
+{% extends 'base.html' %}
+{% block titulito %}Nueva Venta – Cleoferr POS{% endblock %}
+{% block contenido %}
+
+<style>
+.pos-wrap { display:grid; grid-template-columns: 1fr 440px; gap:20px; align-items:start; }
+@media (max-width: 1100px) { .pos-wrap { grid-template-columns: 1fr; } }
+
+/* Panel izquierdo: buscador + catálogo */
+.pos-buscar {
+    position: sticky; top: 0; z-index: 10;
+    background: white; border-radius: 12px; padding: 14px 16px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.08); margin-bottom: 14px;
+    display: flex; gap: 10px; align-items: center;
+}
+.pos-buscar .inp-buscar {
+    flex: 1; border: 2px solid #e0e0e0; border-radius: 10px;
+    padding: 12px 16px 12px 42px; font-size: 1rem;
+}
+.pos-buscar .inp-buscar:focus { border-color: var(--azul); outline: none; box-shadow: 0 0 0 0.2rem rgba(70,130,180,0.15); }
+.pos-buscar-wrap { position: relative; flex: 1; }
+.pos-buscar-wrap i.fa-search {
+    position: absolute; left: 15px; top: 50%; transform: translateY(-50%); color: #aaa;
+}
+.pos-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px;
+    max-height: calc(100vh - 260px); overflow-y: auto; padding-right: 4px;
+}
+.pos-card {
+    background: white; border-radius: 12px; padding: 12px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06); cursor: pointer;
+    border: 2px solid transparent; transition: all 0.15s; text-align: left;
+}
+.pos-card:hover { border-color: var(--azul); transform: translateY(-2px); }
+.pos-card .p-nombre { font-weight: 700; font-size: 0.88rem; color: var(--gris-oscuro); min-height: 2.2em; }
+.pos-card .p-precio { color: var(--azul-oscuro); font-weight: 800; font-size: 1.05rem; margin-top: 4px; }
+.pos-card .p-stock { font-size: 0.75rem; color: #888; }
+.pos-card.sin-stock { opacity: 0.45; cursor: not-allowed; }
+.pos-card .p-codigo { font-size: 0.7rem; color: #bbb; font-family: monospace; }
+
+/* Panel derecho: ticket */
+.pos-ticket { background: white; border-radius: 12px; box-shadow: 0 2px 16px rgba(0,0,0,0.1); overflow: hidden; position: sticky; top: 14px; }
+.pos-ticket-head {
+    background: linear-gradient(135deg, var(--gris-oscuro), var(--azul-oscuro));
+    color: white; padding: 14px 18px; display: flex; justify-content: space-between; align-items: center;
+}
+.pos-ticket-head h3 { margin: 0; font-size: 1.05rem; font-weight: 800; }
+.pos-items { max-height: 38vh; overflow-y: auto; }
+.pos-item {
+    display: grid; grid-template-columns: 1fr auto auto; gap: 8px; align-items: center;
+    padding: 10px 14px; border-bottom: 1px solid #f0f0f0;
+}
+.pos-item .it-nombre { font-weight: 600; font-size: 0.85rem; color: #333; }
+.pos-item .it-precio { font-size: 0.78rem; color: #999; }
+.pos-item .qty-box { display: flex; align-items: center; gap: 4px; }
+.pos-item .qty-box button {
+    width: 26px; height: 26px; border-radius: 6px; border: 1px solid #ddd;
+    background: #f8f9fa; cursor: pointer; font-weight: 700;
+}
+.pos-item .qty-box button:hover { background: var(--azul); color: white; border-color: var(--azul); }
+.pos-item .qty-box input {
+    width: 46px; text-align: center; border: 1px solid #ddd; border-radius: 6px; padding: 3px;
+}
+.pos-item .it-subtotal { font-weight: 700; color: var(--azul-oscuro); min-width: 70px; text-align: right; font-size: 0.9rem; }
+.pos-item .it-del { border: none; background: transparent; color: #c62828; cursor: pointer; }
+
+.pos-total-bar {
+    background: var(--gris-oscuro); color: white; padding: 16px 18px;
+    display: flex; justify-content: space-between; align-items: center;
+}
+.pos-total-bar .t-label { font-size: 0.85rem; opacity: 0.8; text-transform: uppercase; letter-spacing: 1px; }
+.pos-total-bar .t-total { font-size: 2rem; font-weight: 800; color: var(--azul-claro); }
+
+.pos-controles { padding: 14px 16px; }
+.pos-controles .form-label { font-size: 0.8rem; font-weight: 700; }
+.pos-metodos { display: flex; gap: 6px; margin-bottom: 12px; }
+.pos-metodos .metodo {
+    flex: 1; text-align: center; padding: 10px 4px; border: 2px solid #e0e0e0; border-radius: 10px;
+    cursor: pointer; font-weight: 700; font-size: 0.8rem; color: #888; transition: all 0.15s;
+}
+.pos-metodos .metodo input { display: none; }
+.pos-metodos .metodo i { display: block; font-size: 1.1rem; margin-bottom: 3px; }
+.pos-metodos .metodo.activo { border-color: var(--azul); color: var(--azul); background: rgba(70,130,180,0.08); }
+.pos-cobrar {
+    width: 100%; padding: 14px; border: none; border-radius: 12px;
+    background: linear-gradient(135deg, var(--azul), var(--azul-claro));
+    color: white; font-weight: 800; font-size: 1.05rem; cursor: pointer;
+}
+.pos-cobrar:hover { background: linear-gradient(135deg, var(--azul-oscuro), var(--azul)); }
+.pos-cobrar:disabled { background: #bbb; cursor: not-allowed; }
+.pos-vacio { text-align: center; padding: 40px 20px; color: #bbb; }
+.pos-vacio i { font-size: 2.5rem; display: block; margin-bottom: 8px; }
+</style>
+
+<div class="page-header">
+    <div>
+        <h2><i class="fa fa-cash-register me-2"></i>PUNTO DE VENTA</h2>
+        <p>Busca productos, agrégalos al ticket y cobra. Solo ventas locales (requiere caja abierta).</p>
+    </div>
+    <a href="/pedidos" class="btn btn-outline-secondary">
+        <i class="fa fa-arrow-left me-1"></i> Volver
+    </a>
+</div>
+
+<form method="POST" action="/ventas/nueva" id="formVenta" onsubmit="return validarVenta()">
+    <input type="hidden" name="venta_token" value="{{ venta_token }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<div class="pos-wrap">
+
+    <!-- ══════ IZQUIERDA: buscador + catálogo ══════ -->
+    <div>
+        <div class="pos-buscar">
+            <div class="pos-buscar-wrap">
+                <i class="fa fa-search"></i>
+                <input type="text" id="buscarProd" class="inp-buscar"
+                       placeholder="Buscar por nombre o código..." autocomplete="off">
+            </div>
+            <span class="badge" style="background:var(--azul);font-size:0.8rem" id="contadorEncontrados">0</span>
+        </div>
+        <div class="pos-grid" id="gridProductos"></div>
+    </div>
+
+    <!-- ══════ DERECHA: ticket ══════ -->
+    <div>
+        <div class="pos-ticket">
+            <div class="pos-ticket-head">
+                <h3><i class="fa fa-receipt me-2"></i>Ticket de venta</h3>
+                <button type="button" class="btn btn-sm" style="color:#ffb3b3;border:1px solid #ffb3b3"
+                        onclick="vaciarCarrito()" title="Vaciar">
+                    <i class="fa fa-trash"></i>
+                </button>
+            </div>
+
+            <div class="pos-items" id="listaItems">
+                <div class="pos-vacio" id="vacioMsg">
+                    <i class="fa fa-basket-shopping"></i>
+                    Agrega productos desde el catálogo
+                </div>
+            </div>
+
+            <div class="pos-total-bar">
+                <span class="t-label">Total</span>
+                <span class="t-total" id="totalVenta">S/ 0.00</span>
+            </div>
+
+            <div class="pos-controles">
+                <label class="form-label">Cliente</label>
+                <div class="input-group input-group-sm mb-2">
+                    <select name="id_cliente" id="selectCliente" class="form-select">
+                        <option value="">— Venta anónima —</option>
+                        {% for c in clientes %}
+                        <option value="{{ c.id_cliente }}">{{ c.nombre }} {% if c.telefono %}({{ c.telefono }}){% endif %}</option>
+                        {% endfor %}
+                    </select>
+                    <button type="button" class="btn btn-outline-primary"
+                            data-bs-toggle="modal" data-bs-target="#modalClientePos"
+                            title="Registrar cliente por DNI/RUC">
+                        <i class="fa fa-user-plus"></i>
+                    </button>
+                </div>
+                <div id="compResumen"></div>
+                <input type="hidden" name="comp_tipo" id="compTipo">
+                <input type="hidden" name="comp_doc" id="compDoc">
+                <input type="hidden" name="comp_nombre" id="compNombre">
+
+                <label class="form-label">Método de pago</label>
+                <div class="pos-metodos">
+                    <label class="metodo activo">
+                        <input type="radio" name="metodo_pago" value="efectivo" checked>
+                        <i class="fa fa-money-bill-wave"></i>Efectivo
+                    </label>
+                    <label class="metodo">
+                        <input type="radio" name="metodo_pago" value="yape">
+                        <i class="fa fa-mobile-screen"></i>Yape/Plin
+                    </label>
+                    <label class="metodo">
+                        <input type="radio" name="metodo_pago" value="tarjeta">
+                        <i class="fa fa-credit-card"></i>Tarjeta
+                    </label>
+                </div>
+
+                <input type="hidden" name="tipo_venta" value="local">
+                <button type="submit" class="pos-cobrar" id="btnCobrar" disabled>
+                    <i class="fa fa-check-circle me-2"></i>COBRAR <span id="totalBtn">S/ 0.00</span>
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- inputs ocultos de items (los genera JS al hacer submit) -->
+<div id="inputsOcultos"></div>
+</form>
+
+<!-- ══ Modal: registrar cliente por DNI/RUC + tipo de comprobante ══ -->
+<div class="modal fade" id="modalClientePos" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="fa fa-user-plus me-2"></i>Cliente y comprobante</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+
+        <div class="d-flex gap-2 mb-3">
+          <button type="button" class="btn btn-sm flex-fill btn-outline-primary comp-tab active"
+                  onclick="setTipoCli('boleta')">Boleta (DNI)</button>
+          <button type="button" class="btn btn-sm flex-fill btn-outline-primary comp-tab"
+                  onclick="setTipoCli('factura')">Factura (RUC)</button>
+        </div>
+
+        <!-- Boleta: DNI + nombre -->
+        <div id="camposBoleta">
+          <div class="input-group mb-2">
+            <input type="text" id="campoDni" class="form-control" maxlength="8"
+                   placeholder="DNI (8 dígitos)" inputmode="numeric">
+            <button type="button" class="btn btn-outline-secondary" onclick="consultarDocCli()">
+              <i class="fa fa-search me-1"></i>Consultar
+            </button>
+          </div>
+          <div class="mb-2">
+            <input type="text" id="campoNombreCli" class="form-control"
+                   placeholder="Nombre completo *" maxlength="60">
+          </div>
+          <div class="mb-2">
+            <input type="text" id="campoTelefonoCli" class="form-control" maxlength="9"
+                   placeholder="Teléfono (9 dígitos, opcional)" inputmode="numeric">
+          </div>
+        </div>
+
+        <!-- Factura: RUC + razon social + direccion fiscal -->
+        <div id="camposFactura" style="display:none">
+          <div class="input-group mb-2">
+            <input type="text" id="campoRuc" class="form-control" maxlength="11"
+                   placeholder="RUC (11 dígitos, inicia 10/20)" inputmode="numeric">
+            <button type="button" class="btn btn-outline-secondary" onclick="consultarDocCli()">
+              <i class="fa fa-search me-1"></i>Consultar
+            </button>
+          </div>
+          <div class="mb-2">
+            <input type="text" id="campoRazonCli" class="form-control"
+                   placeholder="Razon social *" maxlength="100">
+          </div>
+          <div class="mb-2">
+            <input type="text" id="campoDireccionCli" class="form-control"
+                   placeholder="Direccion fiscal *" maxlength="120">
+          </div>
+          <div class="mb-2">
+            <input type="text" id="campoTelefonoCliF" class="form-control" maxlength="9"
+                   placeholder="Telefono (9 digitos, opcional)" inputmode="numeric">
+          </div>
+        </div>
+
+        <div id="clientePosFeedback" style="font-size:0.85rem"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancelar</button>
+        <button type="button" class="btn btn-primary" onclick="guardarClientePos()">
+          <i class="fa fa-save me-1"></i>Guardar y usar
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const PRODUCTOS = {{ productos | tojson }};
+let carrito = {};   // { id_producto: {nombre, precio, stock, cantidad} }
+
+// ── Render catálogo con búsqueda ──
+function renderCatalogo() {
+    const q = (document.getElementById('buscarProd').value || '').toLowerCase();
+    const grid = document.getElementById('gridProductos');
+    let html = '', n = 0;
+    for (const p of PRODUCTOS) {
+        const nombre = (p.nombre || '').toLowerCase();
+        const codigo = String(p.id_producto);
+        if (q && !nombre.includes(q) && !codigo.includes(q)) continue;
+        n++;
+        const sinStock = (p.stock || 0) <= 0;
+        html += `
+        <button type="button" class="pos-card ${sinStock ? 'sin-stock' : ''}"
+                ${sinStock ? 'disabled' : ''}
+                onclick="agregar(${p.id_producto})">
+            <div class="p-codigo">#${p.id_producto}</div>
+            <div class="p-nombre">${p.nombre}</div>
+            <div class="p-precio">S/ ${parseFloat(p.precio).toFixed(2)}</div>
+            <div class="p-stock">Stock: ${p.stock}</div>
+        </button>`;
+    }
+    grid.innerHTML = html || '<p class="text-muted p-3">Sin resultados</p>';
+    document.getElementById('contadorEncontrados').textContent = n;
+}
+document.getElementById('buscarProd').addEventListener('input', renderCatalogo);
+document.getElementById('buscarProd').addEventListener('keydown', e => {
+    if (e.key === 'Enter') {
+        e.preventDefault();
+        const first = document.querySelector('.pos-card:not(.sin-stock)');
+        if (first) first.click();
+    }
+});
+
+// ── Carrito en memoria ──
+function agregar(id) {
+    const p = PRODUCTOS.find(x => x.id_producto === id);
+    if (!p || p.stock <= 0) return;
+    if (!carrito[id]) carrito[id] = { nombre: p.nombre, precio: parseFloat(p.precio), stock: p.stock, cantidad: 1 };
+    else if (carrito[id].cantidad < carrito[id].stock) carrito[id].cantidad++;
+    renderTicket();
+}
+function cambiarCant(id, delta) {
+    if (!carrito[id]) return;
+    carrito[id].cantidad += delta;
+    if (carrito[id].cantidad <= 0) delete carrito[id];
+    if (carrito[id] && carrito[id].cantidad > carrito[id].stock) carrito[id].cantidad = carrito[id].stock;
+    renderTicket();
+}
+function setCant(id, valor) {
+    if (!carrito[id]) return;
+    let v = parseInt(valor) || 1;
+    if (v > carrito[id].stock) v = carrito[id].stock;
+    if (v < 1) v = 1;
+    carrito[id].cantidad = v;
+    renderTicket();
+}
+function quitarItem(id) { delete carrito[id]; renderTicket(); }
+function vaciarCarrito() { carrito = {}; renderTicket(); }
+
+function renderTicket() {
+    const cont = document.getElementById('listaItems');
+    const ids = Object.keys(carrito);
+    let html = '', total = 0;
+    for (const id of ids) {
+        const it = carrito[id];
+        const sub = it.precio * it.cantidad;
+        total += sub;
+        html += `
+        <div class="pos-item">
+            <div>
+                <div class="it-nombre">${it.nombre}</div>
+                <div class="it-precio">S/ ${it.precio.toFixed(2)} c/u</div>
+            </div>
+            <div class="qty-box">
+                <button type="button" onclick="cambiarCant(${id}, -1)">−</button>
+                <input type="number" value="${it.cantidad}" min="1" max="${it.stock}"
+                       onchange="setCant(${id}, this.value)">
+                <button type="button" onclick="cambiarCant(${id}, 1)">+</button>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px">
+                <span class="it-subtotal">S/ ${sub.toFixed(2)}</span>
+                <button type="button" class="it-del" onclick="quitarItem(${id})"><i class="fa fa-trash"></i></button>
+            </div>
+        </div>`;
+    }
+    cont.innerHTML = html || `<div class="pos-vacio" id="vacioMsg">
+        <i class="fa fa-basket-shopping"></i> Agrega productos desde el catálogo</div>`;
+    document.getElementById('totalVenta').textContent = 'S/ ' + total.toFixed(2);
+    document.getElementById('totalBtn').textContent   = 'S/ ' + total.toFixed(2);
+    document.getElementById('btnCobrar').disabled = ids.length === 0;
+}
+
+// Selector de método (estilo activo)
+document.querySelectorAll('.pos-metodos .metodo').forEach(el => {
+    el.addEventListener('click', () => {
+        document.querySelectorAll('.pos-metodos .metodo').forEach(m => m.classList.remove('activo'));
+        el.classList.add('activo');
+    });
+});
+
+// ── Al cobrar: generar inputs ocultos id_producto[] / cantidad[] ──
+// `cobrando` bloquea el botón mientras el POST está en vuelo para evitar
+// dobles envíos por doble clic (refuerzo al token anti doble cobro del backend).
+let cobrando = false;
+function bloquearCobro() {
+    const btn = document.getElementById('btnCobrar');
+    if (btn) { btn.disabled = true; btn.textContent = 'Procesando...'; }
+}
+function validarVenta() {
+    if (cobrando) return false;
+    const ids = Object.keys(carrito);
+    if (ids.length === 0) return false;
+    const cont = document.getElementById('inputsOcultos');
+    cont.innerHTML = '';
+    for (const id of ids) {
+        const it = carrito[id];
+        const inp1 = document.createElement('input');
+        inp1.type = 'hidden'; inp1.name = 'id_producto[]'; inp1.value = id;
+        const inp2 = document.createElement('input');
+        inp2.type = 'hidden'; inp2.name = 'cantidad[]';  inp2.value = it.cantidad;
+        cont.appendChild(inp1); cont.appendChild(inp2);
+    }
+    cobrando = true;
+    setTimeout(bloquearCobro, 0);
+    return true;
+}
+
+renderCatalogo();
+
+// ══ Cliente por DNI/RUC + comprobante (modal POS) ═══════════════════════════
+const CSRF_TOKEN  = {{ csrf_token|tojson }};
+let tipoCli = 'boleta';
+let renNombres = '', renApellidos = '';   // datos RENIEC (nombres / apellidos) cuando la API responde
+
+function setTipoCli(t) {
+    tipoCli = t;
+    document.getElementById('camposBoleta').style.display  = t === 'boleta' ? 'block' : 'none';
+    document.getElementById('camposFactura').style.display = t === 'factura' ? 'block' : 'none';
+    document.querySelectorAll('.comp-tab').forEach(b => {
+        b.classList.toggle('active', b.innerText.indexOf(t === 'boleta' ? 'Boleta' : 'Factura') !== -1);
+    });
+    const fb = document.getElementById('clientePosFeedback');
+    fb.textContent = ''; fb.className = '';
+}
+
+function setCliMsg(ok, texto, esInfo) {
+    const fb = document.getElementById('clientePosFeedback');
+    fb.textContent = texto;
+    fb.className = 'alert ' + (ok ? 'alert-success' : (esInfo ? 'alert-info' : 'alert-danger')) + ' p-2 mt-2';
+}
+
+// Consulta RENIEC (DNI) / SUNAT (RUC) vía endpoints propios del backend
+// (el token de ApisPeru vive solo en el servidor; no se expone en el frontend).
+async function consultarDocCli() {
+    const num  = (document.getElementById('campoDni').value || document.getElementById('campoRuc').value).trim();
+    if (!num) return;
+    setCliMsg(true, 'Consultando...', true);
+    try {
+        const url  = tipoCli === 'boleta' ? `/api/consultar_dni/${num}` : `/api/consultar_ruc/${num}`;
+        const resp = await fetch(url, { headers: { 'Accept': 'application/json' } });
+        const data = await resp.json().catch(() => null);
+        if (!data) { setCliMsg(false, 'La API no respondió. Ingresa los datos manualmente.'); return; }
+
+        if (tipoCli === 'boleta') {
+            renNombres   = data.nombres || data.nombre || '';
+            renApellidos = ((data.apellidoPaterno || data.apellido_paterno || '') + ' ' +
+                            (data.apellidoMaterno || data.apellido_materno || '')).trim();
+            const completo = [renNombres, renApellidos].filter(Boolean).join(' ');
+            if (completo) {
+                document.getElementById('campoNombreCli').value = completo;
+                setCliMsg(true, 'DNI encontrado en RENIEC.');
+            } else {
+                renNombres = ''; renApellidos = '';
+                setCliMsg(false, 'DNI NO encontrado en RENIEC. Ingresa el nombre manualmente.');
+            }
+        } else {
+            const razonSocial = data.razonSocial || data.razon_social || '';
+            const direccion   = data.direccion  || data.domicilioFiscal || '';
+            if (razonSocial) {
+                document.getElementById('campoRazonCli').value = razonSocial;
+                if (direccion) document.getElementById('campoDireccionCli').value = direccion;
+                setCliMsg(true, 'RUC encontrado en SUNAT.');
+            } else {
+                setCliMsg(false, 'RUC NO encontrado en SUNAT. Ingresa los datos manualmente.');
+            }
+        }
+    } catch (err) {
+        setCliMsg(false, 'Error de conexión. Ingresa los datos manualmente.');
+    }
+}
+
+async function guardarClientePos() {
+    const esBoleta = tipoCli === 'boleta';
+    const payload = { tipo: tipoCli, csrf_token: CSRF_TOKEN };
+
+    if (esBoleta) {
+        payload.dni = (document.getElementById('campoDni').value || '').trim();
+        payload.nombre = renNombres || (document.getElementById('campoNombreCli').value || '').trim();
+        payload.apellido = renApellidos;
+        payload.telefono = (document.getElementById('campoTelefonoCli').value || '').trim();
+    } else {
+        payload.ruc = (document.getElementById('campoRuc').value || '').trim();
+        payload.nombre = (document.getElementById('campoRazonCli').value || '').trim();
+        payload.direccion = (document.getElementById('campoDireccionCli').value || '').trim();
+        payload.telefono = (document.getElementById('campoTelefonoCliF').value || '').trim();
+    }
+
+    try {
+        const resp = await fetch('/clientes/registrar_pos', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        const data = await resp.json();
+        if (!data.ok) { setCliMsg(false, data.error || 'No se pudo guardar.'); return; }
+
+        const select = document.getElementById('selectCliente');
+        const existe = [...select.options].some(o => String(o.value) === String(data.id_cliente));
+        if (!existe) {
+            const opt = document.createElement('option');
+            opt.value = data.id_cliente;
+            opt.textContent = data.nombre + (payload.telefono ? ' (' + payload.telefono + ')' : '');
+            select.appendChild(opt);
+        }
+        select.value = data.id_cliente;
+
+        document.getElementById('compTipo').value   = tipoCli;
+        document.getElementById('compDoc').value    = esBoleta ? payload.dni : payload.ruc;
+        document.getElementById('compNombre').value = data.nombre;
+        document.getElementById('compResumen').innerHTML =
+            '<span class="badge" style="background:#28a745;color:white">' +
+            (esBoleta ? 'Boleta B001 – DNI ' : 'Factura F001 – RUC ') + document.getElementById('compDoc').value +
+            ' · ' + data.nombre + '</span>';
+        setCliMsg(true, data.ya_existia
+            ? 'Cliente ya existía con ese documento. Se vinculó a la venta.'
+            : 'Cliente registrado y vinculado a la venta.');
+        setTimeout(() => bootstrap.Modal.getInstance(document.getElementById('modalClientePos')).hide(), 700);
+    } catch (err) {
+        setCliMsg(false, 'No se pudo conectar con el servidor.');
+    }
+}
+</script>
+{% endblock %}

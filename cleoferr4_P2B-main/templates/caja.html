@@ -1,0 +1,290 @@
+{% extends 'base.html' %}
+{% block titulito %}Caja - Cleoferr{% endblock %}
+{% block contenido %}
+
+<div class="page-header">
+    <div>
+        <h2><i class="fa fa-cash-register me-2"></i>Caja</h2>
+        <p>Apertura, cierre y arqueo de caja del turno</p>
+    </div>
+</div>
+
+{% if caja %}
+<!-- ═══ CAJA ABIERTA ═══ -->
+<div class="row g-3 mb-4">
+    <div class="col-md-4">
+        <div class="stat-card">
+            <div class="d-flex align-items-center gap-3">
+                <div class="stat-icon"><i class="fa fa-box-open"></i></div>
+                <div>
+                    <div class="stat-label">Caja abierta</div>
+                    <div class="stat-value">#{{ caja.id_caja }}</div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="stat-card">
+            <div class="d-flex align-items-center gap-3">
+                <div class="stat-icon"><i class="fa fa-coins"></i></div>
+                <div>
+                    <div class="stat-label">Efectivo esperado</div>
+                    <div class="stat-value">S/ {{ '%.2f'|format(resumen.esperado) }}</div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="stat-card">
+            <div class="d-flex align-items-center gap-3">
+                <div class="stat-icon"><i class="fa fa-user"></i></div>
+                <div>
+                    <div class="stat-label">Abierta por</div>
+                    <div class="stat-value" style="font-size:1.1rem">
+                        {{ nombres.get(caja.id_usuario_apertura, '—') }}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-4 mb-4">
+    <!-- Resumen del turno -->
+    <div class="col-lg-7">
+        <div class="card-custom h-100">
+            <div class="card-header"><i class="fa fa-chart-pie me-2"></i>Resumen del turno</div>
+            <div class="p-3">
+                <table class="table table-custom mb-3">
+                    <tbody>
+                        <tr>
+                            <td><i class="fa fa-coins me-1"></i>Ventas en efectivo</td>
+                            <td class="text-end fw-bold">S/ {{ '%.2f'|format(resumen.ventas_efectivo) }}</td>
+                        </tr>
+                        <tr>
+                            <td><i class="fa fa-mobile me-1"></i>Yape / Plin</td>
+                            <td class="text-end">S/ {{ '%.2f'|format(resumen.yape) }}</td>
+                        </tr>
+                        <tr>
+                            <td><i class="fa fa-credit-card me-1"></i>Tarjeta</td>
+                            <td class="text-end">S/ {{ '%.2f'|format(resumen.tarjeta) }}</td>
+                        </tr>
+                        <tr>
+                            <td><i class="fa fa-cart-shopping me-1"></i>Total ventas locales</td>
+                            <td class="text-end fw-bold">S/ {{ '%.2f'|format(resumen.total_ventas) }}</td>
+                        </tr>
+                        <tr>
+                            <td><i class="fa fa-right-from-bracket me-1" style="color:#842029"></i>Egresos del turno</td>
+                            <td class="text-end" style="color:#842029">− S/ {{ '%.2f'|format(resumen.egresos) }}</td>
+                        </tr>
+                        <tr class="table-secondary">
+                            <td class="fw-semibold"><i class="fa fa-coins me-1"></i>Efectivo esperado en caja</td>
+                            <td class="text-end fw-bold fs-5">
+                                S/ {{ '%.2f'|format(resumen.fondo) }} + S/ {{ '%.2f'|format(resumen.ventas_efectivo) }} − S/ {{ '%.2f'|format(resumen.egresos) }}
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+                <div class="alert alert-info py-2" style="font-size:0.85rem">
+                    <i class="fa fa-circle-info me-1"></i>
+                    Solo las <strong>ventas en efectivo</strong> y los <strong>egresos</strong> afectan el
+                    efectivo esperado. Yape/Plin y Tarjeta se reportan aparte (dinero digital).
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Registro de egresos -->
+    <div class="col-lg-5">
+        <div class="card-custom h-100">
+            <div class="card-header"><i class="fa fa-right-from-bracket me-2"></i>Registrar egreso</div>
+            <div class="p-3">
+                <p class="text-muted" style="font-size:0.85rem">
+                    Gastos o salidas de efectivo del turno (movilidad, vueltos, compras menores).
+                    Se descuentan automáticamente del efectivo esperado.
+                </p>
+                <form method="POST" action="{{ url_for('caja_egreso') }}">
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">Concepto</label>
+                        <input type="text" name="concepto" class="form-control"
+                               maxlength="200" placeholder="Ej. Movilidad del delivery" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">Monto</label>
+                        <div class="input-group">
+                            <span class="input-group-text">S/</span>
+                            <input type="number" name="monto" class="form-control"
+                                   step="0.01" min="0.01" required>
+                        </div>
+                    </div>
+                    <button class="btn btn-danger-outline w-100">
+                        <i class="fa fa-right-from-bracket me-1"></i>Registrar egreso
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-4">
+    <!-- Movimientos -->
+    <div class="col-lg-8">
+        <div class="card-custom">
+            <div class="card-header"><i class="fa fa-list me-2"></i>Movimientos del turno</div>
+            <div class="table-responsive">
+                <table class="table table-custom table-hover mb-0">
+                    <thead>
+                        <tr>
+                            <th>Fecha</th><th>Tipo</th><th>Concepto</th>
+                            <th>Usuario</th><th class="text-end">Monto</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for m in movimientos %}
+                        <tr>
+                            <td>{{ m.fecha.strftime('%d/%m/%Y %H:%M') if m.fecha else '—' }}</td>
+                            <td>
+                                {% if m.tipo == 'ingreso' %}
+                                    <span class="badge badge-entrada">{{ m.tipo }}</span>
+                                {% else %}
+                                    <span class="badge badge-salida">{{ m.tipo }}</span>
+                                {% endif %}
+                            </td>
+                            <td>{{ m.concepto }}</td>
+                            <td>{{ nombres.get(m.id_usuario, '—') }}</td>
+                            <td class="text-end fw-bold">S/ {{ '%.2f'|format(m.monto|float) }}</td>
+                        </tr>
+                        {% else %}
+                        <tr><td colspan="5" class="text-center text-muted py-4">Sin movimientos</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- Cierre -->
+    <div class="col-lg-4">
+        <div class="card-custom">
+            <div class="card-header"><i class="fa fa-lock me-2"></i>Cerrar caja</div>
+            <div class="p-3">
+                <div class="alert alert-info" style="font-size:0.85rem">
+                    <i class="fa fa-circle-info me-1"></i>
+                    El sistema espera <strong>S/ {{ '%.2f'|format(resumen.esperado) }}</strong> en efectivo
+                    (fondo S/ {{ '%.2f'|format(resumen.fondo) }} + ventas efectivo
+                    S/ {{ '%.2f'|format(resumen.ventas_efectivo) }} − egresos S/ {{ '%.2f'|format(resumen.egresos) }}).
+                    <br>Yape/Plin <strong>S/ {{ '%.2f'|format(resumen.yape) }}</strong> ·
+                    Tarjeta <strong>S/ {{ '%.2f'|format(resumen.tarjeta) }}</strong> (digital, no se cuenta en el cierre).
+                    Diferencias mayores a S/ {{ '%.0f'|format(umbral) }} se marcarán como advertencia.
+                </div>
+                <form method="POST" action="{{ url_for('caja_cerrar') }}"
+                      onsubmit="return confirm('¿Confirmar cierre de caja #{{ caja.id_caja }}?')">
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">Efectivo contado (declarado)</label>
+                        <div class="input-group">
+                            <span class="input-group-text">S/</span>
+                            <input type="number" name="monto_declarado" class="form-control"
+                                   step="0.01" min="0" required>
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">Observaciones</label>
+                        <textarea name="observaciones" class="form-control" rows="2"
+                                  placeholder="Opcional"></textarea>
+                    </div>
+                    <button class="btn btn-naranja w-100">
+                        <i class="fa fa-lock me-1"></i>Cerrar caja
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% else %}
+<!-- ═══ NO HAY CAJA ABIERTA ═══ -->
+<div class="row g-4">
+    <div class="col-lg-5">
+        <div class="card-custom">
+            <div class="card-header"><i class="fa fa-unlock me-2"></i>Abrir caja</div>
+            <div class="p-4">
+                <p class="text-muted" style="font-size:0.9rem">
+                    Debes abrir la caja para poder registrar <strong>ventas locales</strong>
+                    (presenciales). Las ventas online no requieren caja.
+                </p>
+                <form method="POST" action="{{ url_for('caja_abrir') }}">
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">Monto inicial (fondo)</label>
+                        <div class="input-group">
+                            <span class="input-group-text">S/</span>
+                            <input type="number" name="monto_apertura" class="form-control"
+                                   step="0.01" min="0" value="0" required autofocus>
+                        </div>
+                    </div>
+                    <button class="btn btn-naranja w-100">
+                        <i class="fa fa-unlock me-1"></i>Abrir caja
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+<!-- Historial -->
+<div class="card-custom mt-4">
+    <div class="card-header"><i class="fa fa-clock-rotate-left me-2"></i>Historial de cierres</div>
+    <div class="table-responsive">
+        <table class="table table-custom table-hover mb-0">
+            <thead>
+                <tr>
+                    <th>#</th><th>Apertura</th><th>Cierre</th>
+                    <th>Abrió</th><th>Cerró</th>
+                    <th class="text-end">Sistema</th><th class="text-end">Declarado</th>
+                    <th class="text-end">Diferencia</th><th>Estado</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for h in historial %}
+                {% set dif = (h.diferencia|float) if h.diferencia is not none else None %}
+                <tr>
+                    <td>#{{ h.id_caja }}</td>
+                    <td>{{ h.fecha_apertura.strftime('%d/%m/%Y %H:%M') if h.fecha_apertura else '—' }}<br>
+                        <small class="text-muted">S/ {{ '%.2f'|format(h.monto_apertura|float) }}</small></td>
+                    <td>{{ h.fecha_cierre.strftime('%d/%m/%Y %H:%M') if h.fecha_cierre else '—' }}</td>
+                    <td>{{ nombres.get(h.id_usuario_apertura, '—') }}</td>
+                    <td>{{ nombres.get(h.id_usuario_cierre, '—') }}</td>
+                    <td class="text-end">
+                        {{ ('S/ %.2f'|format(h.monto_cierre_sistema|float)) if h.monto_cierre_sistema is not none else '—' }}
+                    </td>
+                    <td class="text-end">
+                        {{ ('S/ %.2f'|format(h.monto_cierre_declarado|float)) if h.monto_cierre_declarado is not none else '—' }}
+                    </td>
+                    <td class="text-end fw-bold">
+                        {% if dif is none %}
+                            —
+                        {% elif dif|abs > umbral %}
+                            <span class="badge" style="background:#842029">
+                                <i class="fa fa-triangle-exclamation me-1"></i>S/ {{ '%+.2f'|format(dif) }}
+                            </span>
+                        {% else %}
+                            <span class="badge" style="background:#0f5132">S/ {{ '%+.2f'|format(dif) }}</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if h.estado == 'abierta' %}
+                            <span class="badge badge-entrada">abierta</span>
+                        {% else %}
+                            <span class="badge badge-inactivo">cerrada</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% else %}
+                <tr><td colspan="9" class="text-center text-muted py-4">Sin cierres registrados</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+{% endblock %}
