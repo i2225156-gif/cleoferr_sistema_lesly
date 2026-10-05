@@ -18,7 +18,7 @@ except Exception as e:
     print("Comandos recomendados (desde el venv activado):")
     print("  pip install -r requirements.txt")
     print("Si no dispone de requirements.txt, instale al menos:")
-    print("  pip install flask flask-bcrypt psycopg2-binary sqlalchemy python-dotenv")
+    print("  pip install flask flask-bcrypt pymysql sqlalchemy python-dotenv")
     print("\nDetalle del error:", e, "\n")
     sys.exit(1)
 
