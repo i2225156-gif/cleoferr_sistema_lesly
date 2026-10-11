@@ -2126,6 +2126,28 @@ def comprobante_venta(id_venta):
                            qr_data=qr_data, formato=formato)
 
 
+# Criterio del alcance (§6.9): solo cuentan como vendidas las ventas con pago
+# CONFIRMADO (uq_pago_venta garantiza un único pago por venta: JOIN directo).
+SQL_VENTAS_HOY_PAGADAS = """
+    SELECT COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS ventas_hoy
+    FROM venta v
+    JOIN pago pg ON pg.id_venta = v.id_venta AND pg.estado = 'confirmado'
+    JOIN detalle_venta d ON d.id_venta = v.id_venta
+    WHERE DATE(v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima') = CURRENT_DATE
+"""
+
+# Sintaxis PostgreSQL: DATE_SUB es MySQL y fallaba aquí, dejando la sección
+# "Resultados" (movimientos de los últimos 30 días) siempre vacía.
+SQL_MOVIMIENTOS_30DIAS = """
+    SELECT tipo,
+           COALESCE(SUM(cantidad),0) AS total_cantidad,
+           COALESCE(SUM(precio_unitario * cantidad),0) AS total_valor
+    FROM inventario_movimiento
+    WHERE fecha >= NOW() - INTERVAL '30 days'
+    GROUP BY tipo
+"""
+
+
 @app.route('/reportes')
 @login_required
 @escritura_required
@@ -2136,14 +2158,9 @@ def reportes():
     reportes_data = None
 
     try:
-        # Ventas hoy (si existe tabla pedido con campo total y fecha)
+        # Ventas de hoy SOLO con pago confirmado (criterio del alcance §6.9).
         try:
-            cursor.execute("""
-                SELECT COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS ventas_hoy
-                FROM venta v
-                JOIN detalle_venta d ON v.id_venta = d.id_venta
-                WHERE DATE(v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima') = CURRENT_DATE
-            """)
+            cursor.execute(SQL_VENTAS_HOY_PAGADAS)
             row = cursor.fetchone()
             resumen['ventas_hoy'] = float(row['ventas_hoy'] or 0)
         except Exception:
@@ -2167,14 +2184,7 @@ def reportes():
 
         # Dashboard inventario: entradas/salidas últimos 30 días (cantidad y valor)
         try:
-            cursor.execute("""
-                SELECT tipo,
-                       COALESCE(SUM(cantidad),0) AS total_cantidad,
-                       COALESCE(SUM(precio_unitario * cantidad),0) AS total_valor
-                FROM inventario_movimiento
-                WHERE fecha >= DATE_SUB(NOW(), INTERVAL 30 DAY)
-                GROUP BY tipo
-            """)
+            cursor.execute(SQL_MOVIMIENTOS_30DIAS)
             agg = cursor.fetchall()
             # Construir filas para la tabla de reportes
             headers = ['Tipo', 'Cantidad (30d)', 'Valor (30d)']
