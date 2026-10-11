@@ -3,6 +3,8 @@ import sys
 import uuid
 import secrets
 import hmac
+import hashlib
+import json
 # AÑADIR después de: import uuid
 from urllib.parse import quote
 # Intento seguro de importar dependencias externas; si faltan, mostrar instrucciones claras y salir.
@@ -25,6 +27,8 @@ except Exception as e:
 from db import db
 from db_supabase import get_connection_auth, get_connection_tienda
 from services.inventario import devolver_stock_venta
+from services.pagos import confirmar_pago, registrar_evento
+from services.pasarela import EstadoPago, PagoResultado, crear_pasarela
 from sqlalchemy import text
 
 load_dotenv()
@@ -3254,6 +3258,114 @@ def carrito_confirmar_v2():
         conn.rollback()
         app.logger.exception("Error carrito_confirmar_v2")
         return {'ok': False, 'error': 'No se pudo confirmar el pedido. Intenta de nuevo más tarde.'}, 500
+    finally:
+        conn.close()
+
+
+# ── Webhook de la pasarela (Fase 2.1, Tramo 2) ──────────────────
+# ÚNICA ruta exenta de CSRF: no está en _CSRF_PROTEGIDAS porque la llama
+# la pasarela (no el navegador) y se autentica con la firma HMAC del
+# secreto PAGO_SIMULADA_WEBHOOK_SECRETO, verificada en tiempo constante
+# dentro de la pasarela. Excepción documentada y única.
+# crear_pasarela() falla al ARRANCAR si falta el secreto, si es el de
+# ejemplo o si PAGO_MODO no es 'simulado' (validación en registro.py).
+_PASARELA = crear_pasarela()
+
+
+@app.route('/webhooks/pago/<proveedor>', methods=['POST'])
+def webhook_pago(proveedor):
+    """Notificaciones del proveedor configurado (nunca de nombres de URL).
+
+    Flujo en UNA transacción por petición: verificar firma -> reclamar el
+    evento (idempotencia por id de evento en pago_evento) -> registrar
+    rechazados sin tocar el pago -> confirmar_pago (única puerta a
+    'confirmado'). Solo POST: nunca se escribe en un GET.
+    """
+    if proveedor != _PASARELA.nombre:
+        abort(404)
+    payload = request.get_data()
+    ev = _PASARELA.procesar_webhook(payload, request.headers)
+    id_evento = ev.id_evento or ('sin-id-' + hashlib.sha256(payload).hexdigest()[:24])
+
+    conn = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        id_pago = None
+        if ev.id_pago_proveedor:
+            cursor.execute(
+                "SELECT id_pago FROM pago WHERE id_transaccion = %s LIMIT 1",
+                (ev.id_pago_proveedor,))
+            fila = cursor.fetchone()
+            id_pago = fila['id_pago'] if fila else None
+
+        detalle = {'tipo': str(ev.detalle_sin_sensibles.get('tipo') or ''),
+                   'fuente': 'webhook'}
+        id_pago_evento = registrar_evento(
+            cursor, proveedor, id_evento, detalle['tipo'] or 'evento', id_pago,
+            ev.estado.value if ev.estado else None,
+            ev.firma_valida, not ev.fuera_de_tiempo, detalle)
+
+        if id_pago_evento is None:
+            # Evento ya registrado: solo se reanuda si antes fue rechazado
+            # por firma o quedó sin procesar (p. ej. bloqueado); si ya se
+            # procesó, es un reenvío y no se reprocesa nada.
+            cursor.execute("""SELECT id_pago_evento, firma_valida, procesado_en
+                                FROM pago_evento
+                               WHERE proveedor = %s AND id_evento_proveedor = %s""",
+                           (proveedor, id_evento))
+            previo = cursor.fetchone()
+            reanudar = (ev.firma_valida and not ev.fuera_de_tiempo
+                        and previo
+                        and (not previo['firma_valida'] or previo['procesado_en'] is None))
+            if reanudar:
+                cursor.execute("""UPDATE pago_evento
+                                     SET firma_valida = TRUE,
+                                         dentro_de_tolerancia = %s,
+                                         estado_resultante = %s,
+                                         id_pago = %s,
+                                         detalle = %s,
+                                         procesado_en = NULL
+                                   WHERE id_pago_evento = %s""",
+                               (not ev.fuera_de_tiempo,
+                                ev.estado.value if ev.estado else None,
+                                id_pago, json.dumps(detalle, ensure_ascii=False),
+                                previo['id_pago_evento']))
+                id_pago_evento = previo['id_pago_evento']
+            else:
+                conn.commit()
+                return {'ok': True, 'estado': 'repetido'}, 200
+
+        if not ev.firma_valida:
+            conn.commit()
+            return {'ok': False, 'error': 'firma inválida'}, 400
+        if ev.fuera_de_tiempo:
+            conn.commit()
+            return {'ok': False, 'error': 'evento fuera de tolerancia'}, 400
+        if ev.estado is None or ev.estado is EstadoPago.DESCONOCIDO:
+            # 'desconocido' JAMAS se escribe en pago.estado (regla D7).
+            conn.commit()
+            return {'ok': True, 'estado': 'ignorado'}, 200
+        if id_pago is None:
+            conn.commit()
+            return {'ok': True, 'estado': 'sin_pago_asociado'}, 200
+
+        resultado = PagoResultado(id_pago_proveedor=ev.id_pago_proveedor,
+                                  estado=ev.estado, monto=ev.monto)
+        res = confirmar_pago(id_pago, resultado, conn=conn, fuente='webhook',
+                             id_pago_evento=id_pago_evento)
+        conn.commit()
+        codigo = 200
+        if res['estado'] == 'bloqueado':
+            # El proveedor debe reintentar el mismo evento: quedó sin
+            # procesar (procesado_en NULL) y la reanudación lo retomará.
+            codigo = 503
+        return {'ok': res['estado'] in ('confirmado', 'ya_confirmado',
+                                       'rechazado', 'ya_rechazado'),
+                'estado': res['estado'], 'motivo': res.get('motivo')}, codigo
+    except Exception:
+        conn.rollback()
+        app.logger.exception("Error procesando webhook de pago")
+        return {'ok': False, 'error': 'error interno'}, 500
     finally:
         conn.close()
 
