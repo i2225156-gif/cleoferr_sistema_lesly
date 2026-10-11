@@ -14,6 +14,14 @@
 --   "precio vigente" (descuentos activos) REQUIERE este script
 --   ejecutado (tabla oferta + columnas de detalle_venta).
 --
+-- CORRECCIONES (2026-10-11):
+--   * Trigger: valida solo en INSERT o cuando cambian tipo / valor /
+--     id_producto (antes re-validaba en CADA UPDATE y podia bloquear
+--     desactivar o re-fechar una oferta legitima si el precio del
+--     producto cambio despues de crearla).
+--   * Alternativa sin gist: PostgreSQL NO admite constraint UNIQUE
+--     parcial (UNIQUE ... WHERE); se define como INDICE unico parcial.
+--
 -- VERIFICACIONES PREVIAS HECHAS EL 2026-10-11 (solo lectura):
 --   * btree_gist DISPONIBLE (pg_available_extensions, v1.7, no instalada)
 --     y el esquema 'extensions' existe -> la exclusion gist resuelve:
@@ -76,7 +84,15 @@ AS $fn$
 DECLARE
     precio_producto NUMERIC(12,2);
 BEGIN
-    IF NEW.tipo = 'precio_fijo' THEN
+    -- CORRECCION (2026-10-11): validar solo cuando cambian los campos
+    -- validables. Asi una mera desactivacion, reactivacion o re-fechado
+    -- no falla si el precio del producto cambio despues de crearse la
+    -- oferta (la oferta se congelo con el precio del momento).
+    IF NEW.tipo = 'precio_fijo'
+       AND (TG_OP = 'INSERT'
+            OR NEW.tipo IS DISTINCT FROM OLD.tipo
+            OR NEW.valor IS DISTINCT FROM OLD.valor
+            OR NEW.id_producto IS DISTINCT FROM OLD.id_producto) THEN
         SELECT p.precio INTO precio_producto
           FROM public.producto p
          WHERE p.id_producto = NEW.id_producto;
@@ -122,20 +138,15 @@ END
 $ex$;
 
 -- ALTERNATIVA (usar SOLO si el paso 1 fallara por permisos de la
--- extension; es MAS estricta: una sola oferta activa por producto):
---   Comentar el bloque anterior y descomentar:
---   DO $alt$
---   BEGIN
---       IF NOT EXISTS (SELECT 1 FROM pg_constraint
---                       WHERE conname = 'uq_oferta_producto_activa') THEN
---           ALTER TABLE public.oferta
---               ADD CONSTRAINT uq_oferta_producto_activa
---               UNIQUE (id_producto) WHERE (activa);
---       END IF;
---   END
---   $alt$;
+-- extension; es MAS estricta: una sola oferta activa por producto).
+-- CORRECCION (2026-10-11): PostgreSQL NO soporta constraint UNIQUE
+-- parcial (UNIQUE ... WHERE); se implementa como INDICE unico parcial:
+--   Comentar el bloque anterior y ejecutar:
+--   CREATE UNIQUE INDEX IF NOT EXISTS uq_oferta_producto_activa
+--       ON public.oferta (id_producto) WHERE (activa);
 --   (La validacion de rangos queda en el codigo de la app con
---    SELECT ... FOR UPDATE sobre las ofertas activas del producto.)
+--    SELECT ... FOR UPDATE sobre las ofertas activas del producto.
+--    Reversion de la alternativa: DROP INDEX IF EXISTS uq_oferta_producto_activa;)
 
 -- 5) Indices de consulta (btree: mas baratos que el gist para igualdad).
 CREATE INDEX IF NOT EXISTS idx_oferta_producto_activa
