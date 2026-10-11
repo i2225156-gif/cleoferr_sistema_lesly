@@ -190,6 +190,7 @@ _CSRF_PROTEGIDAS = {
     'recuperar_contrasena', 'restablecer_contrasena', 'cambiar_clave',
     'carrito_confirmar_v2', 'carrito_agregar',
     'registrar_pos',
+    'pedido_cambiar_estado',
 }
 
 

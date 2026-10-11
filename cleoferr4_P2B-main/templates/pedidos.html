@@ -120,6 +120,7 @@
                                         <option value="{{ e }}" {% if ped.estado == e %}selected{% endif %}>{{ e|capitalize }}</option>
                                         {% endfor %}
                                     </select>
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                                 </form>
                                 {% endif %}
                                 {% if ped.url_whatsapp_pedido %}

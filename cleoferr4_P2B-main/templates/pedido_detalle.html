@@ -111,6 +111,7 @@
             {% for fase in fases_orden %}
             <form method="POST" action="/pedidos/{{ pedido.id_venta }}/estado" style="display:inline">
                 <input type="hidden" name="estado" value="{{ fase }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <button type="submit" class="btn-fase {% if pedido.estado == fase %}activo{% endif %}">
                     {% if fase == 'pendiente' %}<i class="fa fa-clock me-1"></i>
                     {% elif fase == 'confirmado' %}<i class="fa fa-check-circle me-1"></i>
