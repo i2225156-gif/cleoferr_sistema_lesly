@@ -24,6 +24,7 @@ except Exception as e:
 
 from db import db
 from db_supabase import get_connection_auth, get_connection_tienda
+from services.inventario import devolver_stock_venta
 from sqlalchemy import text
 
 load_dotenv()
@@ -2920,11 +2921,24 @@ def pedido_cambiar_estado(id):
     conn   = get_connection_tienda()
     cursor = conn.cursor()
     try:
-        cursor.execute("""
-            UPDATE venta
-            SET id_estado_venta = (SELECT id_estado_venta FROM estado_venta WHERE nombre = %s)
-            WHERE id_venta = %s
-        """, (nuevo_estado, id))
+        if nuevo_estado == 'cancelado':
+            # B2: solo si la venta NO estaba ya cancelada se devuelve el stock
+            # (idempotente: la condición del UPDATE + la marca del movimiento).
+            cursor.execute("""
+                UPDATE venta
+                SET id_estado_venta = (SELECT id_estado_venta FROM estado_venta WHERE nombre = 'cancelado')
+                WHERE id_venta = %s
+                  AND id_estado_venta <> (SELECT id_estado_venta FROM estado_venta WHERE nombre = 'cancelado')
+                RETURNING id_venta
+            """, (id,))
+            if cursor.fetchone():
+                devolver_stock_venta(cursor, id)
+        else:
+            cursor.execute("""
+                UPDATE venta
+                SET id_estado_venta = (SELECT id_estado_venta FROM estado_venta WHERE nombre = %s)
+                WHERE id_venta = %s
+            """, (nuevo_estado, id))
         conn.commit()
         if is_ajax:
             return {'ok': True, 'estado': nuevo_estado,
