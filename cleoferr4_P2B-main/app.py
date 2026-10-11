@@ -873,7 +873,23 @@ def actualizar_producto(id):
 @login_required
 @admin_required
 def eliminar_producto(id):
+    # Regla del alcance (§6.3): no eliminar físicamente un producto con
+    # historial (ventas/pedidos o movimientos de inventario); priorizar la
+    # desactivación, que se hace desde Editar (estado -> inactivo).
     producto = db.get_or_404(Producto, id)
+    ventas = db.session.execute(
+        text("SELECT COUNT(*) FROM detalle_venta WHERE id_producto = :id"),
+        {"id": id}).scalar()
+    movimientos = db.session.execute(
+        text("SELECT COUNT(*) FROM inventario_movimiento WHERE id_producto = :id"),
+        {"id": id}).scalar()
+    if ventas or movimientos:
+        cantidad = ventas if ventas else movimientos
+        motivo = ("ventas o pedidos" if ventas else "movimientos de inventario")
+        flash(f"No se puede eliminar: el producto tiene {cantidad} "
+              f"{motivo} asociados. Desactívalo desde Editar para retirarlo "
+              "del catálogo sin perder el historial.", "danger")
+        return redirect(url_for('productos'))
     db.session.delete(producto)
     db.session.commit()
     flash("Producto eliminado correctamente.", "success")
