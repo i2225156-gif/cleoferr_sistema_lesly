@@ -34,7 +34,7 @@ def test_simulada_ok(monkeypatch):
     monkeypatch.setenv("PAGO_WEBHOOK_TOLERANCIA_SEG", "300")
     p = crear_pasarela()
     assert p.nombre == "simulada"
-    assert p.modo == "demo"
+    assert p.modo == "simulado"
 
 
 def test_culqi_sin_credenciales_lanza_runtimeerror(monkeypatch):

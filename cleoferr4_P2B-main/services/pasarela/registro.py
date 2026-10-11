@@ -35,7 +35,12 @@ def crear_pasarela(nombre=None):
                 "(python -c \"import secrets; print(secrets.token_hex(32))\")."
             )
         tolerancia = int(os.environ.get("PAGO_WEBHOOK_TOLERANCIA_SEG", "300"))
-        modo = os.environ.get("PAGO_MODO", "demo")
+        modo = os.environ.get("PAGO_MODO", "simulado")
+        if modo != "simulado":
+            raise RuntimeError(
+                f"PAGO_MODO inválido: '{modo}'. Único valor válido: 'simulado' "
+                "(corrígelo en el .env del proyecto)."
+            )
         return PasarelaSimulada(secreto_webhook=secreto,
                                 tolerancia_seg=tolerancia, modo=modo)
     if proveedor == "culqi":
