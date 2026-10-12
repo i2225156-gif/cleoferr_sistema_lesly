@@ -31,6 +31,8 @@ from services.comprobantes import (EMISOR, UMBRAL_BOLETA_SIN_DOC,
                                     ruc_valido_para_factura,
                                     siguiente_numero as _siguiente_numero_comprobante,
                                     texto_qr)
+from services.documentos import (NOMBRES_TIPO, normalizar_numero,
+                                 tipo_documento_de_cliente, validar_documento)
 from services.inventario import devolver_stock_venta
 from services.reservas import liberar_reservas_vencidas, preview_reservas_vencidas
 from services.pagos import (cancelar_pedido_con_pago_inicial, confirmar_pago,
@@ -1104,6 +1106,14 @@ def registrar_pos():
             WHERE id_tipo_documento = %s AND nro_documento = %s
         """, (id_tipo_doc, doc))
         existente = cursor.fetchone()
+        # Buscar el id del tipo de documento POR NOMBRE (no por id).
+        cursor.execute("""
+            SELECT id_tipo_documento FROM tipo_documento
+             WHERE LOWER(TRIM(nombre)) = %s
+        """, (tipo_doc_nombre,))
+        fila_td = cursor.fetchone()
+        _id_tipo_doc = fila_td['id_tipo_documento'] if fila_td else 1
+
         if existente:
             if telefono and not (existente.get('telefono') or '').strip():
                 cursor.execute(
@@ -2488,6 +2498,12 @@ def registro_cliente():
     contrasena = request.form.get('contrasena', '')
     confirmar  = request.form.get('confirmar', '')
 
+    # Documento de identidad OBLIGATORIO desde ahora (normalizado:
+    # sin espacios, mayúsculas). El nombre es editable por el usuario
+    # (marcado "no verificado" hasta cruzarlo con la API de DNI).
+    tipo_doc_nombre = (request.form.get('tipo_documento') or '').strip().lower()
+    nro_documento   = normalizar_numero(request.form.get('nro_documento', ''))
+
     if not nombre or not correo or not contrasena:
         return render_template('login_cliente.html',
                                error='Nombre, correo y contrasena son obligatorios.',
@@ -2496,6 +2512,10 @@ def registro_cliente():
         return render_template('login_cliente.html',
                                error='La dirección es obligatoria para registrarte (mínimo 5 caracteres).',
                                registro_activo=True)
+    doc_ok, doc_msg = validar_documento(tipo_doc_nombre, nro_documento)
+    if not doc_ok:
+        return render_template('login_cliente.html',
+                               error=doc_msg, registro_activo=True)
     if contrasena != confirmar:
         return render_template('login_cliente.html',
                                error='Las contrasenas no coinciden.',
@@ -2545,9 +2565,11 @@ def registro_cliente():
             # sin contrasena: se reutiliza la fila y se vuelve a verificar.
             id_cliente = existente['id_cliente']
             cursor.execute("""
-                UPDATE cliente SET nombre=%s, apellido=%s, telefono=%s, contrasena=%s, direccion=%s
+                UPDATE cliente SET nombre=%s, apellido=%s, telefono=%s, contrasena=%s,
+                       direccion=%s, id_tipo_documento=%s, nro_documento=%s
                 WHERE id_cliente=%s
-            """, (nombre, apellido, telefono or None, hash_pw, direccion, id_cliente))
+            """, (nombre, apellido, telefono or None, hash_pw, direccion,
+                  _id_tipo_doc, nro_documento or None, id_cliente))
         else:
             # id_tipo_documento=1 (DNI) y nro_documento NULL por defecto;
             # el formulario web no pide documento todavía.
@@ -2556,9 +2578,10 @@ def registro_cliente():
             cursor.execute("""
                 INSERT INTO cliente (nombre, apellido, email, telefono, contrasena,
                                      id_tipo_documento, nro_documento, direccion, activo)
-                VALUES (%s, %s, %s, %s, %s, 1, NULL, %s, FALSE)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, FALSE)
                 RETURNING id_cliente
-            """, (nombre, apellido, correo, telefono or None, hash_pw, direccion))
+            """, (nombre, apellido, correo, telefono or None, hash_pw,
+                  _id_tipo_doc, nro_documento or None, direccion))
             id_cliente = cursor.fetchone()['id_cliente']
 
         # Invalidar codigos anteriores y guardar el nuevo (solo el hash)

@@ -272,6 +272,27 @@
                                placeholder="9XXXXXXXX" maxlength="15" style="padding-left:38px">
                     </div>
                 </div>
+                <div class="form-row-2 mb-3">
+                    <div>
+                        <label class="form-label">Tipo de documento *</label>
+                        <select name="tipo_documento" class="form-control" required>
+                            <option value="dni" selected>DNI</option>
+                            <option value="ruc">RUC</option>
+                            <option value="ce">Carné de Extranjería</option>
+                            <option value="pasaporte">Pasaporte</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="form-label">Número de documento *</label>
+                        <input type="text" name="nro_documento" class="form-control"
+                               placeholder="Ej: 12345678" required maxlength="20">
+                    </div>
+                </div>
+                <div style="font-size:0.72rem;color:#888;margin:-8px 0 12px">
+                    <i class="fa fa-info-circle me-1"></i>Tus datos no se verifican
+                    contra registros oficiales en el registro; puedes corregirlos
+                    luego desde tu perfil.
+                </div>
                 <div class="mb-3">
                     <label class="form-label">Dirección *</label>
                     <div class="input-group-custom">
