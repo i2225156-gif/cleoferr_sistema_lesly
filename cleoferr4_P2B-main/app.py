@@ -209,6 +209,7 @@ _CSRF_PROTEGIDAS = {
     'pago_simulado_procesar',
     'admin_pagos_disparar',
     'admin_reservas_liberar',
+    'perfil_actualizar_documento',
 }
 
 
@@ -3766,6 +3767,90 @@ def admin_pagos_disparar():
     else:
         flash(f"Evento simulado no aplicado: {respuesta.get('error') or respuesta.get('motivo') or est}.", 'warning')
     return redirect(url_for('admin_pagos_simulados'))
+
+
+# -- Perfil del cliente (documento de identidad) ----------------
+@app.route('/perfil')
+@login_required
+def perfil():
+    """Perfil del cliente: ver y corregir su documento de identidad.
+
+    GET solo lectura; POST actualiza el documento con validación.
+    Aviso de snapshot: los comprobantes ya emitidos NO cambian.
+    """
+    if session.get('rol') != 'cliente':
+        return redirect(url_for('pedidos'))
+    conn = get_connection_auth()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("""
+            SELECT c.nombre, c.apellido, c.email, c.direccion, c.telefono,
+                   LOWER(TRIM(td.nombre)) AS tipo_doc, c.nro_documento
+              FROM cliente c
+              LEFT JOIN tipo_documento td ON td.id_tipo_documento = c.id_tipo_documento
+             WHERE c.id_cliente = %s
+        """, (session['usuario_id'],))
+        fila = cursor.fetchone()
+        if not fila:
+            flash('No se pudo cargar tu perfil.', 'danger')
+            return redirect(url_for('mis_pedidos'))
+        doc_actual = {
+            'tipo': fila['tipo_doc'] or '',
+            'numero': normalizar_numero(fila['nro_documento']) if fila['nro_documento'] else None,
+        }
+        cliente = {
+            'nombre': fila['nombre'], 'apellido': fila['apellido'],
+            'email': fila['email'], 'direccion': fila['direccion'],
+            'telefono': fila['telefono'],
+        }
+    finally:
+        conn.close()
+    from services.comprobantes import UMBRAL_BOLETA_SIN_DOC
+    return render_template('perfil.html', cliente=cliente, doc_actual=doc_actual,
+                           umbral_sin_doc=int(UMBRAL_BOLETA_SIN_DOC))
+
+
+@app.route('/perfil', methods=['POST'])
+@login_required
+def perfil_actualizar_documento():
+    """Actualiza el documento de identidad del cliente (validado + normalizado)."""
+    if session.get('rol') != 'cliente':
+        return redirect(url_for('pedidos'))
+    tipo_doc_nombre = (request.form.get('tipo_documento') or '').strip().lower()
+    nro_documento   = normalizar_numero(request.form.get('nro_documento', ''))
+    ok, msg = validar_documento(tipo_doc_nombre, nro_documento)
+    if not ok:
+        flash(msg, 'danger')
+        return redirect(url_for('perfil'))
+    conn = get_connection_auth()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("""
+            SELECT id_tipo_documento FROM tipo_documento
+             WHERE LOWER(TRIM(nombre)) = %s
+        """, (tipo_doc_nombre,))
+        fila_td = cursor.fetchone()
+        if not fila_td:
+            flash('Tipo de documento no encontrado.', 'danger')
+            return redirect(url_for('perfil'))
+        id_tipo_doc = fila_td['id_tipo_documento']
+        try:
+            cursor.execute("""
+                UPDATE cliente SET id_tipo_documento=%s, nro_documento=%s
+                 WHERE id_cliente=%s
+            """, (id_tipo_doc, nro_documento, session['usuario_id']))
+            conn.commit()
+            flash('Documento actualizado correctamente.', 'success')
+        except Exception as e:
+            conn.rollback()
+            if 'uq_cliente_documento' in str(e):
+                flash('Ese documento ya está registrado por otro cliente.', 'danger')
+            else:
+                app.logger.exception("Error actualizando documento del cliente")
+                flash('No se pudo actualizar el documento.', 'danger')
+    finally:
+        conn.close()
+    return redirect(url_for('perfil'))
 
 
 # ── Reservas de stock vencidas (Fase C) ─────────────────────────
