@@ -337,6 +337,7 @@
 </head>
 <body>
 
+{% block navbar %}
 <nav class="navbar navbar-cleoferr navbar-expand-lg">
   <div class="container-fluid">
     <a class="navbar-brand-custom" href="{% if session.rol == 'cliente' %}/catalogo{% else %}/productos{% endif %}">
@@ -390,6 +391,7 @@
         {% endif %}
     </div>
 </nav>
+{% endblock %}
 
 <div class="container-fluid px-4 py-3">
 
