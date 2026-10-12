@@ -529,14 +529,14 @@ def exportar_pedidos_excel():
         # Consulta 1 (Tienda): ventas con total, sin joins cross-BD
         conn   = get_connection_tienda()
         cursor = conn.cursor(dictionary=True)
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT v.id_venta,
                    v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima' AS fecha,
                    v.id_cliente,
                    ev.nombre AS estado,
                    tv.nombre AS tipo_venta,
                    v.id_usuario_vendedor,
-                   COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS total
+                   COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='d.')}), 0) AS total
             FROM venta v
             LEFT JOIN estado_venta ev ON v.id_estado_venta = ev.id_estado_venta
             LEFT JOIN tipo_venta tv ON v.id_tipo_venta = tv.id_tipo_venta
@@ -795,13 +795,13 @@ def exportar_ventas_dia_excel():
     conn = get_connection_tienda(); cursor = conn.cursor(dictionary=True)
     try:
         # Consulta 1 (Tienda): ventas del día (hora Perú) sin join a cliente
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT v.id_venta,
                    v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima' AS fecha,
                    v.id_cliente,
                    ev.nombre AS estado,
                    tv.nombre AS tipo_venta,
-                   COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS total
+                   COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='d.')}), 0) AS total
             FROM venta v
             LEFT JOIN estado_venta ev ON v.id_estado_venta = ev.id_estado_venta
             LEFT JOIN tipo_venta tv ON v.id_tipo_venta = tv.id_tipo_venta
@@ -1456,7 +1456,7 @@ def pedidos():
     PASOS = [e for e in lista_estados if e != 'cancelado']
     try:
         # Consulta 1 (Tienda): ventas + total, sin joins cross-BD
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT
                 v.id_venta      AS id_pedido,
                 v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima' AS fecha,
@@ -1464,7 +1464,7 @@ def pedidos():
                 ev.nombre    AS estado,
                 v.id_cliente,
                 v.id_usuario_vendedor,
-                COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS total
+                COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='d.')}), 0) AS total
             FROM venta v
             LEFT JOIN tipo_venta tv ON v.id_tipo_venta = tv.id_tipo_venta
             LEFT JOIN estado_venta ev ON v.id_estado_venta = ev.id_estado_venta
@@ -1660,10 +1660,10 @@ def venta_nueva_guardar():
                 INSERT INTO pago (id_venta, id_tipo_pago, id_caja, estado)
                 VALUES (%s, (SELECT id_tipo_pago FROM tipo_pago WHERE nombre = %s), %s, 'confirmado')
             """, (id_venta, metodo_db, caja_activa['id_caja']))
-            cursor.execute("""
+            cursor.execute(f"""
                 INSERT INTO movimiento_caja (id_caja, tipo, monto, concepto, id_usuario)
                 SELECT %s, 'ingreso',
-                       COALESCE(SUM(cantidad * precio_unitario), 0), %s, %s
+                       COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='')}), 0), %s, %s
                 FROM detalle_venta WHERE id_venta = %s
             """, (caja_activa['id_caja'], f'Venta local #{id_venta}',
                   session.get('usuario_id'), id_venta))
@@ -1682,8 +1682,8 @@ def venta_nueva_guardar():
                 doc_cliente = None
             num_comp = _siguiente_numero_comprobante(cursor, tipo_comp_db)
             # Totales calculados a partir del detalle (precios con IGV 18% incluido)
-            cursor.execute("""
-                SELECT COALESCE(SUM(cantidad * precio_unitario), 0) AS total
+            cursor.execute(f"""
+                SELECT COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='')}), 0) AS total
                 FROM detalle_venta WHERE id_venta = %s
             """, (id_venta,))
             _total        = round(float(cursor.fetchone()['total'] or 0), 2)
@@ -1769,9 +1769,9 @@ def caja():
         caja_ids = ([caja_abierta['id_caja']] if caja_abierta else []) \
                  + [h['id_caja'] for h in historial]
         if caja_ids:
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT p.id_caja, tp.nombre AS metodo,
-                       COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS total
+                       COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='d.')}), 0) AS total
                 FROM pago p
                 JOIN venta v       ON v.id_venta = p.id_venta
                 JOIN tipo_venta tv ON v.id_tipo_venta = tv.id_tipo_venta
@@ -1961,8 +1961,8 @@ def caja_cerrar():
         fondo   = float(caja.get('monto_apertura') or 0)
 
         # Ventas LOCALES pagadas en EFECTIVO (el único dinero físico que entra)
-        cursor.execute("""
-            SELECT COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS total
+        cursor.execute(f"""
+            SELECT COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='d.')}), 0) AS total
             FROM pago p
             JOIN venta v       ON v.id_venta = p.id_venta
             JOIN tipo_venta tv ON v.id_tipo_venta = tv.id_tipo_venta
@@ -1984,8 +1984,8 @@ def caja_cerrar():
         diferencia = declarado - esperado
 
         # Pagos DIGITALES del turno (resumen informativo; NO afectan el efectivo)
-        cursor.execute("""
-            SELECT tp.nombre AS metodo, COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS total
+        cursor.execute(f"""
+            SELECT tp.nombre AS metodo, COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='d.')}), 0) AS total
             FROM pago p
             JOIN venta v       ON v.id_venta = p.id_venta
             JOIN tipo_venta tv ON v.id_tipo_venta = tv.id_tipo_venta
@@ -2044,12 +2044,12 @@ def pedido_detalle(id):
     comprobante = None
     try:
         # Consulta 1 (Tienda): venta + total
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT
                 v.*,
                 ev.nombre AS estado,
                 tv.nombre AS tipo_venta,
-                COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS total
+                COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='d.')}), 0) AS total
             FROM venta v
             LEFT JOIN estado_venta ev ON v.id_estado_venta = ev.id_estado_venta
             LEFT JOIN tipo_venta tv ON v.id_tipo_venta = tv.id_tipo_venta
@@ -2079,8 +2079,10 @@ def pedido_detalle(id):
                 usr = cursor_a.fetchone()
                 pedido['responsable'] = usr['nombres'] if usr else None
             conn_a.close()
-        cursor.execute("""
-            SELECT d.*, p.nombre AS producto_nombre
+        cursor.execute(f"""
+            SELECT d.*, p.nombre AS producto_nombre,
+                   (d.precio_unitario - d.descuento_unitario) AS precio_final,
+                   ROUND({SQL_IMPORTE_LINEA.format(p='d.')}, 2) AS importe
             FROM detalle_venta d
             LEFT JOIN producto p ON d.id_producto = p.id_producto
             WHERE d.id_venta = %s
@@ -2310,8 +2312,8 @@ def mis_comprobantes():
 
 # Criterio del alcance (§6.9): solo cuentan como vendidas las ventas con pago
 # CONFIRMADO (uq_pago_venta garantiza un único pago por venta: JOIN directo).
-SQL_VENTAS_HOY_PAGADAS = """
-    SELECT COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS ventas_hoy
+SQL_VENTAS_HOY_PAGADAS = f"""
+    SELECT COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='d.')}), 0) AS ventas_hoy
     FROM venta v
     JOIN pago pg ON pg.id_venta = v.id_venta AND pg.estado = 'confirmado'
     JOIN detalle_venta d ON d.id_venta = v.id_venta
@@ -3373,11 +3375,11 @@ def mis_pedidos():
         fases_orden = [r['nombre'] for r in cursor.fetchall()]
         fases_orden = [f for f in fases_orden if f != 'cancelado']
         PASOS = fases_orden
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT v.id_venta,
                    v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima' AS fecha,
                    ev.nombre AS estado,
-                   COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS total
+                   COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='d.')}), 0) AS total
             FROM venta v
             LEFT JOIN estado_venta ev ON v.id_estado_venta = ev.id_estado_venta
             LEFT JOIN detalle_venta d ON v.id_venta = d.id_venta
@@ -3391,8 +3393,11 @@ def mis_pedidos():
             estado = ped.get('estado') or 'pendiente'
             ped['idx_actual'] = PASOS.index(estado) if estado in PASOS else 0
             try:
-                cursor.execute("""
-                    SELECT d.cantidad, d.precio_unitario, p.nombre AS producto_nombre
+                cursor.execute(f"""
+                    SELECT d.cantidad, d.precio_unitario, d.descuento_unitario,
+                           (d.precio_unitario - d.descuento_unitario) AS precio_final,
+                           ROUND({SQL_IMPORTE_LINEA.format(p='d.')}, 2) AS importe,
+                           p.nombre AS producto_nombre
                     FROM detalle_venta d
                     LEFT JOIN producto p ON d.id_producto = p.id_producto
                     WHERE d.id_venta = %s
@@ -4404,8 +4409,8 @@ def admin_dashboard():
     cursor = conn.cursor(dictionary=True)
     try:
         kpis = {}
-        cursor.execute("""
-            SELECT COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS ventas_hoy
+        cursor.execute(f"""
+            SELECT COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='d.')}), 0) AS ventas_hoy
               FROM venta v
               JOIN pago pg ON pg.id_venta = v.id_venta AND pg.estado = 'confirmado'
               JOIN detalle_venta d ON d.id_venta = v.id_venta
@@ -4438,9 +4443,9 @@ def admin_dashboard():
         """)
         kpis['stock_bajo'] = int(cursor.fetchone()['stock_bajo'])
 
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT COALESCE(
-                       SUM(d.cantidad * d.precio_unitario) / NULLIF(COUNT(DISTINCT v.id_venta), 0),
+                       SUM({SQL_IMPORTE_LINEA.format(p='d.')}) / NULLIF(COUNT(DISTINCT v.id_venta), 0),
                        0) AS ticket_promedio
               FROM venta v
               JOIN pago pg ON pg.id_venta = v.id_venta AND pg.estado = 'confirmado'
@@ -4459,7 +4464,7 @@ def admin_dashboard():
         kpis['comprobantes_emitidos'] = int(fila_comp['emitidos'])
         kpis['comprobantes_pendientes'] = int(fila_comp['pendientes'])
 
-        cursor.execute("""
+        cursor.execute(f"""
             WITH dias AS (
                 SELECT (d::date) AS dia
                   FROM generate_series(
@@ -4470,7 +4475,7 @@ def admin_dashboard():
             ),
             ventas_dia AS (
                 SELECT DATE(v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima') AS dia,
-                       COALESCE(SUM(det.cantidad * det.precio_unitario), 0) AS total
+                       COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='det.')}), 0) AS total
                   FROM venta v
                   JOIN pago pg ON pg.id_venta = v.id_venta AND pg.estado = 'confirmado'
                   JOIN detalle_venta det ON det.id_venta = v.id_venta

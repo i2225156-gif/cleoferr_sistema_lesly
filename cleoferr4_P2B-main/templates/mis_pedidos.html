@@ -145,7 +145,8 @@
             {% for it in ped.get('items') %}
             <div class="item-row">
                 <span>{{ it.producto_nombre or '–' }} × {{ it.cantidad }}</span>
-                <span class="fw-semibold">S/ {{ "%.2f"|format((it.precio_unitario or 0)|float * (it.cantidad or 1)|float) }}</span>
+                {# Importe NETO por línea (con dcto congelado), calculado por el servidor #}
+                <span class="fw-semibold">S/ {{ "%.2f"|format(it.importe|float) }}</span>
             </div>
             {% endfor %}
         </div>
