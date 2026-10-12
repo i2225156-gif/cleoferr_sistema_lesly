@@ -1,7 +1,8 @@
-"""Módulo admin unificado (C2a+C2b+C2c): sidebar único; hijas migradas:
+"""Módulo admin unificado (C2a..C2d): sidebar único; hijas migradas:
 dashboard/pedidos/pedido_detalle/ofertas (C2a),
-productos/producto_form/producto_detalle/inventario/alertas (C2b) y
-admin_pagos_simulados/admin_reservas (C2c, rutas solo admin).
+productos/producto_form/producto_detalle/inventario/alertas (C2b),
+admin_pagos_simulados/admin_reservas (C2c, rutas solo admin) y
+clientes/cliente_form/proveedores/proveedor_form/reportes (C2d).
 
 Contra la BD real con conexión proxied (rollback): nada persiste. Por
 plantilla migrada verifica: 200 para admin y vendedor (donde el rol lo
@@ -259,3 +260,87 @@ def test_reservas_admin_con_sidebar_y_activo(fx):
 def test_reservas_vendedor_bloqueado(fx):
     # Ruta solo admin (admin_required): el vendedor recibe redirect, no 200
     assert fx['vendedor'].get('/admin/reservas').status_code == 302
+
+
+# ── C2d: Clientes (listado y formulario; admin y vendedor) ────────
+
+def test_clientes_admin_con_sidebar_y_activo(fx):
+    r = fx['admin'].get('/clientes')
+    assert r.status_code == 200
+    html = r.get_data(as_text=True)
+    assert 'href="/clientes" class="sidebar-item activo"' in html
+    assert 'navbar navbar-cleoferr navbar-expand-lg' not in html
+    assert 'REGISTRO DE USUARIO' in html          # contenido de la hija vivo
+
+
+def test_clientes_vendedor_sin_items_solo_admin(fx):
+    r = fx['vendedor'].get('/clientes')
+    assert r.status_code == 200
+    html = r.get_data(as_text=True)
+    assert 'href="/clientes" class="sidebar-item activo"' in html
+    # Ocultos para vendedor (permiso real en backend igualmente)
+    assert '/admin/dashboard' not in html
+    assert '/admin/pagos_simulados' not in html
+    assert '/admin/reservas' not in html
+
+
+def test_cliente_form_con_sidebar_y_activo(fx):
+    r = fx['admin'].get('/clientes/nuevo')
+    assert r.status_code == 200
+    html = r.get_data(as_text=True)
+    assert 'href="/clientes" class="sidebar-item activo"' in html
+    assert 'navbar navbar-cleoferr navbar-expand-lg' not in html
+    assert 'Nuevo Cliente' in html
+    assert 'consultarDoc' in html                  # JS de validaciones vivo
+
+
+# ── C2d: Proveedores (listado y formulario; admin y vendedor) ─────
+
+def test_proveedores_admin_con_sidebar_y_activo(fx):
+    r = fx['admin'].get('/proveedores')
+    assert r.status_code == 200
+    html = r.get_data(as_text=True)
+    assert 'href="/proveedores" class="sidebar-item activo"' in html
+    assert 'navbar navbar-cleoferr navbar-expand-lg' not in html
+    assert 'PROVEEDORES' in html                  # contenido de la hija vivo
+
+
+def test_proveedores_vendedor_sin_items_solo_admin(fx):
+    r = fx['vendedor'].get('/proveedores')
+    assert r.status_code == 200
+    html = r.get_data(as_text=True)
+    assert 'href="/proveedores" class="sidebar-item activo"' in html
+    assert '/admin/dashboard' not in html
+    assert '/admin/pagos_simulados' not in html
+    assert '/admin/reservas' not in html
+
+
+def test_proveedor_form_con_sidebar_y_activo(fx):
+    r = fx['admin'].get('/proveedores/nuevo')
+    assert r.status_code == 200
+    html = r.get_data(as_text=True)
+    assert 'href="/proveedores" class="sidebar-item activo"' in html
+    assert 'navbar navbar-cleoferr navbar-expand-lg' not in html
+    assert 'Nuevo Proveedor' in html
+    assert 'campoTelProv' in html                  # JS de validacion vivo
+
+
+# ── C2d: Reportes (admin y vendedor) ──────────────────────────────
+
+def test_reportes_admin_con_sidebar_y_activo(fx):
+    r = fx['admin'].get('/reportes')
+    assert r.status_code == 200
+    html = r.get_data(as_text=True)
+    assert 'href="/reportes" class="sidebar-item activo"' in html
+    assert 'navbar navbar-cleoferr navbar-expand-lg' not in html
+    assert 'Generar Reporte' in html              # contenido de la hija vivo
+
+
+def test_reportes_vendedor_sin_items_solo_admin(fx):
+    r = fx['vendedor'].get('/reportes')
+    assert r.status_code == 200
+    html = r.get_data(as_text=True)
+    assert 'href="/reportes" class="sidebar-item activo"' in html
+    assert '/admin/dashboard' not in html
+    assert '/admin/pagos_simulados' not in html
+    assert '/admin/reservas' not in html
