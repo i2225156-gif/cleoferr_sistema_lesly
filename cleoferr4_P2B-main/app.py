@@ -2560,11 +2560,25 @@ def registro_cliente():
     contrasena = request.form.get('contrasena', '')
     confirmar  = request.form.get('confirmar', '')
 
-    # Documento de identidad OBLIGATORIO desde ahora (normalizado:
-    # sin espacios, mayúsculas). El nombre es editable por el usuario
-    # (marcado "no verificado" hasta cruzarlo con la API de DNI).
+    # Documento de identidad OPCIONAL en el registro: si el cliente escribe
+    # el número, se valida por tipo y se normaliza; si no, se guarda NULL.
+    # El registro NUNCA se bloquea por la API de DNI/RUC. El nombre es
+    # editable y marcado "no verificado".
     tipo_doc_nombre = (request.form.get('tipo_documento') or '').strip().lower()
     nro_documento   = normalizar_numero(request.form.get('nro_documento', ''))
+
+    # Validar SOLO si el cliente escribió un número
+    if nro_documento:
+        if not tipo_doc_nombre:
+            tipo_doc_nombre = 'dni'   # default razonable
+        doc_ok, doc_msg = validar_documento(tipo_doc_nombre, nro_documento)
+        if not doc_ok:
+            return render_template('login_cliente.html',
+                                   error=doc_msg, registro_activo=True)
+    else:
+        # Sin número: NULL en la BD (no cadena vacía; no bloquea)
+        nro_documento = None
+        tipo_doc_nombre = tipo_doc_nombre or 'dni'   # tipo default, número NULL
 
     if not nombre or not correo or not contrasena:
         return render_template('login_cliente.html',
@@ -2574,10 +2588,6 @@ def registro_cliente():
         return render_template('login_cliente.html',
                                error='La dirección es obligatoria para registrarte (mínimo 5 caracteres).',
                                registro_activo=True)
-    doc_ok, doc_msg = validar_documento(tipo_doc_nombre, nro_documento)
-    if not doc_ok:
-        return render_template('login_cliente.html',
-                               error=doc_msg, registro_activo=True)
     if contrasena != confirmar:
         return render_template('login_cliente.html',
                                error='Las contrasenas no coinciden.',

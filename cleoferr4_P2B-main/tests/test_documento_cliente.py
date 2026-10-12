@@ -136,13 +136,15 @@ def test_registro_con_dni_valido(fx):
     assert b'Ya tiene una cuenta' not in r.data  # no es un error de correo duplicado
 
 
-def test_registro_sin_documento_rechaza(fx):
+def test_registro_sin_documento_acepta(fx):
+    """Documento OPCIONAL: sin número no se bloquea el registro."""
     r = _registro_cliente(fx['client'], {
         'tipo_documento': '',
         'nro_documento': '',
     })
+    # Debe pasar la validación (no error de documento)
     assert r.status_code == 200
-    assert b'obligatorio' in r.data or b'documento' in r.data.lower()
+    assert b'documento' not in r.data.lower() or b'opcional' in r.data.lower()
 
 
 def test_registro_con_dni_invalido_rechaza(fx):
