@@ -4,16 +4,20 @@
    qr_data, formato ('a4' | 'ticket') #}
 {% set es_factura = (comprobante.tipo or 'boleta')|lower == 'factura' %}
 <div class="comp-doc{% if formato == 'ticket' %} ticket{% endif %}">
+  {# Rótulo SIEMPRE visible (fase 2.2) #}
+  <div class="comp-rotulo-simulado">
+    <i class="fa fa-flask"></i> COMPROBANTE SIMULADO &ndash; sin validez tributaria
+  </div>
   {# ── Encabezado ── #}
   <div class="comp-header">
     <div class="comp-empresa">
-      <div class="comp-empresa-nombre">INVERSIONES CLEOFERR E.I.R.L.</div>
+      <div class="comp-empresa-nombre">{{ emisor.razon_social or 'INVERSIONES CLEOFERR E.I.R.L.' }}</div>
       <div class="comp-empresa-linea">Ferretería y materiales de construcción</div>
-      <div class="comp-empresa-linea">Huancayo &mdash; Perú</div>
-      <div class="comp-empresa-linea">RUC: <strong>20605977074</strong></div>
+      <div class="comp-empresa-linea">{{ emisor.direccion or 'Huancayo &mdash; Perú' }}</div>
+      <div class="comp-empresa-linea">RUC: <strong>{{ emisor.ruc }}</strong></div>
     </div>
     <div class="comp-titulo-box">
-      <div class="comp-ruc-emp">R.U.C. 20605977074</div>
+      <div class="comp-ruc-emp">R.U.C. {{ emisor.ruc }}</div>
       <div class="comp-titulo">
         {% if es_factura %}FACTURA ELECTRÓNICA{% else %}BOLETA DE VENTA ELECTRÓNICA{% endif %}
       </div>

@@ -26,6 +26,9 @@ except Exception as e:
 
 from db import db
 from db_supabase import get_connection_auth, get_connection_tienda
+from services.comprobantes import (EMISOR, ruc_valido_para_factura,
+                                    siguiente_numero as _siguiente_numero_comprobante,
+                                    texto_qr)
 from services.inventario import devolver_stock_venta
 from services.pagos import (cancelar_pedido_con_pago_inicial, confirmar_pago,
                             registrar_evento)
@@ -2029,13 +2032,27 @@ def pedido_detalle(id):
 def comprobante_venta(id_venta):
     """Muestra el comprobante (boleta/factura SIMULADA) de una venta.
 
-    Si la venta aún no tiene registro en la tabla comprobante, se crea aquí
-    mismo (numeración correlativa + subtotal/igv/total) dentro de una
-    transacción; si ya existía solo se lee. Nunca falla por datos parciales:
-    cliente sin DNI, vendedor nulo, etc. se muestran como campos vacíos.
+    SOLO LECTURA: si la venta aún no tiene comprobante, avisa que se emite
+    al confirmar el pago (D1). Nunca crea ni escribe en un GET.
     """
     formato = 'ticket' if request.args.get('formato') == 'ticket' else 'a4'
+    resultado = _datos_comprobante(id_venta)
+    if resultado is None:
+        abort(404)
+    if resultado['render'] is None:
+        flash('El comprobante aún no se emitió: se emite al confirmar el pago.', 'info')
+        return redirect(url_for('pedido_detalle', id=id_venta))
+    return render_template('comprobante/comprobante_venta.html',
+                           formato=formato, es_cliente=False,
+                           **resultado['render'])
 
+
+def _datos_comprobante(id_venta):
+    """Carga TODO lo necesario para renderizar un comprobante (solo SELECT).
+
+    Devuelve None si la venta no existe, {'venta':..., 'render': None} si
+    la venta no tiene comprobante aún, o {'venta':..., 'render': {...}}.
+    """
     conn   = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
     venta = comprobante = None
@@ -2046,12 +2063,12 @@ def comprobante_venta(id_venta):
             SELECT v.*, tv.nombre AS tipo_venta, ev.nombre AS estado_venta
             FROM venta v
             LEFT JOIN tipo_venta tv   ON v.id_tipo_venta   = tv.id_tipo_venta
-            LEFT JOIN estado_venta ev ON v.id_estado_venta  = ev.id_estado_venta
+            LEFT JOIN estado_venta ev ON v.id_estado_venta  = v.id_estado_venta
             WHERE v.id_venta = %s
         """, (id_venta,))
         venta = cursor.fetchone()
         if not venta:
-            abort(404)
+            return None
 
         cursor.execute("""
             SELECT d.id_detalle, d.cantidad, d.precio_unitario,
@@ -2073,52 +2090,18 @@ def comprobante_venta(id_venta):
         fila_pago = cursor.fetchone()
         metodo_pago = fila_pago['nombre'] if fila_pago else None
 
-        # Comprobante: leer o crear si falta
         cursor.execute("""
             SELECT c.*, tc.nombre AS tipo
             FROM comprobante c
-            LEFT JOIN tipo_comprobante tc ON c.id_tipo_comprobante = tc.id_tipo_comprobante
+            LEFT JOIN tipo_comprobante tc ON c.id_tipo_comprobante = c.id_tipo_comprobante
             WHERE c.id_venta = %s LIMIT 1
         """, (id_venta,))
         comprobante = cursor.fetchone()
-
-        # Totales desde el detalle (precios con IGV 18% incluido)
-        total_calc    = round(sum(float(i['importe'] or 0) for i in items), 2)
-        subtotal_calc = round(total_calc / 1.18, 2)
-        igv_calc      = round(total_calc - subtotal_calc, 2)
-
-        if not comprobante:
-            # Crear comprobante en el momento (ventas antiguas sin registro).
-            # Por defecto se emite boleta; la factura solo la genera el flujo
-            # de cobro, que recibe el RUC del cliente.
-            tipo_comp_db = 'boleta'
-            num_comp = _siguiente_numero_comprobante(cursor, tipo_comp_db)
-            cursor.execute("""
-                INSERT INTO comprobante
-                    (id_venta, id_tipo_comprobante, numero, ruc, serie, subtotal, igv, total)
-                VALUES (%s, (SELECT id_tipo_comprobante FROM tipo_comprobante WHERE nombre = %s),
-                        %s, NULL, %s, %s, %s, %s)
-                RETURNING *
-            """, (id_venta, tipo_comp_db, num_comp,
-                  'B001', subtotal_calc, igv_calc, total_calc))
-            comprobante = cursor.fetchone()
-            comprobante['tipo'] = tipo_comp_db
-            conn.commit()
-        elif comprobante.get('total') is None:
-            # Registro viejo sin totales: completarlos con lo calculado.
-            cursor.execute("""
-                UPDATE comprobante SET subtotal = %s, igv = %s, total = %s
-                WHERE id_comprobante = %s
-            """, (subtotal_calc, igv_calc, total_calc, comprobante['id_comprobante']))
-            conn.commit()
-            comprobante.update(subtotal=subtotal_calc, igv=igv_calc, total=total_calc)
-    except Exception:
-        conn.rollback()
-        app.logger.exception("Error en comprobante_venta %s", id_venta)
-        flash('No se pudo cargar el comprobante de la venta.', 'danger')
-        return redirect(url_for('pedido_detalle', id=id_venta))
     finally:
         conn.close()
+
+    if not comprobante:
+        return {'venta': venta, 'render': None}
 
     # Datos en la BD Auth: cliente (DNI/nombre) y vendedor (solo lectura).
     cliente_doc = cliente_nombre = vendedor = None
@@ -2143,32 +2126,85 @@ def comprobante_venta(id_venta):
         app.logger.exception("Error consultando datos de Auth para el comprobante %s", id_venta)
 
     tipo = (comprobante.get('tipo') or 'boleta').lower()
-    # serie-numero legible: p. ej. serie 'B001' + numero 'B000046' -> 'B001-000046'
     serie  = comprobante.get('serie') or ('F001' if tipo == 'factura' else 'B001')
     numero = comprobante.get('numero') or ''
     dig    = numero[-6:] if numero else '000000'
     serie_numero = f'{serie}-{dig}'
 
-    # RUC del cliente: en facturas viene en comprobante.ruc; en boletas se
-    # muestra el DNI del cliente si existe (si no, "CLIENTES VARIOS").
-    total       = round(float(comprobante.get('total') or 0), 2)
-    subtotal    = round(float(comprobante.get('subtotal') or 0), 2)
-    igv         = round(float(comprobante.get('igv') or 0), 2)
+    # Totales: de la fila del comprobante; si es una fila vieja sin
+    # totales, se calculan para MOSTRAR (sin escribir en el GET).
+    total    = round(float(comprobante.get('total') or 0), 2)
+    subtotal = round(float(comprobante.get('subtotal') or 0), 2)
+    igv      = round(float(comprobante.get('igv') or 0), 2)
+    if not total and items:
+        total    = round(sum(float(i['importe'] or 0) for i in items), 2)
+        subtotal = round(total / 1.18, 2)
+        igv      = round(total - subtotal, 2)
     total_letras = numero_a_letras(total)
 
-    # Contenido del QR: resumen del comprobante (formato estilo SUNAT simulado)
-    qr_texto = ('20605977074|{}|{}|{}|{:.2f}|{:.2f}|{}'
-                .format('03' if tipo == 'boleta' else '01', serie, dig,
-                        igv, total, comprobante.get('fecha_emision') or ''))
+    # QR con el RUC del emisor desde el .env (EMISOR de services/comprobantes)
+    qr_texto = texto_qr(tipo, serie, dig, igv, total,
+                        comprobante.get('fecha_emision') or '')
     qr_data = _qr_data_uri(qr_texto)
 
+    render = {
+        'venta': venta, 'comprobante': comprobante, 'items': items,
+        'cliente_doc': cliente_doc, 'cliente_nombre': cliente_nombre,
+        'vendedor': vendedor, 'metodo_pago': metodo_pago,
+        'subtotal': subtotal, 'igv': igv, 'total': total,
+        'total_letras': total_letras, 'serie_numero': serie_numero,
+        'qr_data': qr_data, 'emisor': EMISOR,
+    }
+    return {'venta': venta, 'render': render}
+
+
+@app.route('/mi_comprobante/<int:id_venta>')
+@login_required
+def mi_comprobante(id_venta):
+    """Comprobante del CLIENTE: solo el dueño de la venta (ajeno -> 403).
+
+    Solo lectura (GET sin escrituras); si la venta aún no tiene comprobante,
+    avisa que se emite al confirmar el pago.
+    """
+    resultado = _datos_comprobante(id_venta)
+    if resultado is None:
+        abort(404)
+    venta = resultado['venta']
+    if session.get('rol') != 'cliente' or venta['id_cliente'] != session.get('usuario_id'):
+        abort(403)
+    if resultado['render'] is None:
+        flash('Tu comprobante se emitirá cuando se confirme el pago.', 'info')
+        return redirect(url_for('mis_pedidos'))
+    formato = 'ticket' if request.args.get('formato') == 'ticket' else 'a4'
     return render_template('comprobante/comprobante_venta.html',
-                           venta=venta, comprobante=comprobante, items=items,
-                           cliente_doc=cliente_doc, cliente_nombre=cliente_nombre,
-                           vendedor=vendedor, metodo_pago=metodo_pago,
-                           subtotal=subtotal, igv=igv, total=total,
-                           total_letras=total_letras, serie_numero=serie_numero,
-                           qr_data=qr_data, formato=formato)
+                           formato=formato, es_cliente=True,
+                           **resultado['render'])
+
+
+@app.route('/mis_comprobantes')
+@login_required
+def mis_comprobantes():
+    """Historial de comprobantes del cliente (solo los suyos; solo lectura)."""
+    if session.get('rol') != 'cliente':
+        return redirect(url_for('pedidos'))
+    conn   = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("""
+            SELECT c.serie, c.numero, c.total, c.fecha_emision, c.estado_sunat,
+                   tc.nombre AS tipo, v.id_venta,
+                   v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima' AS fecha_venta
+              FROM venta v
+              JOIN comprobante c ON c.id_venta = v.id_venta
+              LEFT JOIN tipo_comprobante tc ON tc.id_tipo_comprobante = c.id_tipo_comprobante
+             WHERE v.id_cliente = %s
+             ORDER BY c.fecha_emision DESC
+             LIMIT 100
+        """, (session['usuario_id'],))
+        comprobantes = cursor.fetchall()
+    finally:
+        conn.close()
+    return render_template('mis_comprobantes.html', comprobantes=comprobantes)
 
 
 # Criterio del alcance (§6.9): solo cuentan como vendidas las ventas con pago
@@ -3153,23 +3189,6 @@ def _qr_data_uri(texto):
         return None
 
 
-def _siguiente_numero_comprobante(cursor, tipo_comp):
-    """Devuelve el siguiente número de comprobante correlativo por tipo.
-
-    Serie: 'B' + 6 dígitos para boleta, 'F' + 6 dígitos para factura
-    (p. ej. B000123). Se calcula dentro de la misma transacción de la venta
-    a partir del máximo existente, garantizando unicidad y correlatividad.
-    """
-    serie = 'F' if tipo_comp == 'factura' else 'B'
-    cursor.execute("""
-        SELECT COALESCE(MAX(CAST(SUBSTRING(numero FROM '^[BF](\\d+)') AS INTEGER)), 0) + 1 AS seq
-        FROM comprobante WHERE numero LIKE %s
-    """, (serie + '%',))
-    row = cursor.fetchone()
-    seq = row['seq'] if isinstance(row, dict) else row[0]
-    return f"{serie}{seq:06d}"
-
-
 @app.route('/carrito/confirmar_v2', methods=['POST'])
 @login_required
 def carrito_confirmar_v2():
@@ -3268,6 +3287,9 @@ def carrito_confirmar_v2():
 
     tipo_boleta  = 'electronica' if tipo_comprobante == 'boleta_electronica' else 'simple'
     tipo_comp_db = 'factura' if (ruc and len(ruc) == 11 and ruc.startswith('20')) else 'boleta'
+    if tipo_comp_db == 'factura' and not ruc_valido_para_factura(ruc):
+        return {'ok': False,
+                'error': 'El RUC no es válido (revisa el dígito verificador). El pedido no se creó.'}, 400
     metodo_db    = 'yape_plin' if metodo_pago == 'yape' else (
                    'tarjeta'   if metodo_pago == 'tarjeta' else 'efectivo')
 
@@ -3324,7 +3346,6 @@ def carrito_confirmar_v2():
         total = cursor.fetchone()[0]
 
         # Pago 'pendiente' con el monto oficial (Decimal) y la pasarela
-        # configurada; id_transaccion se completa tras crear_pago.
         cursor.execute("""
             INSERT INTO pago (id_venta, id_tipo_pago, id_caja, estado, pasarela, monto)
             VALUES (%s, (SELECT id_tipo_pago FROM tipo_pago WHERE nombre = %s), %s,
@@ -3333,14 +3354,10 @@ def carrito_confirmar_v2():
         """, (id_venta, metodo_db, id_caja_a, _PASARELA.nombre, total))
         id_pago = cursor.fetchone()[0]
 
-        # Comprobante: en 2.1 sigue creándose con el pedido (D1); al inicio
-        # de 2.2 la emisión pasará a ocurrir al confirmar el pago.
-        num_comp = _siguiente_numero_comprobante(cursor, tipo_comp_db)
-        cursor.execute("""
-            INSERT INTO comprobante (id_venta, id_tipo_comprobante, numero, ruc, serie)
-            VALUES (%s, (SELECT id_tipo_comprobante FROM tipo_comprobante WHERE nombre = %s), %s, %s, %s)
-        """, (id_venta, tipo_comp_db, num_comp, ruc,
-              'F001' if tipo_comp_db == 'factura' else 'B001'))
+        # D1 (2.2): el comprobante ya NO se crea aquí; se emite al
+        # CONFIRMAR el pago (confirmar_pago), de modo que los correlativos
+        # solo los consumen ventas pagadas. El tipo y el RUC viajan al
+        # detalle_proveedor del pago para esa emisión.
 
         conn.commit()   # fin de la TXN corta: el pedido quedó guardado
 
@@ -3373,7 +3390,9 @@ def carrito_confirmar_v2():
                  WHERE id_pago = %s
             """, (resultado_pasarela.id_pago_proveedor,
                   json.dumps({'checkout_url': resultado_pasarela.checkout_url,
-                              'requiere_verificacion': bool(resultado_pasarela.requiere_verificacion)},
+                              'requiere_verificacion': bool(resultado_pasarela.requiere_verificacion),
+                              'tipo_comprobante': tipo_comp_db,
+                              'ruc': ruc},
                              ensure_ascii=False),
                   id_pago))
             conn.commit()

@@ -102,9 +102,11 @@ def test_checkout_crea_pago_pendiente_con_monto_y_transaccion(fx):
     cur.execute("SELECT detalle_proveedor->>'checkout_url' AS url FROM pago WHERE id_pago=%s",
                 (pago['id_pago'],))
     assert cur.fetchone()['url'] == d['checkout_url']
-    # D1: el comprobante sigue creándose con el pedido en 2.1
+    # D1 (2.2): el comprobante ya NO se crea en el checkout; se emite al
+    # confirmar el pago desde confirmar_pago (tests de emisión en
+    # test_fase22_comprobante.py).
     cur.execute("SELECT COUNT(*) AS n FROM comprobante WHERE id_venta=%s", (d['id_pedido'],))
-    assert cur.fetchone()['n'] == 1
+    assert cur.fetchone()['n'] == 0
     # Los 16 pagos legacy (sin id_transaccion) no se tocan
     cur.execute("SELECT COUNT(*) AS n FROM pago WHERE id_transaccion IS NULL AND estado='pendiente'")
     assert cur.fetchone()['n'] == legacy_antes
