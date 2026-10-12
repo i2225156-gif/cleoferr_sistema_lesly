@@ -2670,8 +2670,15 @@ def admin_ofertas_editar(id):
               _ts_lima(datos['inicio']), _ts_lima(datos['fin']), id))
         nuevo = cursor.fetchone()
         _auditar_oferta(cursor, id, 'editar', dict(anterior), dict(nuevo))
+        cursor.execute("SELECT EXISTS (SELECT 1 FROM detalle_venta"
+                       " WHERE id_oferta = %s) AS usada", (id,))
+        usada = bool(cursor.fetchone()['usada'])
         conn.commit()
         flash('Oferta actualizada correctamente.', 'success')
+        if usada:
+            flash('Esta oferta ya se aplicó a ventas anteriores: esas ventas '
+                  'ya hechas no cambian (el descuento quedó congelado en cada '
+                  'venta).', 'info')
     except Exception as e:
         conn.rollback()
         _flash_error_oferta(e)
@@ -2700,9 +2707,18 @@ def _toggle_oferta(id, activa):
         _auditar_oferta(cursor, id,
                         'activar' if activa else 'desactivar',
                         dict(anterior), dict(nuevo))
+        usada = False
+        if not activa:
+            cursor.execute("SELECT EXISTS (SELECT 1 FROM detalle_venta"
+                           " WHERE id_oferta = %s) AS usada", (id,))
+            usada = bool(cursor.fetchone()['usada'])
         conn.commit()
         flash('Oferta %s correctamente.'
               % ('activada' if activa else 'desactivada'), 'success')
+        if usada:
+            flash('Esta oferta ya se aplicó a ventas anteriores: esas ventas '
+                  'ya hechas no cambian (el descuento quedó congelado en cada '
+                  'venta).', 'info')
     except Exception as e:
         conn.rollback()
         _flash_error_oferta(e)

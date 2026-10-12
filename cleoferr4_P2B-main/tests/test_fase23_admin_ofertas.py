@@ -242,6 +242,55 @@ def test_editar_cambia_valor_y_audita_anterior_y_nuevo(fx):
 
 # ── Activar / desactivar ──────────────────────────────────────────
 
+def _venta_con_oferta(fx, id_oferta):
+    """Venta sintética que usó la oferta (descuento congelado en detalle)."""
+    fx['cur'].execute("""
+        INSERT INTO venta (id_tipo_venta, id_estado_venta, num_operacion)
+        VALUES ((SELECT id_tipo_venta FROM tipo_venta WHERE nombre='online'),
+                (SELECT id_estado_venta FROM estado_venta WHERE nombre='pendiente'),
+                %s)
+        RETURNING id_venta
+    """, (f"test23a-{_uuid.uuid4().hex[:12]}",))
+    id_venta = fx['cur'].fetchone()['id_venta']
+    fx['cur'].execute("""
+        INSERT INTO detalle_venta
+            (id_venta, id_producto, cantidad, precio_unitario,
+             id_oferta, descuento_unitario)
+        VALUES (%s, %s, 1, 9.99, %s, 1.50)
+    """, (id_venta, fx['id_producto'], id_oferta))
+    return id_venta
+
+
+def test_editar_oferta_usada_avisa_que_ventas_no_cambian(fx):
+    id_of = _oferta_bd(fx, valor=15)
+    _venta_con_oferta(fx, id_of)
+    r = fx['client'].post(f'/admin/ofertas/editar/{id_of}',
+                          data=_form(fx, valor='25'), follow_redirects=True)
+    assert r.status_code == 200
+    html = r.get_data(as_text=True)
+    assert 'actualizada correctamente' in html
+    assert 'ya hechas no cambian' in html     # aviso de ventas congeladas
+
+
+def test_desactivar_oferta_usada_avisa_que_ventas_no_cambian(fx):
+    id_of = _oferta_bd(fx, valor=15)
+    _venta_con_oferta(fx, id_of)
+    r = fx['client'].post(f'/admin/ofertas/desactivar/{id_of}',
+                          data={'csrf_token': 'token-test'}, follow_redirects=True)
+    assert r.status_code == 200
+    html = r.get_data(as_text=True)
+    assert 'desactivada correctamente' in html
+    assert 'ya hechas no cambian' in html
+
+
+def test_editar_oferta_no_usada_sin_aviso(fx):
+    id_of = _oferta_bd(fx, valor=15)
+    r = fx['client'].post(f'/admin/ofertas/editar/{id_of}',
+                          data=_form(fx, valor='25'), follow_redirects=True)
+    assert r.status_code == 200
+    assert 'ya hechas no cambian' not in r.get_data(as_text=True)
+
+
 def test_desactivar_y_activar_con_auditoria(fx):
     id_of = _oferta_bd(fx, valor=15)
     r = fx['client'].post(f'/admin/ofertas/desactivar/{id_of}',
