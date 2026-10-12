@@ -38,7 +38,8 @@ from services.documentos import (NOMBRES_TIPO, normalizar_numero,
                                  tipo_documento_de_cliente, validar_documento)
 from services.inventario import devolver_stock_venta
 from services.ofertas import (SQL_IMPORTE_LINEA, SQL_PRECIO_VIGENTE,
-                              calcular_descuento_unitario, oferta_vigente)
+                              calcular_descuento_unitario, oferta_vigente,
+                              precios_vigentes)
 from services.reservas import liberar_reservas_vencidas, preview_reservas_vencidas
 from services.pagos import (cancelar_pedido_con_pago_inicial, confirmar_pago,
                             registrar_evento)
@@ -208,7 +209,7 @@ class Producto(db.Model):
 _CSRF_PROTEGIDAS = {
     'login', 'login_cliente', 'registro_cliente', 'verificar_registro',
     'recuperar_contrasena', 'restablecer_contrasena', 'cambiar_clave',
-    'carrito_confirmar_v2', 'carrito_agregar',
+    'carrito_confirmar_v2', 'carrito_agregar', 'carrito_precios',
     'registrar_pos',
     'pedido_cambiar_estado',
     'pago_simulado_procesar',
@@ -946,13 +947,20 @@ def eliminar_producto(id):
 def catalogo_cliente():
     conn   = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
-    cursor.execute("""
-        SELECT p.*, c.nombre AS categoria, m.nombre AS marca
-        FROM producto p
-        LEFT JOIN categoria c ON p.id_categoria = c.id_categoria
-        LEFT JOIN marca m ON p.id_marca = m.id_marca
-        WHERE p.activo = TRUE
-        ORDER BY p.id_producto
+    # Precio vigente por producto (misma fuente que el checkout): el
+    # descuento de la oferta ACTIVA en curso lo calcula el servidor; la
+    # plantilla solo lo renderiza (tachado + precio final + badge).
+    cursor.execute(f"""
+        SELECT p.*, c.nombre AS categoria, m.nombre AS marca,
+               COALESCE(of.descuento_unitario, 0) AS descuento,
+               p.precio - COALESCE(of.descuento_unitario, 0) AS precio_final,
+               of.tipo AS oferta_tipo, of.valor AS oferta_valor
+          FROM producto p
+          LEFT JOIN categoria c ON p.id_categoria = c.id_categoria
+          LEFT JOIN marca m ON p.id_marca = m.id_marca
+          {SQL_PRECIO_VIGENTE.format(p="p.", a="of")}
+         WHERE p.activo = TRUE
+         ORDER BY p.id_producto
     """)
     lista = cursor.fetchall()
     conn.close()
@@ -2758,7 +2766,9 @@ def carrito_agregar():
     Fuente única de verdad del carrito: localStorage del navegador.
     Este endpoint ya NO guarda nada en sesión; solo verifica que el
     producto exista, esté activo y con stock, y devuelve nombre/precio
-    oficiales de la BD para que el frontend corrija datos obsoletos.
+    OFICIALES de la BD — incluidos el descuento de la oferta vigente y
+    el precio final — para que el frontend corrija datos obsoletos.
+    El navegador nunca decide el precio: solo renderiza estos valores.
     """
     data        = request.get_json(silent=True) or {}
     id_producto = int(data.get('id_producto', 0))
@@ -2766,9 +2776,14 @@ def carrito_agregar():
 
     conn   = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
-    cursor.execute(
-        "SELECT nombre, precio, stock FROM producto WHERE id_producto=%s AND activo = TRUE",
-        (id_producto,))
+    cursor.execute(f"""
+        SELECT p.nombre, p.precio, p.stock,
+               COALESCE(of.descuento_unitario, 0) AS descuento,
+               p.precio - COALESCE(of.descuento_unitario, 0) AS precio_final
+          FROM producto p
+          {SQL_PRECIO_VIGENTE.format(p="p.", a="of")}
+         WHERE p.id_producto=%s AND p.activo = TRUE
+    """, (id_producto,))
     prod = cursor.fetchone()
     conn.close()
 
@@ -2785,8 +2800,40 @@ def carrito_agregar():
     return {'ok': True,
             'id_producto': id_producto,
             'nombre':  prod['nombre'],
-            'precio':  float(prod['precio']),
+            'precio':  float(prod['precio']),           # base (referencia)
+            'descuento': float(prod['descuento']),       # dcto unitario vigente
+            'precio_final': float(prod['precio_final']), # lo que se paga
             'stock':   int(prod['stock'])}
+
+
+@app.route('/carrito/precios', methods=['POST'])
+@login_required
+def carrito_precios():
+    """Precios vigentes por LOTE para refrescar el carrito al cargarlo.
+
+    Devuelve, por cada id pedido, precio base, descuento de la oferta
+    vigente y precio final — la MISMA fuente (SQL_PRECIO_VIGENTE) que
+    usa el checkout. Solo lectura: el navegador renderiza estos valores,
+    jamás los decide; el total oficial lo recalcula el servidor al
+    confirmar el pedido.
+    """
+    data = request.get_json(silent=True) or {}
+    try:
+        ids = [int(i) for i in (data.get('ids') or [])]
+    except (TypeError, ValueError):
+        return {'ok': False, 'error': 'ids inválidos'}, 400
+    ids = ids[:100]   # tope defensivo por lote
+    conn = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        lote = precios_vigentes(cursor, ids)
+    finally:
+        conn.close()
+    precios = {idp: {'precio': float(f['precio']),
+                     'descuento': float(f['descuento_unitario'] or 0),
+                     'precio_final': float(f['precio_final'])}
+               for idp, f in lote.items()}
+    return {'ok': True, 'precios': precios}
 
 
 # ── Cambiar clave ─────────────────────────────────────────────

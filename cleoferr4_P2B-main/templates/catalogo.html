@@ -197,7 +197,7 @@
          data-nombre="{{ p.nombre | lower }}"
          data-desc="{{ (p.descripcion or '') | lower }}"
          data-categoria="{{ p.categoria or '' }}">
-        <div class="prod-card" onclick="abrirProducto({{ p.id_producto }}, '{{ p.nombre|replace("'", "\\'") }}', {{ p.precio|float }}, {{ p.stock|int if p.stock else 0 }}, '{{ (p.descripcion or '')|replace("'", "\\'")|replace('\n', ' ') }}', '{{ p.imagen or '' }}', '{{ p.marca or '' }}')" style="cursor:pointer">
+        <div class="prod-card" onclick="abrirProducto({{ p.id_producto }}, '{{ p.nombre|replace("'", "\\'") }}', {{ p.precio_final|float }}, {{ p.stock|int if p.stock else 0 }}, '{{ (p.descripcion or '')|replace("'", "\\'")|replace('\n', ' ') }}', '{{ p.imagen or '' }}', '{{ p.marca or '' }}', {{ p.precio|float }}, {{ p.descuento|float }})" style="cursor:pointer">
             <div class="prod-img">
                 {% if p.imagen %}
                     <img src="{{ url_for('static', filename='img/' ~ p.imagen) }}"
@@ -211,11 +211,21 @@
                 <div class="prod-nombre">{{ p.nombre }}</div>
                 <div class="prod-desc">{{ p.descripcion|truncate(60) if p.descripcion else '' }}</div>
                 <div class="d-flex justify-content-between align-items-center">
+                    {% if p.descuento and p.descuento > 0 %}
+                    <span class="prod-precio">
+                        <s style="color:#aaa;font-size:0.78rem;font-weight:400">S/ {{ "%.2f"|format(p.precio|float) }}</s>
+                        S/ {{ "%.2f"|format(p.precio_final|float) }}
+                    </span>
+                    <span class="prod-cat-badge" style="background:var(--naranja);color:white">
+                        OFERTA {% if p.oferta_tipo == 'porcentaje' %}-{{ '%g'|format(p.oferta_valor|float) }}%{% endif %}
+                    </span>
+                    {% else %}
                     <span class="prod-precio">S/ {{ "%.2f"|format(p.precio|float) }}</span>
                     <span class="prod-cat-badge">{{ p.categoria or '–' }}</span>
+                    {% endif %}
                 </div>
                 <button class="btn-agregar"
-                        onclick="event.stopPropagation(); agregarAlCarrito({{ p.id_producto }}, '{{ p.nombre|replace("'", "\\'") }}', {{ p.precio|float }}, this)">
+                        onclick="event.stopPropagation(); agregarAlCarrito({{ p.id_producto }}, '{{ p.nombre|replace("'", "\\'") }}', {{ p.precio_final|float }}, this)">
                     <i class="fa fa-cart-plus"></i> Agregar al carrito
                 </button>
             </div>
@@ -366,6 +376,7 @@
             <div>
                 <div style="font-size:0.78rem;color:#888;margin-bottom:4px;font-weight:600">PRECIO</div>
                 <div class="modal-precio-wrap">
+                    <s id="mpPrecioAnterior" style="color:#aaa;font-size:1rem;display:none"></s>
                     <span id="mpPrecio" class="modal-precio"></span>
                 </div>
             </div>
@@ -462,8 +473,11 @@ function validarConServidor(id) {
             alert(d.error || 'Este producto ya no está disponible.');
             return;
         }
-        carrito[idx].nombre = d.nombre;
-        carrito[idx].precio = d.precio;
+        // Precios OFICIALES del servidor (base + dcto + final)
+        carrito[idx].nombre       = d.nombre;
+        carrito[idx].precio       = d.precio_final;   // lo que se paga
+        carrito[idx].precio_base  = d.precio;
+        carrito[idx].descuento    = d.descuento;
         saveCarrito(carrito);
     })
     .catch(() => {});
@@ -548,11 +562,18 @@ function limpiarFiltros() {
 // ── Modal de detalle de producto ─────────────────────────
 let mpData = {};
 
-function abrirProducto(id, nombre, precio, stock, desc, imagen, marca) {
-    mpData = { id, nombre, precio, stock };
+function abrirProducto(id, nombre, precio, stock, desc, imagen, marca, precioBase, dcto) {
+    mpData = { id, nombre, precio, stock, precioBase, dcto };
     document.getElementById('mpMarca').textContent   = marca || '';
     document.getElementById('mpNombre').textContent  = nombre;
-    document.getElementById('mpPrecio').textContent  = 'S/ ' + precio.toFixed(2);
+    document.getElementById('mpPrecio').textContent = 'S/ ' + precio.toFixed(2);
+    const mpAnt = document.getElementById('mpPrecioAnterior');
+    if (dcto > 0 && precioBase) {
+        mpAnt.style.display = 'inline';
+        mpAnt.textContent = 'S/ ' + precioBase.toFixed(2);
+    } else {
+        mpAnt.style.display = 'none';
+    }
     document.getElementById('mpDesc').textContent    = desc || 'Sin descripción disponible.';
     document.getElementById('mpCantidad').value      = 1;
     document.getElementById('mpCantidad').max        = stock > 0 ? stock : 1;
@@ -604,7 +625,10 @@ function modalAgregarCarrito() {
     let carrito = getCarrito();
     const idx = carrito.findIndex(i => i.id === mpData.id);
     if (idx >= 0) carrito[idx].cantidad += cant;
-    else carrito.push({ id: mpData.id, nombre: mpData.nombre, precio: mpData.precio, cantidad: cant });
+    else carrito.push({ id: mpData.id, nombre: mpData.nombre,
+                        precio: mpData.precio,
+                        precio_base: mpData.precioBase,
+                        descuento: mpData.dcto || 0, cantidad: cant });
     saveCarrito(carrito);
     mostrarToast(mpData.nombre + ' agregado al carrito');
     document.getElementById('modalProducto').classList.remove('abierto');

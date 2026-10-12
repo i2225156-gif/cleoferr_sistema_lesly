@@ -391,6 +391,9 @@
 </div>
 
 <script>
+// Token CSRF para los fetch del carrito
+const CSRF_TOKEN = {{ csrf_token|tojson }};
+
 // ===== Carrito =====
 function getCarrito() {
     return JSON.parse(localStorage.getItem('carrito_cleoferr') || '[]');
@@ -419,13 +422,18 @@ function renderCarrito() {
         const sub = item.precio * item.cantidad;
         subtotal   += sub;
         totalItems += item.cantidad;
+        // Precio unit.: final del servidor; base tachada solo si hay dcto
+        const precioCell = (item.descuento && item.descuento > 0)
+            ? '<s style="color:#999;font-size:0.75rem">S/ ' + (item.precio_base || item.precio).toFixed(2) + '</s>'
+              + ' S/ ' + item.precio.toFixed(2)
+            : 'S/ ' + item.precio.toFixed(2);
         const tr = document.createElement('tr');
         tr.innerHTML = `
             <td>
                 <div class="fw-semibold" style="color:var(--gris-oscuro)">${item.nombre}</div>
                 <small class="text-muted">#${item.id}</small>
             </td>
-            <td class="fw-bold" style="color:var(--naranja)">S/ ${item.precio.toFixed(2)}</td>
+            <td class="fw-bold" style="color:var(--naranja)">${precioCell}</td>
             <td>
                 <div class="qty-control">
                     <button class="qty-btn" onclick="cambiarCantidad(${idx}, -1)">−</button>
@@ -447,6 +455,35 @@ function renderCarrito() {
     document.getElementById('totalVal').textContent    = subtotal.toFixed(2);
     if (document.getElementById('montoYape'))
         document.getElementById('montoYape').textContent = 'S/ ' + subtotal.toFixed(2);
+}
+
+// Refresca los precios del carrito con los OFICIALES del servidor
+// (/carrito/precios, misma fuente que el checkout). El navegador solo
+// renderiza: si el fetch falla, se muestran los últimos precios
+// conocidos y el total definitivo lo recalcula el servidor al confirmar.
+function refrescarPrecios() {
+    const ids = getCarrito().map(i => i.id);
+    if (ids.length === 0) { renderCarrito(); return; }
+    fetch('/carrito/precios', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRFToken': CSRF_TOKEN },
+        body: JSON.stringify({ ids: ids })
+    })
+    .then(r => r.json())
+    .then(d => {
+        if (!d.ok || !d.precios) { renderCarrito(); return; }
+        const carrito = getCarrito();
+        carrito.forEach(it => {
+            const pv = d.precios[it.id];
+            if (pv) {
+                it.precio      = pv.precio_final;   // el servidor decide
+                it.precio_base = pv.precio;
+                it.descuento   = pv.descuento;
+            }
+        });
+        saveCarrito(carrito);   // re-renderiza con los precios vigentes
+    })
+    .catch(() => renderCarrito());
 }
 
 function cambiarCantidad(idx, delta) {
@@ -691,7 +728,6 @@ function irPaso3() {
 function confirmarPedidoFinal() {
     const carrito = getCarrito();
     if (carrito.length === 0) return;
-    const CSRF_TOKEN = {{ csrf_token|tojson }};
     const ruc = document.getElementById('inputRuc') ? document.getElementById('inputRuc').value.trim() : '';
     const dni = document.getElementById('inputDni') ? document.getElementById('inputDni').value.trim() : '';
     const numOp = document.getElementById('numOperacion') ? document.getElementById('numOperacion').value.trim() : '';
@@ -760,6 +796,7 @@ function formatExpiry(input) {
     if (prev) prev.textContent = v || 'MM/AA';
 }
 
-renderCarrito();
+// Al cargar la página, los precios se refrescan SIEMPRE desde el servidor
+refrescarPrecios();
 </script>
 {% endblock %}
