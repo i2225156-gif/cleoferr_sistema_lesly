@@ -1,11 +1,8 @@
-{% extends 'base.html' %}
+{% extends 'admin_base.html' %}
+{% set seccion_activa = 'ofertas' %}
 {% block titulito %}Ofertas – Cleoferr{% endblock %}
 
-{% block contenido %}
-<div class="d-flex" style="min-height:100vh">
-  {% include '_sidebar_admin.html' %}
-
-  <div class="flex-grow-1 p-4">
+{% block admin_contenido %}
     <div class="d-flex justify-content-between align-items-center mb-4">
       <h4 class="fw-bold mb-0"><i class="fa fa-tags me-2"></i>Ofertas y descuentos</h4>
       <button class="btn btn-naranja fw-bold" data-bs-toggle="modal"
@@ -158,11 +155,9 @@
               <button type="submit" class="btn btn-naranja fw-bold">Guardar</button>
             </div>
           </form>
-        </div>
       </div>
     </div>
   </div>
-</div>
 
 <script>
 function _isoLocal(d) {

@@ -1,17 +1,41 @@
-{# Sidebar oscuro reutilizable para páginas admin.
-   Variables opcionales: reservas_vencidas (badge), seccion_activa (string) #}
-<nav class="admin-sidebar d-flex flex-column" style="background:#1a1a2e;min-height:100vh;width:240px;flex-shrink:0">
+{# Sidebar oscuro único para TODAS las páginas admin (módulo admin unificado).
+
+   Variables opcionales:
+     - seccion_activa: resalta el ítem actual ('dashboard', 'productos', ...).
+     - reservas_vencidas / alertas_pendientes: badges numéricos (los pasa la
+       ruta o el context_processor; si fallan o no existen, sin badge).
+
+   Restauración del navbar anulado en admin_base: chip de usuario+rol,
+   botón "Cambiar clave", interruptor de tema claro/oscuro (reutiliza el
+   toggleTema de base.html y el id iconTema: nunca coexisten en la misma
+   página) y "Salir".
+
+   Ítems solo-admin (Dashboard, Pagos simulados, Reservas) se OCULTAN al
+   vendedor: el permiso real se valida en el backend de cada ruta.
+
+   Responsive: hamburguesa fija + sidebar off-canvas en <992px, sin scroll
+   horizontal del cuerpo (sidebar fijo y contenido con margen). #}
+<nav class="admin-sidebar d-flex flex-column" id="adminSidebar" style="background:#1a1a2e">
   <div class="p-3 border-bottom" style="border-color:#30363d!important">
-    <a href="/admin/dashboard" class="text-decoration-none d-flex align-items-center gap-2">
+    <a href="{{ '/admin/dashboard' if session.rol == 'administrador' else '/pedidos' }}"
+       class="text-decoration-none d-flex align-items-center gap-2">
       <i class="fa fa-tools" style="color:var(--naranja);font-size:1.4rem"></i>
       <span class="fw-bold text-white" style="font-size:0.95rem">CLEOFERR Admin</span>
     </a>
+    {% if session.usuario_id %}
+    <div class="mt-2" style="font-size:0.78rem;color:#8b949e">
+      <i class="fa fa-user-circle me-1"></i>{{ session.nombre or 'usuario' }}
+      <span class="badge bg-secondary ms-1">{{ session.rol }}</span>
+    </div>
+    {% endif %}
   </div>
 
-  <div class="flex-grow-1 py-2">
+  <div class="flex-grow-1 py-2 admin-sidebar-scroll">
+    {% if session.rol == 'administrador' %}
     <a href="/admin/dashboard" class="sidebar-item {{ 'activo' if seccion_activa == 'dashboard' else '' }}">
       <i class="fa fa-chart-line me-2"></i>Dashboard
     </a>
+    {% endif %}
     <a href="/productos" class="sidebar-item {{ 'activo' if seccion_activa == 'productos' else '' }}">
       <i class="fa fa-box me-2"></i>Productos
     </a>
@@ -24,15 +48,28 @@
     <a href="/clientes" class="sidebar-item {{ 'activo' if seccion_activa == 'clientes' else '' }}">
       <i class="fa fa-users me-2"></i>Clientes
     </a>
+    <a href="/proveedores" class="sidebar-item {{ 'activo' if seccion_activa == 'proveedores' else '' }}">
+      <i class="fa fa-truck me-2"></i>Proveedores
+    </a>
     <a href="/inventario" class="sidebar-item {{ 'activo' if seccion_activa == 'inventario' else '' }}">
       <i class="fa fa-warehouse me-2"></i>Inventario
+    </a>
+    <a href="/alertas" class="sidebar-item {{ 'activo' if seccion_activa == 'alertas' else '' }}">
+      <i class="fa fa-bell me-2"></i>Alertas
+      {% if alertas_pendientes and alertas_pendientes > 0 %}
+      <span class="badge bg-danger ms-auto">{{ alertas_pendientes }}</span>
+      {% endif %}
     </a>
     <a href="/reportes" class="sidebar-item {{ 'activo' if seccion_activa == 'reportes' else '' }}">
       <i class="fa fa-file-alt me-2"></i>Reportes
     </a>
     <div class="sidebar-separator"></div>
+    <a href="/caja" class="sidebar-item {{ 'activo' if seccion_activa == 'caja' else '' }}">
+      <i class="fa fa-cash-register me-2"></i>Caja
+    </a>
+    {% if session.rol == 'administrador' %}
     <a href="/admin/pagos_simulados" class="sidebar-item {{ 'activo' if seccion_activa == 'pagos_simulados' else '' }}">
-      <i class="fa fa-flask me-2"></i>Pagos Simulados
+      <i class="fa fa-flask me-2"></i>Pagos simulados
     </a>
     <a href="/admin/reservas" class="sidebar-item {{ 'activo' if seccion_activa == 'reservas' else '' }}">
       <i class="fa fa-hourglass-end me-2"></i>Reservas
@@ -40,29 +77,79 @@
       <span class="badge bg-danger ms-auto">{{ reservas_vencidas }}</span>
       {% endif %}
     </a>
-    <a href="/caja" class="sidebar-item {{ 'activo' if seccion_activa == 'caja' else '' }}">
-      <i class="fa fa-cash-register me-2"></i>Caja
-    </a>
+    {% endif %}
   </div>
 
   <div class="p-3 border-top" style="border-color:#30363d!important">
+    <a href="/cambiar_clave" class="sidebar-item">
+      <i class="fa fa-key me-2"></i>Cambiar clave
+    </a>
+    <button type="button" class="sidebar-item admin-btn-tema w-100 text-start"
+            onclick="toggleTema()" title="Cambiar tema claro/oscuro">
+      <i class="fa fa-moon me-2" id="iconTema"></i>Tema claro/oscuro
+    </button>
     <a href="/logout" class="sidebar-item" style="color:#f85149">
       <i class="fa fa-sign-out-alt me-2"></i>Salir
     </a>
   </div>
 </nav>
 
+<button class="admin-hamburguesa" onclick="toggleAdminSidebar()" aria-label="Abrir menú">
+  <i class="fa fa-bars"></i>
+</button>
+<div class="admin-overlay" id="adminOverlay" onclick="toggleAdminSidebar()"></div>
+
+<script>
+function toggleAdminSidebar() {
+  const sb = document.getElementById('adminSidebar');
+  const abierto = sb.classList.toggle('abierto');
+  document.body.classList.toggle('admin-menu-abierto', abierto);
+}
+</script>
+
 <style>
+/* Sidebar fijo: sin scroll horizontal del cuerpo en ningún ancho */
+.admin-sidebar {
+  position: fixed; top: 0; left: 0; bottom: 0; width: 240px;
+  z-index: 1040; transition: transform 0.25s ease;
+}
+.admin-contenido { margin-left: 240px; min-height: 100vh; }
+.admin-sidebar-scroll { overflow-y: auto; }
+
 .admin-sidebar .sidebar-item {
   display: flex; align-items: center; padding: 10px 16px;
   color: #c9d1d9; text-decoration: none; font-size: 0.87rem; font-weight: 500;
   border-left: 3px solid transparent; transition: all 0.15s;
+  width: 100%; background: transparent; border-top: none; border-right: none;
+  border-bottom: none; cursor: pointer;
 }
 .admin-sidebar .sidebar-item:hover { color: #fff; background: #21262d; }
 .admin-sidebar .sidebar-item.activo {
   color: #fff; background: #21262d; border-left-color: var(--naranja);
 }
-.admin-sidebar .sidebar-separator {
-  border-top: 1px solid #30363d; margin: 8px 12px;
+.admin-sidebar .sidebar-separator { border-top: 1px solid #30363d; margin: 8px 12px; }
+.admin-sidebar .admin-btn-tema { color: #c9d1d9; }
+.admin-sidebar .admin-btn-tema:hover { color: #fff; background: #21262d; }
+
+/* Hamburguesa + off-canvas solo en pantallas pequeñas */
+.admin-hamburguesa {
+  display: none; position: fixed; top: 12px; left: 12px; z-index: 1055;
+  width: 42px; height: 42px; border-radius: 10px; border: none;
+  background: #1a1a2e; color: #fff; font-size: 1.05rem;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.25); cursor: pointer;
+}
+.admin-overlay {
+  display: none; position: fixed; inset: 0;
+  background: rgba(0,0,0,0.45); z-index: 1035;
+}
+@media (max-width: 991.98px) {
+  .admin-sidebar { transform: translateX(-105%); }
+  .admin-sidebar.abierto {
+    transform: translateX(0);
+    box-shadow: 4px 0 24px rgba(0,0,0,0.35);
+  }
+  .admin-contenido { margin-left: 0; }
+  .admin-hamburguesa { display: block; }
+  body.admin-menu-abierto .admin-overlay { display: block; }
 }
 </style>
