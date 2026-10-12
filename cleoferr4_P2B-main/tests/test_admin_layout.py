@@ -1,6 +1,7 @@
-"""Módulo admin unificado (C2a+C2b): sidebar único; hijas migradas:
-dashboard/pedidos/pedido_detalle/ofertas (C2a) y productos/producto_form/
-producto_detalle/inventario/alertas (C2b).
+"""Módulo admin unificado (C2a+C2b+C2c): sidebar único; hijas migradas:
+dashboard/pedidos/pedido_detalle/ofertas (C2a),
+productos/producto_form/producto_detalle/inventario/alertas (C2b) y
+admin_pagos_simulados/admin_reservas (C2c, rutas solo admin).
 
 Contra la BD real con conexión proxied (rollback): nada persiste. Por
 plantilla migrada verifica: 200 para admin y vendedor (donde el rol lo
@@ -228,3 +229,33 @@ def test_alertas_con_sidebar_y_activo(fx):
     # El script AJAX ahora viaja inline en admin_contenido: antes era un
     # {% block scripts %} muerto (base.html no lo define) y no cargaba.
     assert 'resolverAlertaAjax' in html
+
+
+# ── C2c: Pagos simulados y reservas (rutas solo admin) ─────────────
+
+def test_pagos_simulados_admin_con_sidebar_y_activo(fx):
+    r = fx['admin'].get('/admin/pagos_simulados')
+    assert r.status_code == 200
+    html = r.get_data(as_text=True)
+    assert 'href="/admin/pagos_simulados" class="sidebar-item activo"' in html
+    assert 'navbar navbar-cleoferr navbar-expand-lg' not in html
+    assert 'Disparar evento simulado' in html       # contenido de la hija vivo
+
+
+def test_pagos_simulados_vendedor_bloqueado(fx):
+    # Ruta solo admin (admin_required): el vendedor recibe redirect, no 200
+    assert fx['vendedor'].get('/admin/pagos_simulados').status_code == 302
+
+
+def test_reservas_admin_con_sidebar_y_activo(fx):
+    r = fx['admin'].get('/admin/reservas')
+    assert r.status_code == 200
+    html = r.get_data(as_text=True)
+    assert 'href="/admin/reservas" class="sidebar-item activo"' in html
+    assert 'navbar navbar-cleoferr navbar-expand-lg' not in html
+    assert 'Reservas de stock vencidas' in html      # contenido de la hija vivo
+
+
+def test_reservas_vendedor_bloqueado(fx):
+    # Ruta solo admin (admin_required): el vendedor recibe redirect, no 200
+    assert fx['vendedor'].get('/admin/reservas').status_code == 302
