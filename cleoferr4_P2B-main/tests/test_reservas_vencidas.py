@@ -78,6 +78,10 @@ def _venta_pendiente(cur, tipo_pago='tarjeta', fecha_offset_seg=None,
 
 @pytest.fixture()
 def fx(monkeypatch):
+    # Plazos FIJOS para los tests: independientes del .env real.
+    # (El .env puede tener RESERVA_PLAZO_TARJETA_SEG=60 para pruebas.)
+    monkeypatch.setenv('RESERVA_PLAZO_TARJETA_SEG', str(30 * 60))
+    monkeypatch.setenv('RESERVA_PLAZO_OPERACION_SEG', str(24 * 3600))
     raw = db_supabase.engine_tienda.raw_connection()
     proxy = ConnProxy(raw)
     cur = proxy.cursor(dictionary=True)
