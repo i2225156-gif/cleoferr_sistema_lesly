@@ -16,6 +16,7 @@ import logging
 import os
 from decimal import Decimal
 
+from .ofertas import SQL_IMPORTE_LINEA
 from .sunat.base import ComprobanteSolicitud
 from .sunat.registro import crear_proveedor_sunat
 
@@ -84,9 +85,13 @@ def texto_qr(tipo, serie, dig, igv, total, fecha):
 
 
 def _totales_desde_detalle(cursor, id_venta):
-    """Totales recalculados de detalle_venta (precios con IGV incluido)."""
-    cursor.execute("""
-        SELECT COALESCE(SUM(cantidad * precio_unitario), 0) AS total
+    """Totales recalculados de detalle_venta (precios con IGV incluido).
+
+    El total es el NETO con el descuento congelado (fórmula única de
+    services.ofertas); Op. Gravada e IGV se derivan de ese neto.
+    """
+    cursor.execute(f"""
+        SELECT COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='')}), 0) AS total
           FROM detalle_venta WHERE id_venta = %s
     """, (id_venta,))
     row = cursor.fetchone()

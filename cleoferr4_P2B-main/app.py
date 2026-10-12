@@ -34,6 +34,8 @@ from services.comprobantes import (EMISOR, UMBRAL_BOLETA_SIN_DOC,
 from services.documentos import (NOMBRES_TIPO, normalizar_numero,
                                  tipo_documento_de_cliente, validar_documento)
 from services.inventario import devolver_stock_venta
+from services.ofertas import (SQL_IMPORTE_LINEA, SQL_PRECIO_VIGENTE,
+                              oferta_vigente)
 from services.reservas import liberar_reservas_vencidas, preview_reservas_vencidas
 from services.pagos import (cancelar_pedido_con_pago_inicial, confirmar_pago,
                             registrar_evento)
@@ -2146,16 +2148,25 @@ def _datos_comprobante(id_venta):
         if not venta:
             return None
 
-        cursor.execute("""
+        # Ítems con el descuento congelado: importe NETO por línea con la
+        # fórmula única; precio_final es lo que pagó el cliente por unidad.
+        cursor.execute(f"""
             SELECT d.id_detalle, d.cantidad, d.precio_unitario,
+                   d.descuento_unitario,
+                   (d.precio_unitario - d.descuento_unitario) AS precio_final,
                    COALESCE(d.nombre_producto, p.nombre) AS descripcion,
-                   ROUND(d.cantidad * d.precio_unitario, 2) AS importe
+                   ROUND({SQL_IMPORTE_LINEA.format(p='d.')}, 2) AS importe
             FROM detalle_venta d
             LEFT JOIN producto p ON d.id_producto = p.id_producto
             WHERE d.id_venta = %s
             ORDER BY d.id_detalle
         """, (id_venta,))
         items = cursor.fetchall()
+        # Descuento total aplicado en la venta (fila informativa del
+        # comprobante: solo se muestra si es > 0)
+        total_descuento = round(sum(
+            float(i['descuento_unitario'] or 0) * int(i['cantidad'] or 1)
+            for i in items), 2)
 
         # Método de pago registrado (efectivo / tarjeta / yape_plin)
         cursor.execute("""
@@ -2228,6 +2239,7 @@ def _datos_comprobante(id_venta):
         'cliente_doc': cliente_doc, 'cliente_nombre': cliente_nombre,
         'vendedor': vendedor, 'metodo_pago': metodo_pago,
         'subtotal': subtotal, 'igv': igv, 'total': total,
+        'descuento': total_descuento,
         'total_letras': total_letras, 'serie_numero': serie_numero,
         'qr_data': qr_data, 'emisor': EMISOR,
     }
@@ -3308,13 +3320,18 @@ def carrito_confirmar_v2():
     # Validar el carrito contra la BD: existencia, estado activo, stock y
     # precio oficial. El carrito vive en localStorage (fuente única de verdad
     # en el frontend) y puede traer IDs/precios obsoletos; aquí se corrige.
+    # El descuento estimado (oferta vigente) sale del mismo SELECT; el
+    # AUTORITATIVO se relee dentro de la TXN que congela el detalle.
     conn_val   = get_connection_tienda()
     cursor_val = conn_val.cursor(dictionary=True)
     ids_items  = {int(it.get('id_producto') or it.get('id') or 0) for it in items}
-    cursor_val.execute(
-        "SELECT id_producto, nombre, precio, stock FROM producto "
-        "WHERE id_producto = ANY(%s) AND activo = TRUE",
-        (list(ids_items),))
+    cursor_val.execute(f"""
+        SELECT p.id_producto, p.nombre, p.precio, p.stock,
+               COALESCE(of.descuento_unitario, 0) AS descuento
+          FROM producto p
+          {SQL_PRECIO_VIGENTE.format(p="p.", a="of")}
+         WHERE p.id_producto = ANY(%s) AND p.activo = TRUE
+    """, (list(ids_items),))
     prod_db = {r['id_producto']: r for r in cursor_val.fetchall()}
     conn_val.close()
 
@@ -3340,11 +3357,14 @@ def carrito_confirmar_v2():
             excluidos.append({'id_producto': pid, 'nombre': prod['nombre'],
                               'motivo': f'Stock insuficiente (quedan {stock_db})'})
             continue
-        # Precio y nombre oficiales de la BD (ignora los enviados por el cliente)
+        # Precio y nombre oficiales de la BD (ignora los enviados por el
+        # cliente); el descuento estimado sirve para el umbral de boleta,
+        # el definitivo se congela en la TXN del INSERT.
         items_ok.append({'id_producto': pid,
                          'nombre':      prod['nombre'],
                          'cantidad':    cantidad,
-                         'precio':      float(prod['precio'])})
+                         'precio':      float(prod['precio']),
+                         'descuento':   float(prod['descuento'] or 0)})
 
     if not items_ok:
         return {'ok': False,
@@ -3359,8 +3379,10 @@ def carrito_confirmar_v2():
     cursor_check = conn_check.cursor(dictionary=True)
     try:
         # Buscar pedidos pendientes del mismo cliente en los últimos 5 minutos
-        cursor_check.execute("""
-            SELECT v.id_venta, v.fecha, COALESCE(SUM(d.cantidad * d.precio_unitario), 0) as total
+        # (total con la fórmula única: descuento congelado incluido)
+        cursor_check.execute(f"""
+            SELECT v.id_venta, v.fecha,
+                   COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='d.')}), 0) as total
             FROM venta v
             JOIN detalle_venta d ON v.id_venta = d.id_venta
             WHERE v.id_cliente = %s AND v.id_estado_venta = (SELECT id_estado_venta FROM estado_venta WHERE nombre = 'pendiente')
@@ -3425,7 +3447,10 @@ def carrito_confirmar_v2():
     # rechaza; debajo del umbral se emite a "CLIENTES VARIOS" sin exigir DNI.
     dni = (data.get('dni') or '').strip() or None
     if tipo_comp_db == 'boleta':
-        total_estimado = sum(it['cantidad'] * it['precio'] for it in items_ok)
+        # El umbral de la boleta se evalúa sobre el monto a pagar (con el
+        # descuento vigente estimado por el servidor).
+        total_estimado = sum(it['cantidad'] * (it['precio'] - it['descuento'])
+                             for it in items_ok)
         if boleta_necesita_documento(total_estimado, dni):
             return {'ok': False,
                     'error': f'Para compras sobre S/ {UMBRAL_BOLETA_SIN_DOC:.0f} necesitas '
@@ -3460,11 +3485,23 @@ def carrito_confirmar_v2():
         for it in items_ok:
             id_producto = it['id_producto']
             cantidad    = it['cantidad']
-            precio_unit = it['precio']  # precio oficial de la BD, no del cliente
+            # Precio y oferta AUTORITATIVOS releídos dentro de la TXN: el
+            # descuento (id_oferta + descuento_unitario) se CONGELA aquí
+            # y no cambia aunque la oferta venza o se edite después.
+            fila_of = oferta_vigente(cursor, id_producto)
+            if fila_of is None:
+                # El producto desapareció entre la validación y la TXN
+                raise ValueError(f"Producto #{id_producto} ya no está disponible.")
+            precio_unit = fila_of['precio']        # precio base oficial
+            id_oferta   = fila_of['id_oferta']     # None si no hay oferta
+            desc_unit   = fila_of['descuento_unitario']
             cursor.execute("""
-                INSERT INTO detalle_venta (id_venta, id_producto, cantidad, precio_unitario)
-                VALUES (%s, %s, %s, %s)
-            """, (id_venta, id_producto, cantidad, precio_unit))
+                INSERT INTO detalle_venta
+                    (id_venta, id_producto, cantidad, precio_unitario,
+                     id_oferta, descuento_unitario)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (id_venta, id_producto, cantidad, precio_unit,
+                  id_oferta, desc_unit))
             cursor.execute("""
                 UPDATE producto SET stock = GREATEST(stock - %s, 0) WHERE id_producto = %s
                 RETURNING stock
@@ -3479,9 +3516,10 @@ def carrito_confirmar_v2():
                   f'Venta online #{id_venta} (cliente #{session["usuario_id"]})',
                   nuevo_stock))
 
-        # Total oficial de la venta, recalculado dentro de la misma TXN.
-        cursor.execute("""
-            SELECT COALESCE(SUM(cantidad * precio_unitario), 0) AS total
+        # Total oficial de la venta, recalculado dentro de la misma TXN con
+        # la fórmula única (descuento congelado incluido).
+        cursor.execute(f"""
+            SELECT COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='')}), 0) AS total
               FROM detalle_venta WHERE id_venta = %s
         """, (id_venta,))
         total = cursor.fetchone()[0]
@@ -3587,8 +3625,9 @@ def pago_simulado(id_transaccion):
         pago = _pago_por_transaccion(cursor, id_transaccion)
         total = None
         if pago:
-            cursor.execute("""
-                SELECT COALESCE(SUM(cantidad * precio_unitario), 0) AS total
+            # Total a pagar con la fórmula única (descuento congelado)
+            cursor.execute(f"""
+                SELECT COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='')}), 0) AS total
                   FROM detalle_venta WHERE id_venta = %s
             """, (pago['id_venta'],))
             total = cursor.fetchone()['total']
@@ -3631,9 +3670,10 @@ def pago_simulado_procesar(id_transaccion):
             return {'ok': True, 'estado': 'ya_procesado',
                     'mensaje': f"El pago ya está {pago['estado']}."}, 200
 
-        # Monto del servidor, recalculado de detalle_venta (nunca del navegador)
-        cursor.execute("""
-            SELECT COALESCE(SUM(cantidad * precio_unitario), 0) AS total
+        # Monto del servidor, recalculado de detalle_venta (nunca del
+        # navegador) con la fórmula única (descuento congelado)
+        cursor.execute(f"""
+            SELECT COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='')}), 0) AS total
               FROM detalle_venta WHERE id_venta = %s
         """, (pago['id_venta'],))
         total = cursor.fetchone()['total']
@@ -3852,8 +3892,9 @@ def admin_pagos_disparar():
         if not pago:
             flash('El pago no existe o ya no está pendiente.', 'warning')
             return redirect(url_for('admin_pagos_simulados'))
-        cursor.execute("""
-            SELECT COALESCE(SUM(cantidad * precio_unitario), 0) AS total
+        # Total con la fórmula única para firmar el evento del gatillo demo
+        cursor.execute(f"""
+            SELECT COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='')}), 0) AS total
               FROM detalle_venta WHERE id_venta = %s
         """, (pago['id_venta'],))
         total = cursor.fetchone()['total']
