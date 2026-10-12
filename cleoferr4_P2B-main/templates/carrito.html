@@ -729,9 +729,11 @@ function confirmarPedidoFinal() {
         if (d.ok) {
             localStorage.removeItem('carrito_cleoferr');
             const idPedido = d.id_pedido || '';
-            // cerrar modal y redirigir a pedido aceptado
             bootstrap.Modal.getInstance(document.getElementById('modalPago')).hide();
-            window.location.href = '/pedido_aceptado' + (idPedido ? '?id=' + idPedido : '');
+            // Si la pasarela devolvió checkout_url, continuar allí (pantalla
+            // de pago simulado); si no, al resumen del pedido.
+            window.location.href = d.checkout_url
+                || ('/pedido_aceptado' + (idPedido ? '?id=' + idPedido : ''));
         } else if (excluidos.length === 0) {
             alert('Error al procesar el pedido: ' + (d.error || 'intenta de nuevo'));
         }

@@ -25,6 +25,7 @@ from decimal import Decimal
 import db_supabase
 from psycopg2 import errors as _pg_errores
 
+from .inventario import devolver_stock_venta
 from .pasarela.base import EstadoPago, PagoResultado
 
 _LOCK_DEFECTO = "5s"
@@ -75,6 +76,36 @@ def _detalle_neutral(resultado, fuente):
         if det.get(clave):
             d[clave] = det[clave]
     return d
+
+
+def cancelar_pedido_con_pago_inicial(conn, id_venta):
+    """Fallo del arranque del pago (crear_pago o el UPDATE de la referencia).
+
+    Cancela venta y pago en UNA transacción y devuelve el stock con el
+    helper idempotente de B2. El estado 'cancelado' existe tras db/06.
+    Re-ejecutable: el guardia del UPDATE de venta y la marca de B2 evitan
+    duplicar la devolución de stock.
+    """
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            UPDATE venta
+               SET id_estado_venta = (SELECT id_estado_venta FROM estado_venta
+                                        WHERE nombre = 'cancelado')
+             WHERE id_venta = %s
+               AND id_estado_venta <> (SELECT id_estado_venta FROM estado_venta
+                                        WHERE nombre = 'cancelado')
+            RETURNING id_venta
+        """, (id_venta,))
+        if cursor.fetchone():
+            devolver_stock_venta(cursor, id_venta)
+        cursor.execute(
+            "UPDATE pago SET estado = 'cancelado' WHERE id_venta = %s AND estado = 'pendiente'",
+            (id_venta,))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def confirmar_pago(id_pago, resultado, conn=None, fuente="retorno",

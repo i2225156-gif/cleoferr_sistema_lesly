@@ -27,8 +27,10 @@ except Exception as e:
 from db import db
 from db_supabase import get_connection_auth, get_connection_tienda
 from services.inventario import devolver_stock_venta
-from services.pagos import confirmar_pago, registrar_evento
-from services.pasarela import EstadoPago, PagoResultado, crear_pasarela
+from services.pagos import (cancelar_pedido_con_pago_inicial, confirmar_pago,
+                            registrar_evento)
+from services.pasarela import (EstadoPago, PagoResultado, PagoSolicitud,
+                               crear_pasarela)
 from sqlalchemy import text
 
 load_dotenv()
@@ -196,6 +198,8 @@ _CSRF_PROTEGIDAS = {
     'carrito_confirmar_v2', 'carrito_agregar',
     'registrar_pos',
     'pedido_cambiar_estado',
+    'pago_simulado_procesar',
+    'admin_pagos_disparar',
 }
 
 
@@ -3187,8 +3191,11 @@ def carrito_confirmar_v2():
     conn   = get_connection_tienda()
     cursor = conn.cursor()
     try:
-        # El esquema real de venta usa FKs: id_tipo_venta e id_estado_venta.
-        # El método de pago se registra en la tabla pago (id_tipo_pago).
+        # TXN corta (corrección 1): venta + pago 'pendiente' + detalle +
+        # stock + movimiento + comprobante (D1). El monto del pago es el
+        # total RECALCULADO de detalle_venta (Decimal), jamás del navegador.
+        # La pasarela se llama SOLO después del commit: nunca con una
+        # transacción abierta ni antes de guardar.
         cursor.execute("""
             INSERT INTO venta (id_tipo_venta, id_cliente, id_estado_venta, num_operacion)
             VALUES ((SELECT id_tipo_venta FROM tipo_venta WHERE nombre = 'online'),
@@ -3198,20 +3205,11 @@ def carrito_confirmar_v2():
             RETURNING id_venta
         """, (session['usuario_id'], num_operacion))
         id_venta = cursor.fetchone()[0]
-        try:
-            # Si hay caja abierta, asociar el pago a la caja actual
-            cursor.execute("SELECT id_caja FROM caja WHERE estado = 'abierta' LIMIT 1")
-            fila_caja  = cursor.fetchone()
-            id_caja_a  = fila_caja[0] if fila_caja else None
-            cursor.execute("""
-                INSERT INTO pago (id_venta, id_tipo_pago, id_caja, estado)
-                VALUES (%s, (SELECT id_tipo_pago FROM tipo_pago WHERE nombre = %s), %s, 'pendiente')
-            """, (id_venta, metodo_db, id_caja_a))
-        except Exception:
-            conn.rollback()
-            app.logger.exception("Error al insertar pago del pedido id_venta=%s", id_venta)
-            return {'ok': False,
-                    'error': 'No se pudo registrar el pago. El pedido no se creó. Intenta de nuevo.'}, 500
+
+        # Si hay caja abierta, asociar el pago a la caja actual
+        cursor.execute("SELECT id_caja FROM caja WHERE estado = 'abierta' LIMIT 1")
+        fila_caja  = cursor.fetchone()
+        id_caja_a  = fila_caja[0] if fila_caja else None
 
         for it in items_ok:
             id_producto = it['id_producto']
@@ -3235,29 +3233,193 @@ def carrito_confirmar_v2():
                   f'Venta online #{id_venta} (cliente #{session["usuario_id"]})',
                   nuevo_stock))
 
-        # Generar número de comprobante correlativo por tipo (B000001 / F000001)
-        # dentro de la misma transacción: si falla, toda la venta se revierte.
+        # Total oficial de la venta, recalculado dentro de la misma TXN.
+        cursor.execute("""
+            SELECT COALESCE(SUM(cantidad * precio_unitario), 0) AS total
+              FROM detalle_venta WHERE id_venta = %s
+        """, (id_venta,))
+        total = cursor.fetchone()[0]
+
+        # Pago 'pendiente' con el monto oficial (Decimal) y la pasarela
+        # configurada; id_transaccion se completa tras crear_pago.
+        cursor.execute("""
+            INSERT INTO pago (id_venta, id_tipo_pago, id_caja, estado, pasarela, monto)
+            VALUES (%s, (SELECT id_tipo_pago FROM tipo_pago WHERE nombre = %s), %s,
+                    'pendiente', %s, %s)
+            RETURNING id_pago
+        """, (id_venta, metodo_db, id_caja_a, _PASARELA.nombre, total))
+        id_pago = cursor.fetchone()[0]
+
+        # Comprobante: en 2.1 sigue creándose con el pedido (D1); al inicio
+        # de 2.2 la emisión pasará a ocurrir al confirmar el pago.
         num_comp = _siguiente_numero_comprobante(cursor, tipo_comp_db)
+        cursor.execute("""
+            INSERT INTO comprobante (id_venta, id_tipo_comprobante, numero, ruc, serie)
+            VALUES (%s, (SELECT id_tipo_comprobante FROM tipo_comprobante WHERE nombre = %s), %s, %s, %s)
+        """, (id_venta, tipo_comp_db, num_comp, ruc,
+              'F001' if tipo_comp_db == 'factura' else 'B001'))
+
+        conn.commit()   # fin de la TXN corta: el pedido quedó guardado
+
+        # AHORA se habla con la pasarela (sin transacción abierta).
+        try:
+            resultado_pasarela = _PASARELA.crear_pago(PagoSolicitud(
+                id_venta=id_venta,
+                monto=total,
+                metodo=metodo_db,
+                clave_idempotencia=f"venta-{id_venta}",
+                datos_cliente={'nombre': session.get('nombre') or ''}))
+        except Exception:
+            app.logger.exception("crear_pago falló para la venta %s", id_venta)
+            cancelar_pedido_con_pago_inicial(conn, id_venta)
+            return {'ok': False,
+                    'error': 'No se pudo iniciar el pago. El pedido fue cancelado. Intenta de nuevo.'}, 502
+
+        if not resultado_pasarela.id_pago_proveedor or resultado_pasarela.estado is not EstadoPago.PENDIENTE:
+            cancelar_pedido_con_pago_inicial(conn, id_venta)
+            return {'ok': False,
+                    'error': 'La pasarela no pudo iniciar el pago. El pedido fue cancelado.'}, 502
+
+        # Segunda TXN: guardar la referencia del proveedor (id_transaccion
+        # y metadatos neutrales en detalle_proveedor).
         try:
             cursor.execute("""
-                INSERT INTO comprobante (id_venta, id_tipo_comprobante, numero, ruc, serie)
-                VALUES (%s, (SELECT id_tipo_comprobante FROM tipo_comprobante WHERE nombre = %s), %s, %s, %s)
-            """, (id_venta, tipo_comp_db, num_comp, ruc,
-                  'F001' if tipo_comp_db == 'factura' else 'B001'))
+                UPDATE pago
+                   SET id_transaccion = %s,
+                       detalle_proveedor = COALESCE(detalle_proveedor, '{}'::jsonb) || %s::jsonb
+                 WHERE id_pago = %s
+            """, (resultado_pasarela.id_pago_proveedor,
+                  json.dumps({'checkout_url': resultado_pasarela.checkout_url,
+                              'requiere_verificacion': bool(resultado_pasarela.requiere_verificacion)},
+                             ensure_ascii=False),
+                  id_pago))
+            conn.commit()
         except Exception:
-            conn.rollback()
-            app.logger.exception("Error al insertar comprobante del pedido id_venta=%s", id_venta)
+            app.logger.exception("No se pudo guardar la referencia de la pasarela (venta %s)", id_venta)
+            cancelar_pedido_con_pago_inicial(conn, id_venta)
             return {'ok': False,
-                    'error': 'No se pudo generar el comprobante. El pedido no se creó. Intenta de nuevo.'}, 500
+                    'error': 'No se pudo registrar el pago. El pedido fue cancelado. Intenta de nuevo.'}, 500
 
-        conn.commit()
         session['ultimo_pedido'] = items_ok
-        return {'ok': True, 'id_pedido': id_venta, 'excluidos': excluidos}
+        return {'ok': True, 'id_pedido': id_venta, 'id_pago': id_pago,
+                'excluidos': excluidos,
+                'checkout_url': resultado_pasarela.checkout_url,
+                'requiere_verificacion': bool(resultado_pasarela.requiere_verificacion)}, 200
 
     except Exception:
         conn.rollback()
         app.logger.exception("Error carrito_confirmar_v2")
         return {'ok': False, 'error': 'No se pudo confirmar el pedido. Intenta de nuevo más tarde.'}, 500
+    finally:
+        conn.close()
+
+
+# ── Pantalla de pago simulado (checkout de la demo, Tramo 2) ────
+# Deshabilitada si PAGO_MODO != 'simulado'. El GET solo consulta (nunca
+# escribe). Los datos de tarjeta JAMÁS salen del navegador: el POST recibe
+# únicamente el resultado simulado; el monto lo recalcula el servidor desde
+# detalle_venta y confirmar_pago sigue siendo la única puerta a 'confirmado'.
+def _pago_por_transaccion(cursor, id_transaccion):
+    cursor.execute("""
+        SELECT p.id_pago, p.id_transaccion, p.monto, p.estado, v.id_venta,
+               v.id_cliente, v.id_estado_venta, ev.nombre AS venta_estado
+          FROM pago p
+          JOIN venta v ON v.id_venta = p.id_venta
+          JOIN estado_venta ev ON ev.id_estado_venta = v.id_estado_venta
+         WHERE p.id_transaccion = %s
+    """, (id_transaccion,))
+    return cursor.fetchone()
+
+
+@app.route('/pago/simulado/<id_transaccion>')
+@login_required
+def pago_simulado(id_transaccion):
+    if _PASARELA.modo != 'simulado':
+        flash('El pago simulado está deshabilitado (PAGO_MODO).', 'danger')
+        return redirect(url_for('catalogo_cliente'))
+    conn = get_connection_tienda()
+    try:
+        cursor = conn.cursor(dictionary=True)
+        pago = _pago_por_transaccion(cursor, id_transaccion)
+        total = None
+        if pago:
+            cursor.execute("""
+                SELECT COALESCE(SUM(cantidad * precio_unitario), 0) AS total
+                  FROM detalle_venta WHERE id_venta = %s
+            """, (pago['id_venta'],))
+            total = cursor.fetchone()['total']
+    finally:
+        conn.close()
+    if not pago:
+        abort(404)
+    if session.get('rol') == 'cliente' and pago['id_cliente'] != session.get('usuario_id'):
+        abort(403)   # un cliente no ve el pago de otro
+    if pago['estado'] != 'pendiente':
+        flash('Este pago ya fue procesado.', 'info')
+        return redirect(url_for('pedido_aceptado', id=pago['id_venta']))
+    return render_template('pago_simulado.html', pago=pago, total=total)
+
+
+@app.route('/pago/simulado/<id_transaccion>/procesar', methods=['POST'])
+@login_required
+def pago_simulado_procesar(id_transaccion):
+    """Recibe SOLO el resultado simulado ('aprobado'|'rechazado') con CSRF.
+
+    Nada de datos de tarjeta: se ignoran campos extra si llegaran. El
+    monto se recalcula del servidor y la transición pasa por confirmar_pago.
+    """
+    if _PASARELA.modo != 'simulado':
+        return {'ok': False, 'error': 'pago simulado deshabilitado'}, 403
+    data = request.get_json(silent=True) or request.form or {}
+    resultado_sim = str(data.get('resultado') or '').strip().lower()
+    if resultado_sim not in ('aprobado', 'rechazado'):
+        return {'ok': False, 'error': 'resultado simulado inválido'}, 400
+
+    conn = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        pago = _pago_por_transaccion(cursor, id_transaccion)
+        if not pago:
+            return {'ok': False, 'error': 'pago no encontrado'}, 404
+        if session.get('rol') == 'cliente' and pago['id_cliente'] != session.get('usuario_id'):
+            return {'ok': False, 'error': 'no autorizado'}, 403
+        if pago['estado'] != 'pendiente':
+            return {'ok': True, 'estado': 'ya_procesado',
+                    'mensaje': f"El pago ya está {pago['estado']}."}, 200
+
+        # Monto del servidor, recalculado de detalle_venta (nunca del navegador)
+        cursor.execute("""
+            SELECT COALESCE(SUM(cantidad * precio_unitario), 0) AS total
+              FROM detalle_venta WHERE id_venta = %s
+        """, (pago['id_venta'],))
+        total = cursor.fetchone()['total']
+
+        estado_final = (EstadoPago.CONFIRMADO if resultado_sim == 'aprobado'
+                        else EstadoPago.RECHAZADO)
+        id_evento = f"checkout-{id_transaccion}-{resultado_sim}"
+        id_pago_evento = registrar_evento(
+            cursor, _PASARELA.nombre, id_evento, 'checkout_simulado',
+            pago['id_pago'], estado_final.value, True, True,
+            {'fuente': 'checkout', 'tipo': 'checkout_simulado'})
+        if id_pago_evento is None:
+            # doble clic / reenvío del mismo intento: no reprocesar
+            conn.commit()
+            return {'ok': True, 'estado': 'repetido'}, 200
+
+        res = confirmar_pago(pago['id_pago'],
+                             PagoResultado(id_pago_proveedor=id_transaccion,
+                                           estado=estado_final, monto=total),
+                             conn=conn, fuente='checkout',
+                             id_pago_evento=id_pago_evento)
+        conn.commit()
+        return {'ok': res['estado'] in ('confirmado', 'rechazado',
+                                        'ya_confirmado', 'ya_rechazado'),
+                'estado': res['estado'], 'motivo': res.get('motivo'),
+                'id_pedido': pago['id_venta']}, 200
+    except Exception:
+        conn.rollback()
+        app.logger.exception("Error procesando pago simulado %s", id_transaccion)
+        return {'ok': False, 'error': 'error interno'}, 500
     finally:
         conn.close()
 
@@ -3272,21 +3434,12 @@ def carrito_confirmar_v2():
 _PASARELA = crear_pasarela()
 
 
-@app.route('/webhooks/pago/<proveedor>', methods=['POST'])
-def webhook_pago(proveedor):
-    """Notificaciones del proveedor configurado (nunca de nombres de URL).
-
-    Flujo en UNA transacción por petición: verificar firma -> reclamar el
-    evento (idempotencia por id de evento en pago_evento) -> registrar
-    rechazados sin tocar el pago -> confirmar_pago (única puerta a
-    'confirmado'). Solo POST: nunca se escribe en un GET.
-    """
-    if proveedor != _PASARELA.nombre:
-        abort(404)
-    payload = request.get_data()
-    ev = _PASARELA.procesar_webhook(payload, request.headers)
-    id_evento = ev.id_evento or ('sin-id-' + hashlib.sha256(payload).hexdigest()[:24])
-
+def _procesar_evento_pago(ev, id_evento_fallback=None):
+    """Núcleo del webhook: reclamar el evento (idempotencia por id),
+    registrar rechazados sin tocar el pago y pasar por confirmar_pago.
+    Lo usan la ruta HTTP y el gatillo del panel de demo. Devuelve
+    (respuesta, codigo_http)."""
+    id_evento = ev.id_evento or id_evento_fallback or ('int-' + uuid.uuid4().hex[:16])
     conn = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
     try:
@@ -3301,8 +3454,8 @@ def webhook_pago(proveedor):
         detalle = {'tipo': str(ev.detalle_sin_sensibles.get('tipo') or ''),
                    'fuente': 'webhook'}
         id_pago_evento = registrar_evento(
-            cursor, proveedor, id_evento, detalle['tipo'] or 'evento', id_pago,
-            ev.estado.value if ev.estado else None,
+            cursor, _PASARELA.nombre, id_evento, detalle['tipo'] or 'evento',
+            id_pago, ev.estado.value if ev.estado else None,
             ev.firma_valida, not ev.fuera_de_tiempo, detalle)
 
         if id_pago_evento is None:
@@ -3312,7 +3465,7 @@ def webhook_pago(proveedor):
             cursor.execute("""SELECT id_pago_evento, firma_valida, procesado_en
                                 FROM pago_evento
                                WHERE proveedor = %s AND id_evento_proveedor = %s""",
-                           (proveedor, id_evento))
+                           (_PASARELA.nombre, id_evento))
             previo = cursor.fetchone()
             reanudar = (ev.firma_valida and not ev.fuera_de_tiempo
                         and previo
@@ -3368,6 +3521,110 @@ def webhook_pago(proveedor):
         return {'ok': False, 'error': 'error interno'}, 500
     finally:
         conn.close()
+
+
+@app.route('/webhooks/pago/<proveedor>', methods=['POST'])
+def webhook_pago(proveedor):
+    """Notificaciones del proveedor configurado (nunca de nombres de URL).
+
+    Flujo en UNA transacción por petición: verificar firma -> reclamar el
+    evento (idempotencia por id de evento en pago_evento) -> registrar
+    rechazados sin tocar el pago -> confirmar_pago (única puerta a
+    'confirmado'). Solo POST: nunca se escribe en un GET.
+    """
+    if proveedor != _PASARELA.nombre:
+        abort(404)
+    payload = request.get_data()
+    ev = _PASARELA.procesar_webhook(payload, request.headers)
+    id_evento = ev.id_evento or ('sin-id-' + hashlib.sha256(payload).hexdigest()[:24])
+    return _procesar_evento_pago(ev, id_evento)
+
+
+# ── Panel de demo: eventos de pago simulado (2c) ────────────────
+# Solo administradores. El gatillo dispara un webhook simulado FIRMADO por
+# el servidor (el secreto jamás sale de él). El GET solo consulta: nunca
+# se escribe en un GET. Deshabilitado si PAGO_MODO != 'simulado'.
+@app.route('/admin/pagos_simulados')
+@login_required
+@admin_required
+def admin_pagos_simulados():
+    if _PASARELA.modo != 'simulado':
+        flash('Panel de pagos simulados deshabilitado (PAGO_MODO).', 'danger')
+        return redirect(url_for('productos'))
+    conn = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("""
+            SELECT pe.recibido_en, pe.proveedor, pe.id_evento_proveedor, pe.tipo,
+                   pe.id_pago, pe.estado_resultante, pe.firma_valida,
+                   pe.dentro_de_tolerancia, pe.procesado_en, pe.detalle,
+                   p.id_transaccion, p.monto AS pago_monto, v.id_venta
+              FROM pago_evento pe
+              LEFT JOIN pago p ON p.id_pago = pe.id_pago
+              LEFT JOIN venta v ON v.id_venta = p.id_venta
+             ORDER BY pe.recibido_en DESC
+             LIMIT 30
+        """)
+        eventos = cursor.fetchall()
+        cursor.execute("""
+            SELECT p.id_pago, p.id_transaccion, p.monto, v.id_venta
+              FROM pago p
+              JOIN venta v ON v.id_venta = p.id_venta
+             WHERE p.estado = 'pendiente' AND p.id_transaccion IS NOT NULL
+               AND p.monto IS NOT NULL
+             ORDER BY v.id_venta DESC
+             LIMIT 50
+        """)
+        pendientes = cursor.fetchall()
+    finally:
+        conn.close()
+    return render_template('admin_pagos_simulados.html',
+                           eventos=eventos, pendientes=pendientes)
+
+
+@app.route('/admin/pagos_simulados/disparar', methods=['POST'])
+@login_required
+@admin_required
+def admin_pagos_disparar():
+    """Gatillo de la demo: dispara un evento firmado para un pago
+    PENDIENTE. El monto lo recalcula el servidor desde detalle_venta."""
+    if _PASARELA.modo != 'simulado':
+        return {'ok': False, 'error': 'deshabilitado'}, 403
+    id_pago = request.form.get('id_pago', type=int)
+    estado = (request.form.get('estado') or '').strip()
+    if not id_pago or estado not in ('confirmado', 'rechazado'):
+        flash('Parámetros inválidos para el gatillo de demo.', 'danger')
+        return redirect(url_for('admin_pagos_simulados'))
+    conn = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("""
+            SELECT p.id_pago, p.id_transaccion, p.id_venta
+              FROM pago p
+             WHERE p.id_pago = %s AND p.estado = 'pendiente'
+               AND p.id_transaccion IS NOT NULL
+        """, (id_pago,))
+        pago = cursor.fetchone()
+        if not pago:
+            flash('El pago no existe o ya no está pendiente.', 'warning')
+            return redirect(url_for('admin_pagos_simulados'))
+        cursor.execute("""
+            SELECT COALESCE(SUM(cantidad * precio_unitario), 0) AS total
+              FROM detalle_venta WHERE id_venta = %s
+        """, (pago['id_venta'],))
+        total = cursor.fetchone()['total']
+    finally:
+        conn.close()
+    payload, headers = _PASARELA.firmar_evento(
+        pago['id_transaccion'], EstadoPago(estado), total, tipo='pago_actualizado')
+    ev = _PASARELA.procesar_webhook(payload, headers)
+    respuesta, _codigo = _procesar_evento_pago(ev)
+    est = respuesta.get('estado')
+    if respuesta.get('ok') or est in ('repetido', 'ignorado', 'sin_pago_asociado'):
+        flash(f"Evento simulado procesado: estado '{est}'.", 'success')
+    else:
+        flash(f"Evento simulado no aplicado: {respuesta.get('error') or respuesta.get('motivo') or est}.", 'warning')
+    return redirect(url_for('admin_pagos_simulados'))
 
 
 # ── Consultas RUC/DNI (proxy seguro hacia la API Perú; placeholder de la futura API SUNAT) ──
