@@ -32,6 +32,7 @@ from services.comprobantes import (EMISOR, UMBRAL_BOLETA_SIN_DOC,
                                     siguiente_numero as _siguiente_numero_comprobante,
                                     texto_qr)
 from services.inventario import devolver_stock_venta
+from services.reservas import liberar_reservas_vencidas, preview_reservas_vencidas
 from services.pagos import (cancelar_pedido_con_pago_inicial, confirmar_pago,
                             registrar_evento)
 from services.pasarela import (EstadoPago, PagoResultado, PagoSolicitud,
@@ -205,6 +206,7 @@ _CSRF_PROTEGIDAS = {
     'pedido_cambiar_estado',
     'pago_simulado_procesar',
     'admin_pagos_disparar',
+    'admin_reservas_liberar',
 }
 
 
@@ -3741,6 +3743,59 @@ def admin_pagos_disparar():
     else:
         flash(f"Evento simulado no aplicado: {respuesta.get('error') or respuesta.get('motivo') or est}.", 'warning')
     return redirect(url_for('admin_pagos_simulados'))
+
+
+# ── Reservas de stock vencidas (Fase C) ─────────────────────────
+# Botón POST admin con vista previa en el GET (solo lectura).
+# Plazos: 30 min tarjeta / 24 h N.o de operación, desde venta.fecha,
+# SOLO mientras el pago siga 'pendiente'. Nunca en un GET.
+@app.route('/admin/reservas')
+@login_required
+@admin_required
+def admin_reservas():
+    """Vista previa de reservas vencidas: qué se libera si pulsas el botón.
+
+    Solo lectura: NO libera nada. Muestra ids, tipo de pago y tiempo
+    transcurrido (sin datos personales).
+    """
+    conn = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        vencidas = preview_reservas_vencidas(cursor)
+    finally:
+        conn.close()
+    return render_template('admin_reservas.html', vencidas=vencidas)
+
+
+@app.route('/admin/reservas/liberar', methods=['POST'])
+@login_required
+@admin_required
+def admin_reservas_liberar():
+    """Libera TODAS las reservas vencidas (venta+pago->cancelado, stock B2).
+
+    Transacción única con FOR UPDATE por venta; idempotente.
+    El trigger de auditoria registra cada cancelación.
+    """
+    conn = get_connection_tienda()
+    try:
+        resultado = liberar_reservas_vencidas(conn)
+    except Exception:
+        conn.rollback()
+        app.logger.exception("Error liberando reservas vencidas")
+        flash('Error al liberar las reservas. Revisa el log.', 'danger')
+        return redirect(url_for('admin_reservas'))
+    finally:
+        conn.close()
+    if resultado['liberadas'] > 0:
+        flash(f"Se liberaron {resultado['liberadas']} reservas "
+              f"(ids: {', '.join(str(i) for i in resultado['ids'])}).",
+              'success')
+    else:
+        flash('No había reservas vencidas que liberar.', 'info')
+    if resultado['errores'] > 0:
+        flash(f"{resultado['errores']} ventas no se pudieron liberar "
+              '(revisa el log).', 'warning')
+    return redirect(url_for('admin_reservas'))
 
 
 # ── Consultas RUC/DNI (proxy seguro hacia la API Perú; placeholder de la futura API SUNAT) ──

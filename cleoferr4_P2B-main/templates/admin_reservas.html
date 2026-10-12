@@ -1,0 +1,87 @@
+{% extends 'base.html' %}
+{% block titulito %}Reservas vencidas – Cleoferr{% endblock %}
+{% block contenido %}
+<div class="container py-4">
+  <div class="d-flex justify-content-between align-items-center mb-4">
+    <h4 class="fw-bold mb-0">
+      <i class="fa fa-hourglass-end me-2"></i>Reservas de stock vencidas
+    </h4>
+  </div>
+
+  <div class="alert alert-info" style="font-size:0.85rem">
+    <strong>Cómo funciona:</strong> cuando un cliente inicia un checkout, el stock
+    se reserva (decrementa). Si el pago no se completa en
+    <strong>30 minutos</strong> (tarjeta) o <strong>24 horas</strong> (efectivo / Yape / N.º de operación),
+    la reserva vence y el stock debe volver al catálogo. Solo se liberan pedidos
+    <strong>pendientes con pago pendiente</strong>; nunca se tocan ventas confirmadas,
+    pagos rechazados (reintento) ni ventas POS.
+  </div>
+
+  {% if vencidas %}
+  <div class="card shadow-sm mb-4" style="border-radius:12px;border:1px solid #f59e0b">
+    <div class="card-header bg-warning text-dark" style="border-radius:12px 12px 0 0">
+      <strong><i class="fa fa-exclamation-triangle me-2"></i>Vista previa: {{ vencidas|length }} reserva(s) vencida(s) que se liberarán</strong>
+    </div>
+    <div class="card-body">
+      <div class="table-responsive">
+        <table class="table table-sm table-hover align-middle mb-0">
+          <thead>
+            <tr>
+              <th>Venta</th>
+              <th>Tipo de pago</th>
+              <th>Tiempo transcurrido</th>
+              <th>Plazo</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for v in vencidas %}
+            <tr>
+              <td>#{{ v.id_venta }}</td>
+              <td>{{ v.tipo_pago }}</td>
+              <td>
+                {% set horas = v.segundos_transcurridos // 3600 %}
+                {% set minutos = (v.segundos_transcurridos % 3600) // 60 %}
+                {% if horas > 0 %}
+                  {{ horas }} h {{ minutos }} min
+                {% else %}
+                  {{ minutos }} min
+                {% endif %}
+              </td>
+              <td>
+                {% set plazo_h = v.plazo_segundos // 3600 %}
+                {% if plazo_h > 0 %}{{ plazo_h }} h{% else %}{{ v.plazo_segundos // 60 }} min{% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <hr>
+      <p class="mb-2" style="font-size:0.85rem">
+        Al pulsar el botón: cada venta pasará a <strong>cancelado</strong>,
+        su pago a <strong>cancelado</strong>, y el stock reservado volverá
+        al catálogo (devolución idempotente B2). El trigger de auditoria
+        registrará cada cambio.
+      </p>
+      <form method="POST" action="/admin/reservas/liberar">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="btn btn-naranja fw-bold"
+                onclick="return confirm('¿Liberar {{ vencidas|length }} reserva(s)? El stock volverá al catálogo y las ventas se cancelarán.')">
+          <i class="fa fa-unlock me-1"></i>Liberar {{ vencidas|length }} reserva(s) vencida(s)
+        </button>
+      </form>
+    </div>
+  </div>
+  {% else %}
+  <div class="card shadow-sm" style="border-radius:12px">
+    <div class="card-body text-center py-5">
+      <i class="fa fa-check-circle text-success fa-3x mb-3 d-block"></i>
+      <p class="mb-0 text-muted">No hay reservas vencidas en este momento.</p>
+      <p class="mb-0 text-muted" style="font-size:0.85rem">
+        Los pedidos pendientes aún están dentro de su plazo de pago.
+      </p>
+    </div>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}
