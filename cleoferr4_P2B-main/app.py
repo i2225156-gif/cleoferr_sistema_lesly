@@ -3319,6 +3319,37 @@ def carrito_confirmar_v2():
         return {'ok': False,
                 'error': 'El RUC no es válido (revisa el dígito verificador). El pedido no se creó.'}, 400
 
+    # AUTORRELLENO (documento): el SERVIDOR lee el documento del cliente
+    # desde AUTH y no confía en el navegador. Si el cliente ya tiene RUC,
+    # el servidor lo usa para factura; si tiene DNI, lo usa para boleta.
+    conn_auth_doc = get_connection_auth()
+    cursor_auth_doc = conn_auth_doc.cursor(dictionary=True)
+    try:
+        cursor_auth_doc.execute(
+            """SELECT LOWER(TRIM(td.nombre)) AS tipo, c.nro_documento
+              FROM cliente c
+              LEFT JOIN tipo_documento td ON td.id_tipo_documento = c.id_tipo_documento
+             WHERE c.id_cliente = %s""",
+            (session['usuario_id'],))
+        fila_doc = cursor_auth_doc.fetchone()
+    finally:
+        conn_auth_doc.close()
+    doc_tipo_actual = fila_doc['tipo'] if fila_doc else None
+    doc_numero_actual = normalizar_numero(fila_doc['nro_documento']) if fila_doc and fila_doc['nro_documento'] else None
+
+    if doc_tipo_actual == 'ruc' and doc_numero_actual:
+        # El servidor TIENE el RUC: lo usa (autoritativo) para factura
+        ruc = doc_numero_actual
+        tipo_comp_db = 'factura'
+        dni = None
+    elif doc_tipo_actual == 'ruc' and not doc_numero_actual and tipo_comp_db == 'factura':
+        return {'ok': False,
+                'error': 'Tu perfil tiene RUC sin número. Corrígelo en tu perfil.'}, 400
+    elif doc_numero_actual:
+        # El cliente tiene DNI/CE/pasaporte: el servidor lo usa para boleta
+        dni = doc_numero_actual
+        tipo_comp_db = 'boleta'
+
     # CLIENTES VARIOS (fase B): boleta sin documento sobre el umbral se
     # rechaza; debajo del umbral se emite a "CLIENTES VARIOS" sin exigir DNI.
     dni = (data.get('dni') or '').strip() or None
