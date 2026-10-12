@@ -1,6 +1,7 @@
-{% extends 'base.html' %}
+{% extends 'admin_base.html' %}
+{% set seccion_activa = 'productos' %}
 {% block titulito %}{% if producto %}Editar{% else %}Nuevo{% endif %} Producto – Cleoferr{% endblock %}
-{% block contenido %}
+{% block admin_contenido %}
 
 <div class="page-header">
     <div>

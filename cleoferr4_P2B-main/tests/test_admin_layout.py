@@ -1,4 +1,6 @@
-"""Módulo admin unificado (C2a): sidebar único + dashboard/pedidos/ofertas.
+"""Módulo admin unificado (C2a+C2b): sidebar único; hijas migradas:
+dashboard/pedidos/pedido_detalle/ofertas (C2a) y productos/producto_form/
+producto_detalle/inventario/alertas (C2b).
 
 Contra la BD real con conexión proxied (rollback): nada persiste. Por
 plantilla migrada verifica: 200 para admin y vendedor (donde el rol lo
@@ -144,3 +146,85 @@ def test_ofertas_con_sidebar_y_activo(fx):
 def test_navbar_sigue_en_paginas_no_admin(fx):
     html = fx['admin'].get('/catalogo').get_data(as_text=True)
     assert 'navbar navbar-cleoferr navbar-expand-lg' in html  # catálogo lo conserva
+
+
+# ── C2b: Productos (listado, formulario y detalle) ────────────────
+
+def test_productos_admin_con_sidebar_y_activo(fx):
+    r = fx['admin'].get('/productos')
+    assert r.status_code == 200
+    html = r.get_data(as_text=True)
+    assert 'href="/productos" class="sidebar-item activo"' in html
+    assert 'navbar navbar-cleoferr navbar-expand-lg' not in html
+    assert 'GESTIÓN DE PRODUCTOS' in html           # contenido de la hija vivo
+
+
+def test_productos_vendedor_sin_items_solo_admin(fx):
+    r = fx['vendedor'].get('/productos')
+    assert r.status_code == 200
+    html = r.get_data(as_text=True)
+    assert 'CLEOFERR Admin' in html                 # sidebar presente
+    assert 'href="/productos" class="sidebar-item activo"' in html
+    # Ocultos para vendedor (permiso real en backend igualmente)
+    assert '/admin/dashboard' not in html
+    assert '/admin/pagos_simulados' not in html
+    assert '/admin/reservas' not in html
+
+
+def test_producto_form_con_sidebar_y_activo(fx):
+    r = fx['admin'].get('/productos/nuevo')
+    assert r.status_code == 200
+    html = r.get_data(as_text=True)
+    assert 'href="/productos" class="sidebar-item activo"' in html
+    assert 'navbar navbar-cleoferr navbar-expand-lg' not in html
+    assert 'Nuevo Producto' in html
+
+
+def test_producto_detalle_con_sidebar_y_activo(fx):
+    # db.get_or_404 usa la sesión SQLAlchemy (conexión aparte): el producto
+    # sintético del fixture vive en una txn sin confirmar invisible para esa
+    # sesión, así que se usa un id REAL leído por SELECT (solo lectura).
+    fx['cur'].execute(
+        "SELECT id_producto FROM producto ORDER BY id_producto LIMIT 1")
+    fila = fx['cur'].fetchone()
+    assert fila, 'no hay productos en la BD'
+    r = fx['admin'].get(f"/productos/detalle/{fila['id_producto']}")
+    assert r.status_code == 200
+    html = r.get_data(as_text=True)
+    assert 'href="/productos" class="sidebar-item activo"' in html
+    assert 'navbar navbar-cleoferr navbar-expand-lg' not in html
+
+
+# ── C2b: Inventario ───────────────────────────────────────────────
+
+def test_inventario_con_sidebar_y_activo(fx):
+    r = fx['admin'].get('/inventario')
+    assert r.status_code == 200
+    html = r.get_data(as_text=True)
+    assert 'href="/inventario" class="sidebar-item activo"' in html
+    assert 'navbar navbar-cleoferr navbar-expand-lg' not in html
+    assert 'Historial de Movimientos' in html
+
+
+def test_inventario_vendedor_sin_items_solo_admin(fx):
+    r = fx['vendedor'].get('/inventario')
+    assert r.status_code == 200
+    html = r.get_data(as_text=True)
+    assert 'href="/inventario" class="sidebar-item activo"' in html
+    assert '/admin/dashboard' not in html
+    assert '/admin/pagos_simulados' not in html
+    assert '/admin/reservas' not in html
+
+
+# ── C2b: Alertas ──────────────────────────────────────────────────
+
+def test_alertas_con_sidebar_y_activo(fx):
+    r = fx['admin'].get('/alertas')
+    assert r.status_code == 200
+    html = r.get_data(as_text=True)
+    assert 'href="/alertas" class="sidebar-item activo"' in html
+    assert 'navbar navbar-cleoferr navbar-expand-lg' not in html
+    assert 'Listado de alertas' in html
+    # El script AJAX ahora viaja inline en admin_contenido: antes era un
+    # {% block scripts %} muerto (base.html no lo define) y no cargaba.
+    assert 'resolverAlertaAjax' in html

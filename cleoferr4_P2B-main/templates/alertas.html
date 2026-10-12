@@ -1,6 +1,7 @@
-{% extends 'base.html' %}
+{% extends 'admin_base.html' %}
+{% set seccion_activa = 'alertas' %}
 {% block titulito %}Alertas – Cleoferr{% endblock %}
-{% block contenido %}
+{% block admin_contenido %}
 
 <div class="page-header">
     <div>
@@ -113,9 +114,6 @@
     </div>
 </div>
 
-{% endblock %}
-
-{% block scripts %}
 <script>
 // Resolver alerta mediante AJAX sin recargar la página
 async function resolverAlertaAjax(id) {
