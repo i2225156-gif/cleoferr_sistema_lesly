@@ -147,9 +147,14 @@
                     <span>Recojo en tienda</span>
                     <span class="text-success fw-semibold">Gratis</span>
                 </div>
+                <div class="resumen-linea" id="avisoPrecios"
+                     style="display:none;color:#b45309;font-size:0.78rem;align-items:center">
+                    <i class="fa fa-hourglass-half me-1"></i>
+                    <span>Precios por confirmar…</span>
+                </div>
                 <div class="resumen-total">
                     <span>TOTAL</span>
-                    <span>S/ <span id="totalVal">0.00</span></span>
+                    <span>S/ <span id="totalVal">—</span></span>
                 </div>
                 <button class="btn-pedir" onclick="abrirModalPago()">
                     <i class="fa fa-shopping-bag me-2"></i>Realizar pedido
@@ -395,6 +400,10 @@
 const CSRF_TOKEN = {{ csrf_token|tojson }};
 
 // ===== Carrito =====
+// Los importes visibles SOLO se calculan con precios confirmados por el
+// servidor (/carrito/precios): nunca con los guardados en localStorage.
+let preciosConfirmados = false;
+
 function getCarrito() {
     return JSON.parse(localStorage.getItem('carrito_cleoferr') || '[]');
 }
@@ -422,11 +431,14 @@ function renderCarrito() {
         const sub = item.precio * item.cantidad;
         subtotal   += sub;
         totalItems += item.cantidad;
-        // Precio unit.: final del servidor; base tachada solo si hay dcto
-        const precioCell = (item.descuento && item.descuento > 0)
-            ? '<s style="color:#999;font-size:0.75rem">S/ ' + (item.precio_base || item.precio).toFixed(2) + '</s>'
-              + ' S/ ' + item.precio.toFixed(2)
-            : 'S/ ' + item.precio.toFixed(2);
+        // Precio unit.: final del servidor; base tachada solo si hay dcto.
+        // Sin confirmación del servidor, los importes no se muestran.
+        const precioCell = !preciosConfirmados ? '—'
+            : (item.descuento && item.descuento > 0)
+              ? '<s style="color:#999;font-size:0.75rem">S/ ' + (item.precio_base || item.precio).toFixed(2) + '</s>'
+                + ' S/ ' + item.precio.toFixed(2)
+              : 'S/ ' + item.precio.toFixed(2);
+        const subCell = preciosConfirmados ? 'S/ ' + sub.toFixed(2) : '—';
         const tr = document.createElement('tr');
         tr.innerHTML = `
             <td>
@@ -441,7 +453,7 @@ function renderCarrito() {
                     <button class="qty-btn" onclick="cambiarCantidad(${idx}, +1)">+</button>
                 </div>
             </td>
-            <td class="fw-bold">S/ ${sub.toFixed(2)}</td>
+            <td class="fw-bold">${subCell}</td>
             <td>
                 <button class="btn-eliminar" onclick="eliminarItem(${idx})">
                     <i class="fa fa-trash"></i>
@@ -450,17 +462,29 @@ function renderCarrito() {
         tbody.appendChild(tr);
     });
 
-    document.getElementById('totalItems').textContent  = totalItems;
-    document.getElementById('subtotalVal').textContent = subtotal.toFixed(2);
-    document.getElementById('totalVal').textContent    = subtotal.toFixed(2);
-    if (document.getElementById('montoYape'))
-        document.getElementById('montoYape').textContent = 'S/ ' + subtotal.toFixed(2);
+    document.getElementById('totalItems').textContent = totalItems;
+    // Aviso discreto mientras los precios no estén confirmados por el
+    // servidor (incluido el caso en que /carrito/precios falle).
+    document.getElementById('avisoPrecios').style.display =
+        preciosConfirmados ? 'none' : 'flex';
+    if (preciosConfirmados) {
+        document.getElementById('subtotalVal').textContent = subtotal.toFixed(2);
+        document.getElementById('totalVal').textContent    = subtotal.toFixed(2);
+        if (document.getElementById('montoYape'))
+            document.getElementById('montoYape').textContent = 'S/ ' + subtotal.toFixed(2);
+    } else {
+        document.getElementById('subtotalVal').textContent = '—';
+        document.getElementById('totalVal').textContent    = '—';
+        if (document.getElementById('montoYape'))
+            document.getElementById('montoYape').textContent = 'S/ —';
+    }
 }
 
 // Refresca los precios del carrito con los OFICIALES del servidor
 // (/carrito/precios, misma fuente que el checkout). El navegador solo
-// renderiza: si el fetch falla, se muestran los últimos precios
-// conocidos y el total definitivo lo recalcula el servidor al confirmar.
+// renderiza: si el fetch falla, los importes quedan "por confirmar"
+// (aviso discreto) y el total definitivo lo recalcula el servidor al
+// confirmar el pedido.
 function refrescarPrecios() {
     const ids = getCarrito().map(i => i.id);
     if (ids.length === 0) { renderCarrito(); return; }
@@ -471,7 +495,7 @@ function refrescarPrecios() {
     })
     .then(r => r.json())
     .then(d => {
-        if (!d.ok || !d.precios) { renderCarrito(); return; }
+        if (!d.ok || !d.precios) { renderCarrito(); return; }  // aviso visible
         const carrito = getCarrito();
         carrito.forEach(it => {
             const pv = d.precios[it.id];
@@ -481,9 +505,10 @@ function refrescarPrecios() {
                 it.descuento   = pv.descuento;
             }
         });
+        preciosConfirmados = true;   // recién ahora se muestran importes
         saveCarrito(carrito);   // re-renderiza con los precios vigentes
     })
-    .catch(() => renderCarrito());
+    .catch(() => renderCarrito());  // sin confirmación: "precios por confirmar"
 }
 
 function cambiarCantidad(idx, delta) {

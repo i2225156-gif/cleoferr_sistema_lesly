@@ -2822,7 +2822,10 @@ def carrito_precios():
         ids = [int(i) for i in (data.get('ids') or [])]
     except (TypeError, ValueError):
         return {'ok': False, 'error': 'ids inválidos'}, 400
-    ids = ids[:100]   # tope defensivo por lote
+    if len(ids) > 100:
+        return {'ok': False,
+                'error': 'Demasiados productos en el carrito: el máximo por '
+                         'lote es 100.'}, 400
     conn = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
     try:

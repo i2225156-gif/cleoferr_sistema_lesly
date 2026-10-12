@@ -173,3 +173,26 @@ def test_carrito_precios_mismo_resultado_que_el_checkout(fx):
     fila = oferta_vigente(fx['cur'], fx['id_con'])
     assert Decimal(str(lote['precio_final'])) == fila['precio_final']
     assert Decimal(str(lote['descuento'])) == fila['descuento_unitario']
+
+
+# ── Ajustes de la pieza 5 ─────────────────────────────────────────
+
+def test_carrito_precios_tope_100_ids_rechaza(fx):
+    """Un lote de más de 100 ids responde 400 con mensaje claro (JSON)."""
+    r = _post_json(fx['client'], '/carrito/precios',
+                   {'ids': list(range(1, 102))})
+    assert r.status_code == 400
+    d = r.get_json()
+    assert d['ok'] is False
+    assert 'máximo' in d['error'] or '100' in d['error']
+
+
+def test_carrito_pagina_aviso_precios_por_confirmar(fx):
+    """La página del carrito trae el aviso discreto 'Precios por confirmar'
+    y solo calcula importes tras confirmar precios del servidor."""
+    r = fx['client'].get('/carrito')
+    assert r.status_code == 200
+    html = r.get_data(as_text=True)
+    assert 'Precios por confirmar' in html       # aviso discreto
+    assert 'preciosConfirmados' in html          # total solo con precios del servidor
+    assert 'refrescarPrecios' in html            # refresco al cargar
