@@ -5,7 +5,9 @@ import secrets
 import hmac
 import hashlib
 import json
-# AÑADIR después de: import uuid
+# A�'ADIR despuǸs de: import uuid
+from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from urllib.parse import quote
 # Intento seguro de importar dependencias externas; si faltan, mostrar instrucciones claras y salir.
 try:
@@ -26,6 +28,7 @@ except Exception as e:
 
 from db import db
 from db_supabase import get_connection_auth, get_connection_tienda
+from psycopg2 import errors as _pg_errores
 from services.comprobantes import (EMISOR, UMBRAL_BOLETA_SIN_DOC,
                                     boleta_necesita_documento,
                                     ruc_valido_para_factura,
@@ -35,7 +38,7 @@ from services.documentos import (NOMBRES_TIPO, normalizar_numero,
                                  tipo_documento_de_cliente, validar_documento)
 from services.inventario import devolver_stock_venta
 from services.ofertas import (SQL_IMPORTE_LINEA, SQL_PRECIO_VIGENTE,
-                              oferta_vigente)
+                              calcular_descuento_unitario, oferta_vigente)
 from services.reservas import liberar_reservas_vencidas, preview_reservas_vencidas
 from services.pagos import (cancelar_pedido_con_pago_inicial, confirmar_pago,
                             registrar_evento)
@@ -211,6 +214,8 @@ _CSRF_PROTEGIDAS = {
     'pago_simulado_procesar',
     'admin_pagos_disparar',
     'admin_reservas_liberar',
+    'admin_ofertas_nueva', 'admin_ofertas_editar',
+    'admin_ofertas_activar', 'admin_ofertas_desactivar',
     'perfil_actualizar_documento',
 }
 
@@ -2452,6 +2457,273 @@ def alertas_resolver(id):
     finally:
         conn.close()
     return redirect(url_for('alertas'))
+
+
+# ── Panel admin de ofertas (Fase 2.3) ───────────────────────────
+# Reglas: el precio final lo calcula SIEMPRE el servidor; la BD garantiza
+# una sola oferta ACTIVA por producto y rango (ex_oferta_vigencia) y un
+# precio_fijo menor al precio del producto (trigger trg_oferta_validar_precio).
+# No hay DELETE: solo activar/desactivar. Toda escritura queda en auditoria
+# con valor anterior y nuevo, y los POST validan CSRF (_CSRF_PROTEGIDAS).
+
+def _ts_lima(dt):
+    """Datetime naive (hora Lima) -> texto timestamptz con offset -05 explícito.
+
+    Perú no tiene horario de verano: el offset fijo evita depender del
+    TimeZone de la sesión de PostgreSQL al insertar la vigencia.
+    """
+    return dt.strftime('%Y-%m-%d %H:%M:00-05')
+
+
+def _validar_form_oferta():
+    """Lee y valida el form de alta/edición de una oferta.
+
+    Devuelve (datos, None) si todo cuadra o (None, mensaje) si hay error.
+    """
+    try:
+        id_producto = int(request.form.get('id_producto') or 0)
+    except ValueError:
+        return None, 'Producto inválido.'
+    tipo = (request.form.get('tipo') or '').strip()
+    try:
+        valor = Decimal((request.form.get('valor') or '').strip())
+    except InvalidOperation:
+        return None, 'El valor del descuento debe ser un número.'
+    try:
+        inicio = datetime.strptime((request.form.get('fecha_inicio') or '').strip(),
+                                   '%Y-%m-%dT%H:%M')
+        fin = datetime.strptime((request.form.get('fecha_fin') or '').strip(),
+                                '%Y-%m-%dT%H:%M')
+    except ValueError:
+        return None, 'Fechas de vigencia inválidas.'
+    if id_producto <= 0:
+        return None, 'Selecciona un producto.'
+    if tipo not in ('porcentaje', 'precio_fijo'):
+        return None, 'Tipo de descuento inválido.'
+    if valor <= 0:
+        return None, 'El valor debe ser mayor a cero.'
+    if tipo == 'porcentaje' and valor > 100:
+        return None, 'El porcentaje no puede superar 100.'
+    if fin <= inicio:
+        return None, 'La fecha fin debe ser posterior a la fecha inicio.'
+    return {'id_producto': id_producto, 'tipo': tipo, 'valor': valor,
+            'inicio': inicio, 'fin': fin}, None
+
+
+def _flash_error_oferta(e):
+    """Traduce los errores de integridad de la BD a mensajes claros."""
+    msg = str(e)
+    if isinstance(e, _pg_errores.ExclusionViolation) or 'ex_oferta_vigencia' in msg:
+        flash('Ya existe una oferta ACTIVA que solapa esas fechas para este '
+              'producto. Cambia la vigencia o desactiva la otra oferta primero.',
+              'danger')
+    elif 'oferta invalida' in msg:
+        flash('Oferta rechazada: el precio fijo debe ser MENOR al precio '
+              'actual del producto.', 'danger')
+    else:
+        app.logger.warning("Oferta rechazada por la BD: %s", e)
+        flash('No se pudo guardar la oferta. Revisa los datos e inténtalo de '
+              'nuevo.', 'danger')
+
+
+def _auditar_oferta(cursor, id_oferta, accion, anterior, nuevo):
+    """Auditoría de oferta con valor ANTERIOR y NUEVO (JSON neutro)."""
+    cursor.execute("""
+        INSERT INTO auditoria
+            (id_usuario, tabla_afectada, id_registro, accion,
+             valor_anterior, valor_nuevo)
+        VALUES (%s, 'oferta', %s, %s, %s, %s)
+    """, (session.get('usuario_id'), id_oferta, accion,
+          json.dumps(anterior, ensure_ascii=False, default=str)
+              if anterior is not None else None,
+          json.dumps(nuevo, ensure_ascii=False, default=str)
+              if nuevo is not None else None))
+
+
+def _producto_de_oferta(cursor, datos):
+    """Producto ACTIVO destino de la oferta, o None (con flash ya puesto)."""
+    cursor.execute("SELECT nombre, precio FROM producto"
+                   " WHERE id_producto = %s AND activo = TRUE",
+                   (datos['id_producto'],))
+    prod = cursor.fetchone()
+    if not prod:
+        flash('El producto ya no existe o está inactivo.', 'danger')
+    return prod
+
+
+def _precio_fijo_invalido(prod, datos):
+    """True (con flash) si el precio_fijo no es menor al precio del producto.
+
+    La BD lo vuelve a impedir con el trigger trg_oferta_validar_precio;
+    este chequeo es solo para dar un mensaje claro ANTES de fallar.
+    """
+    if datos['tipo'] == 'precio_fijo' and datos['valor'] >= prod['precio']:
+        flash(f'Oferta rechazada: el precio fijo (S/ {datos["valor"]:.2f}) debe '
+              f'ser menor al precio de "{prod["nombre"]}" '
+              f'(S/ {prod["precio"]:.2f}).', 'danger')
+        return True
+    return False
+
+
+@app.route('/admin/ofertas')
+@login_required
+@escritura_required
+def admin_ofertas():
+    """Listado de ofertas con estado: vigente / futura / vencida / inactiva."""
+    conn = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    ofertas, productos = [], []
+    try:
+        cursor.execute("""
+            SELECT o.id_oferta, o.id_producto, o.tipo, o.valor, o.activa,
+                   o.fecha_inicio AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima' AS fecha_inicio,
+                   o.fecha_fin   AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima' AS fecha_fin,
+                   p.nombre AS producto, p.precio,
+                   CASE
+                       WHEN NOT o.activa THEN 'inactiva'
+                       WHEN NOW() < o.fecha_inicio THEN 'futura'
+                       WHEN NOW() >= o.fecha_fin THEN 'vencida'
+                       ELSE 'vigente'
+                   END AS estado
+              FROM oferta o
+              JOIN producto p ON p.id_producto = o.id_producto
+             ORDER BY o.activa DESC, o.fecha_inicio DESC, o.id_oferta DESC
+        """)
+        ofertas = cursor.fetchall()
+        # El descuento lo calcula el servidor con la MISMA función del
+        # checkout (redondeo y clamp), nunca el navegador.
+        for o in ofertas:
+            o['descuento_unit'] = calcular_descuento_unitario(
+                o['precio'], o['tipo'], o['valor'])
+            o['precio_final'] = Decimal(o['precio']) - o['descuento_unit']
+        cursor.execute("SELECT id_producto, nombre, precio FROM producto"
+                       " WHERE activo = TRUE ORDER BY nombre")
+        productos = cursor.fetchall()
+    finally:
+        conn.close()
+    return render_template('admin_ofertas.html', ofertas=ofertas,
+                           productos=productos, seccion_activa='ofertas')
+
+
+@app.route('/admin/ofertas/nueva', methods=['POST'])
+@login_required
+@escritura_required
+def admin_ofertas_nueva():
+    datos, error = _validar_form_oferta()
+    if error:
+        flash(error, 'danger')
+        return redirect(url_for('admin_ofertas'))
+    conn = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        prod = _producto_de_oferta(cursor, datos)
+        if prod is None or _precio_fijo_invalido(prod, datos):
+            return redirect(url_for('admin_ofertas'))
+        cursor.execute("""
+            INSERT INTO oferta
+                (id_producto, tipo, valor, fecha_inicio, fecha_fin, activa, creado_por)
+            VALUES (%s, %s, %s, %s, %s, TRUE, %s)
+            RETURNING id_oferta
+        """, (datos['id_producto'], datos['tipo'], datos['valor'],
+              _ts_lima(datos['inicio']), _ts_lima(datos['fin']),
+              session.get('usuario_id')))
+        id_oferta = cursor.fetchone()['id_oferta']
+        _auditar_oferta(cursor, id_oferta, 'crear', None,
+                        {**datos, 'id_oferta': id_oferta})
+        conn.commit()
+        flash('Oferta creada correctamente.', 'success')
+    except Exception as e:
+        conn.rollback()
+        _flash_error_oferta(e)
+    finally:
+        conn.close()
+    return redirect(url_for('admin_ofertas'))
+
+
+@app.route('/admin/ofertas/editar/<int:id>', methods=['POST'])
+@login_required
+@escritura_required
+def admin_ofertas_editar(id):
+    datos, error = _validar_form_oferta()
+    if error:
+        flash(error, 'danger')
+        return redirect(url_for('admin_ofertas'))
+    conn = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT * FROM oferta WHERE id_oferta = %s FOR UPDATE",
+                       (id,))
+        anterior = cursor.fetchone()
+        if not anterior:
+            flash('La oferta no existe.', 'danger')
+            return redirect(url_for('admin_ofertas'))
+        prod = _producto_de_oferta(cursor, datos)
+        if prod is None or _precio_fijo_invalido(prod, datos):
+            return redirect(url_for('admin_ofertas'))
+        cursor.execute("""
+            UPDATE oferta
+               SET id_producto = %s, tipo = %s, valor = %s,
+                   fecha_inicio = %s, fecha_fin = %s
+             WHERE id_oferta = %s
+            RETURNING *
+        """, (datos['id_producto'], datos['tipo'], datos['valor'],
+              _ts_lima(datos['inicio']), _ts_lima(datos['fin']), id))
+        nuevo = cursor.fetchone()
+        _auditar_oferta(cursor, id, 'editar', dict(anterior), dict(nuevo))
+        conn.commit()
+        flash('Oferta actualizada correctamente.', 'success')
+    except Exception as e:
+        conn.rollback()
+        _flash_error_oferta(e)
+    finally:
+        conn.close()
+    return redirect(url_for('admin_ofertas'))
+
+
+def _toggle_oferta(id, activa):
+    conn = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT * FROM oferta WHERE id_oferta = %s FOR UPDATE",
+                       (id,))
+        anterior = cursor.fetchone()
+        if not anterior:
+            flash('La oferta no existe.', 'danger')
+            return redirect(url_for('admin_ofertas'))
+        if bool(anterior['activa']) == activa:
+            flash('La oferta ya estaba %s.'
+                  % ('activa' if activa else 'inactiva'), 'info')
+            return redirect(url_for('admin_ofertas'))
+        cursor.execute("UPDATE oferta SET activa = %s WHERE id_oferta = %s"
+                       " RETURNING *", (activa, id))
+        nuevo = cursor.fetchone()
+        _auditar_oferta(cursor, id,
+                        'activar' if activa else 'desactivar',
+                        dict(anterior), dict(nuevo))
+        conn.commit()
+        flash('Oferta %s correctamente.'
+              % ('activada' if activa else 'desactivada'), 'success')
+    except Exception as e:
+        conn.rollback()
+        _flash_error_oferta(e)
+    finally:
+        conn.close()
+    return redirect(url_for('admin_ofertas'))
+
+
+@app.route('/admin/ofertas/activar/<int:id>', methods=['POST'])
+@login_required
+@escritura_required
+def admin_ofertas_activar(id):
+    return _toggle_oferta(id, True)
+
+
+@app.route('/admin/ofertas/desactivar/<int:id>', methods=['POST'])
+@login_required
+@escritura_required
+def admin_ofertas_desactivar(id):
+    return _toggle_oferta(id, False)
+
 
 # ── Carrito cliente ────────────────────────────────────────────
 @app.route('/carrito')
