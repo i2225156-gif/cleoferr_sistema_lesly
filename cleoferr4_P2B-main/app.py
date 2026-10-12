@@ -26,7 +26,9 @@ except Exception as e:
 
 from db import db
 from db_supabase import get_connection_auth, get_connection_tienda
-from services.comprobantes import (EMISOR, ruc_valido_para_factura,
+from services.comprobantes import (EMISOR, UMBRAL_BOLETA_SIN_DOC,
+                                    boleta_necesita_documento,
+                                    ruc_valido_para_factura,
                                     siguiente_numero as _siguiente_numero_comprobante,
                                     texto_qr)
 from services.inventario import devolver_stock_venta
@@ -3290,6 +3292,17 @@ def carrito_confirmar_v2():
     if tipo_comp_db == 'factura' and not ruc_valido_para_factura(ruc):
         return {'ok': False,
                 'error': 'El RUC no es válido (revisa el dígito verificador). El pedido no se creó.'}, 400
+
+    # CLIENTES VARIOS (fase B): boleta sin documento sobre el umbral se
+    # rechaza; debajo del umbral se emite a "CLIENTES VARIOS" sin exigir DNI.
+    dni = (data.get('dni') or '').strip() or None
+    if tipo_comp_db == 'boleta':
+        total_estimado = sum(it['cantidad'] * it['precio'] for it in items_ok)
+        if boleta_necesita_documento(total_estimado, dni):
+            return {'ok': False,
+                    'error': f'Para compras sobre S/ {UMBRAL_BOLETA_SIN_DOC:.0f} necesitas '
+                             'ingresar tu DNI (o RUC si quieres factura).'}, 400
+
     metodo_db    = 'yape_plin' if metodo_pago == 'yape' else (
                    'tarjeta'   if metodo_pago == 'tarjeta' else 'efectivo')
 
@@ -3392,7 +3405,8 @@ def carrito_confirmar_v2():
                   json.dumps({'checkout_url': resultado_pasarela.checkout_url,
                               'requiere_verificacion': bool(resultado_pasarela.requiere_verificacion),
                               'tipo_comprobante': tipo_comp_db,
-                              'ruc': ruc},
+                              'ruc': ruc,
+                              'cliente_documento': dni},
                              ensure_ascii=False),
                   id_pago))
             conn.commit()

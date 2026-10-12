@@ -13,6 +13,7 @@
 """
 import json
 import logging
+import os
 from decimal import Decimal
 
 from .sunat.base import ComprobanteSolicitud
@@ -29,6 +30,25 @@ EMISOR = {
     "razon_social": getattr(_PROVEEDOR, "emisor_razon_social", "") or "",
     "direccion": getattr(_PROVEEDOR, "emisor_direccion", "") or "",
 }
+
+# Umbral de venta para boletas sin documento del comprador ("CLIENTES
+# VARIOS"). Regla de NEGOCIO configurable (no confirmada como exigencia
+# SUNAT vigente — ver .env.example). 0 = no exigir documento nunca.
+# Valor por defecto marcado "A VERIFICAR".
+UMBRAL_BOLETA_SIN_DOC = Decimal(os.environ.get("UMBRAL_BOLETA_SIN_DOC", "700"))
+
+
+def boleta_necesita_documento(total, cliente_documento):
+    """True si el total supera el umbral y no hay DNI/RUC del cliente.
+
+    Regla de negocio (fase B): debajo del umbral, la boleta se emite a
+    "CLIENTES VARIOS" sin exigir documento; encima, el checkout debe
+    rechazar la venta sin documento. El umbral es configurable y su
+    valor está marcado A VERIFICAR (ver .env.example).
+    """
+    if cliente_documento and cliente_documento.strip():
+        return False   # tiene documento: no importa el monto
+    return Decimal(str(total or 0)) > UMBRAL_BOLETA_SIN_DOC
 
 
 def ruc_valido_para_factura(ruc):
@@ -132,7 +152,17 @@ def emitir_comprobante_del_pago(cursor, pago):
             detalle = {}
     tipo = detalle.get('tipo_comprobante') or 'boleta'
     ruc = detalle.get('ruc') or None
+    cliente_documento = detalle.get('cliente_documento') or None
+
     subtotal, igv, total = _totales_desde_detalle(cursor, pago['id_venta'])
+
+    # CLIENTES VARIOS (fase B): boleta sin documento del comprador se
+    # emite a "CLIENTES VARIOS". El umbral se valida en el CHECKOUT,
+    # no aquí (la emisión ocurre tras confirmar el pago).
+    cliente_nombre = detalle.get('cliente_nombre') or None
+    if tipo == 'boleta' and not cliente_documento:
+        cliente_nombre = 'CLIENTES VARIOS'
+
     return emitir_comprobante_venta(cursor, pago['id_venta'], tipo,
-                                     ruc_cliente=ruc, subtotal=subtotal,
-                                     igv=igv, total=total)
+                                    ruc_cliente=ruc, subtotal=subtotal,
+                                    igv=igv, total=total)
