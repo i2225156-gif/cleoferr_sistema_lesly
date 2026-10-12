@@ -166,7 +166,43 @@ def test_ajax_mismo_estado_es_noop(fx):
     assert cuerpo['ok'] is True and cuerpo['estado_nuevo'] == 'pendiente'
 
 
+def _insertar_pago(fx, estado_pago):
+    """Pago sintético para la venta del fixture (misma transacción)."""
+    fx['cur'].execute("""
+        INSERT INTO pago (id_venta, id_tipo_pago, id_caja, estado, monto, id_transaccion)
+        VALUES (%s, (SELECT id_tipo_pago FROM tipo_pago WHERE nombre='efectivo'),
+                NULL, %s, 10.00, 'sim_test_bloqueo')
+    """, (fx['id_venta'], estado_pago))
+
+
+def test_ajax_confirmar_con_pago_pendiente_409(fx):
+    _insertar_pago(fx, 'pendiente')
+    r = _post(fx['client'], fx['id_venta'], 'confirmado')
+    assert r.status_code == 409 and _es_json(r)
+    assert r.get_json()['mensaje'] == ('El pago no está confirmado; '
+                                        'confírmalo desde el flujo de pago.')
+    cur = fx['cur']
+    cur.execute("""SELECT ev.nombre AS e FROM venta v JOIN estado_venta ev
+                     ON ev.id_estado_venta = v.id_estado_venta
+                    WHERE v.id_venta = %s""", (fx['id_venta'],))
+    assert cur.fetchone()['e'] == 'pendiente'   # no escribió nada
+
+
+def test_ajax_confirmar_sin_pago_409(fx):
+    r = _post(fx['client'], fx['id_venta'], 'confirmado')
+    assert r.status_code == 409 and _es_json(r)
+    assert 'El pago no está confirmado' in r.get_json()['mensaje']
+
+
+def test_ajax_confirmar_con_pago_confirmado_200(fx):
+    _insertar_pago(fx, 'confirmado')
+    r = _post(fx['client'], fx['id_venta'], 'confirmado')
+    assert r.status_code == 200
+    assert r.get_json()['estado_nuevo'] == 'confirmado'
+
+
 def test_ajax_transicion_valida_a_confirmado_audita(fx):
+    _insertar_pago(fx, 'confirmado')   # bloqueo (a): exige pago confirmado
     cur = fx['cur']
     cur.execute("SELECT COUNT(*) AS n FROM auditoria")
     antes = cur.fetchone()['n']
@@ -195,6 +231,7 @@ def test_ajax_cancelado_devuelve_stock_y_es_idempotente(fx):
 
 
 def test_ajax_entregado_es_final(fx):
+    _insertar_pago(fx, 'confirmado')   # para poder pasar por 'confirmado'
     cur = fx['cur']
     for estado in ('confirmado', 'preparando', 'listo', 'entregado'):
         r = _post(fx['client'], fx['id_venta'], estado)

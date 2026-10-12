@@ -2953,9 +2953,9 @@ def pedido_aceptado():
 
 # Transiciones válidas del flujo de pedidos (regla 6): el desplegable y los
 # botones se filtran con este mismo mapa. 'entregado' y 'cancelado' son
-# finales. NOTA (pendiente del OK del propietario): todavía NO se exige
-# pago confirmado para pasar a 'confirmado'; confirmar_pago sigue siendo
-# la única puerta al dinero.
+# finales. Decisión (a) del propietario: pasar a 'confirmado' exige pago
+# CONFIRMADO (gate en la ruta); confirmar_pago sigue siendo la única
+# puerta al dinero.
 TRANSICIONES_PEDIDO = {
     'pendiente': ('confirmado', 'cancelado'),
     'confirmado': ('preparando', 'cancelado'),
@@ -3024,6 +3024,19 @@ def pedido_cambiar_estado(id):
                 return {'ok': False, 'mensaje': mensaje}, 409
             flash(mensaje, 'danger')
             return redirect(url_for('pedido_detalle', id=id))
+
+        if nuevo_estado == 'confirmado':
+            # Bloqueo (a): solo se confirma una venta con pago CONFIRMADO.
+            # El cambio manual no puede crear ventas "pagadas": confirmar_pago
+            # es la única puerta al dinero. POS no usa esta ruta.
+            cursor.execute("SELECT estado FROM pago WHERE id_venta = %s", (id,))
+            fila_pago = cursor.fetchone()
+            if not fila_pago or fila_pago[0] != 'confirmado':
+                mensaje = 'El pago no está confirmado; confírmalo desde el flujo de pago.'
+                if is_ajax:
+                    return {'ok': False, 'mensaje': mensaje}, 409
+                flash(mensaje, 'danger')
+                return redirect(url_for('pedido_detalle', id=id))
 
         if nuevo_estado == 'cancelado':
             # B2: solo si la venta NO estaba ya cancelada se devuelve el stock
