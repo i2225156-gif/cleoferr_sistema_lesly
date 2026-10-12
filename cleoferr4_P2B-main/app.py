@@ -216,6 +216,12 @@ def _ctx_csrf_token():
     return {'csrf_token': _obtener_csrf_token()}
 
 
+def _es_ajax():
+    """Petición AJAX: fetch del frontend (cabecera) o Accept: application/json."""
+    return (request.headers.get('X-Requested-With') == 'XMLHttpRequest'
+            or 'application/json' in (request.headers.get('Accept') or ''))
+
+
 @app.before_request
 def _validar_csrf():
     if request.method not in ('POST', 'PUT', 'PATCH', 'DELETE'):
@@ -227,6 +233,11 @@ def _validar_csrf():
         or (request.get_json(silent=True) or {}).get('csrf_token')
     if procedente and hmac.compare_digest(str(procedente), session.get('_csrf_token', '')):
         return None
+    if _es_ajax():
+        # Contrato JSON para fetch: nunca una página HTML de error (bug
+        # del desplegable de /pedidos: response.json() sobre <!doctype>).
+        return {'ok': False,
+                'mensaje': 'Token CSRF inválido o ausente. Recarga la página e inténtalo de nuevo.'}, 400
     return abort(400)
 
 
@@ -245,6 +256,9 @@ def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if "usuario_id" not in session:
+            if _es_ajax():
+                return {'ok': False,
+                        'mensaje': 'Tu sesión expiró. Inicia sesión de nuevo.'}, 401
             # Si la petición viene de una ruta de cliente, mandar a login de clientes
             if any(request.path.startswith(r) for r in _RUTAS_CLIENTE):
                 return redirect(url_for("login_cliente"))
@@ -256,6 +270,9 @@ def admin_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if session.get("rol") != "administrador":
+            if _es_ajax():
+                return {'ok': False,
+                        'mensaje': 'No tienes permisos para esta acción.'}, 403
             flash("Acceso denegado.", "danger")
             return redirect(url_for("productos"))
         return f(*args, **kwargs)
@@ -265,6 +282,9 @@ def escritura_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if session.get("rol") not in ("administrador", "vendedor"):
+            if _es_ajax():
+                return {'ok': False,
+                        'mensaje': 'No tienes permisos para esta acción.'}, 403
             flash("No tienes permisos para realizar esta acción.", "danger")
             return redirect(url_for("productos"))
         return f(*args, **kwargs)
@@ -1410,7 +1430,8 @@ def pedidos():
         pedidos = []
     finally:
         conn.close()
-    return render_template('pedidos.html', pedidos=pedidos, estados=lista_estados)
+    return render_template('pedidos.html', pedidos=pedidos, estados=lista_estados,
+                           transiciones=TRANSICIONES_PEDIDO)
 
 @app.route('/ventas/nueva', methods=['GET'])
 @login_required
@@ -2000,7 +2021,7 @@ def pedido_detalle(id):
     return render_template('pedido_detalle.html', pedido=pedido, items=items,
                            comprobante=comprobante, id=id,
                            idx_actual=idx_actual, fases_orden=PASOS,
-                           estados=PASOS)
+                           estados=PASOS, transiciones=TRANSICIONES_PEDIDO)
 
 @app.route('/ventas/<int:id_venta>/comprobante')
 @login_required
@@ -2930,31 +2951,80 @@ def pedido_aceptado():
     return render_template('pedido_aceptado.html', id_pedido=id_pedido, estado=estado)
 
 
+# Transiciones válidas del flujo de pedidos (regla 6): el desplegable y los
+# botones se filtran con este mismo mapa. 'entregado' y 'cancelado' son
+# finales. NOTA (pendiente del OK del propietario): todavía NO se exige
+# pago confirmado para pasar a 'confirmado'; confirmar_pago sigue siendo
+# la única puerta al dinero.
+TRANSICIONES_PEDIDO = {
+    'pendiente': ('confirmado', 'cancelado'),
+    'confirmado': ('preparando', 'cancelado'),
+    'preparando': ('listo', 'cancelado'),
+    'listo': ('entregado',),
+    'entregado': (),
+    'cancelado': (),
+}
+
+
 @app.route('/pedidos/<int:id>/estado', methods=['POST'])
 @login_required
 @escritura_required
 def pedido_cambiar_estado(id):
     """Vendedor/Admin cambia el estado (fase) de un pedido.
-    Responde JSON si la petición es AJAX (X-Requested-With), o redirige
-    si llega desde un formulario clásico. (Integrado desde origin/Lesly.)
+
+    Contrato (fix del bug del desplegable): si la petición es AJAX, TODAS
+    las respuestas son JSON {ok, mensaje, estado_nuevo?} — 400 CSRF (capa
+    global), 401/403 sin sesión o permisos (capa global), 404 inexistente,
+    409 transición no permitida, 200 éxito o no-op, 500 error interno. Si
+    no es AJAX, redirect con flash como hoy. El cambio a 'cancelado'
+    respeta B2 (devolución idempotente de stock) y el trigger audita.
     """
-    conn_v   = get_connection_tienda()
-    cursor_v = conn_v.cursor(dictionary=True)
-    cursor_v.execute("SELECT nombre FROM estado_venta WHERE activo = TRUE ORDER BY orden")
-    estados_validos = tuple(r['nombre'] for r in cursor_v.fetchall())
-    conn_v.close()
-
+    is_ajax = _es_ajax()
     nuevo_estado = (request.form.get('estado') or '').strip()
-    is_ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
-
-    if nuevo_estado not in estados_validos:
-        if is_ajax:
-            return {'ok': False, 'error': f'Estado "{nuevo_estado}" no es válido.'}, 400
-        flash('Estado no válido.', 'danger')
-        return redirect(url_for('pedido_detalle', id=id))
-    conn   = get_connection_tienda()
+    conn = get_connection_tienda()
     cursor = conn.cursor()
     try:
+        cursor.execute("SELECT nombre FROM estado_venta WHERE activo = TRUE ORDER BY orden")
+        estados_validos = tuple(r[0] for r in cursor.fetchall())
+
+        if nuevo_estado not in estados_validos:
+            if is_ajax:
+                return {'ok': False, 'mensaje': f'Estado "{nuevo_estado}" no es válido.'}, 400
+            flash('Estado no válido.', 'danger')
+            return redirect(url_for('pedido_detalle', id=id))
+
+        cursor.execute("""
+            SELECT ev.nombre AS actual
+              FROM venta v
+              JOIN estado_venta ev ON ev.id_estado_venta = v.id_estado_venta
+             WHERE v.id_venta = %s
+        """, (id,))
+        fila = cursor.fetchone()
+        if not fila:
+            if is_ajax:
+                return {'ok': False, 'mensaje': 'El pedido no existe.'}, 404
+            abort(404)
+        actual = fila[0]
+
+        if nuevo_estado == actual:
+            # Sin cambios: no es error (idempotente). Hasta aquí solo hubo
+            # SELECTs: el finally se encarga de cerrar la transacción.
+            if is_ajax:
+                return {'ok': True, 'mensaje': 'El pedido ya estaba en ese estado.',
+                        'estado_nuevo': actual}
+            flash('El pedido ya estaba en ese estado.', 'info')
+            return redirect(url_for('pedido_detalle', id=id))
+
+        permitidas = TRANSICIONES_PEDIDO.get(actual, ())
+        if nuevo_estado not in permitidas:
+            mensaje = ('Confirma el pago antes de preparar el pedido.'
+                       if (actual, nuevo_estado) == ('pendiente', 'preparando')
+                       else f'Transición no permitida: de "{actual}" a "{nuevo_estado}".')
+            if is_ajax:
+                return {'ok': False, 'mensaje': mensaje}, 409
+            flash(mensaje, 'danger')
+            return redirect(url_for('pedido_detalle', id=id))
+
         if nuevo_estado == 'cancelado':
             # B2: solo si la venta NO estaba ya cancelada se devuelve el stock
             # (idempotente: la condición del UPDATE + la marca del movimiento).
@@ -2974,19 +3044,19 @@ def pedido_cambiar_estado(id):
                 WHERE id_venta = %s
             """, (nuevo_estado, id))
         conn.commit()
+        mensaje = f'Estado actualizado a "{nuevo_estado}".'
         if is_ajax:
-            return {'ok': True, 'estado': nuevo_estado,
-                    'mensaje': f'Estado actualizado a "{nuevo_estado}".'}
-        flash(f'Estado actualizado a "{nuevo_estado}".', 'success')
+            return {'ok': True, 'mensaje': mensaje, 'estado_nuevo': nuevo_estado}
+        flash(mensaje, 'success')
     except Exception:
         conn.rollback()
         app.logger.exception("Error al actualizar estado del pedido %s", id)
         if is_ajax:
-            return {'ok': False, 'error': 'No se pudo actualizar el estado. Intenta de nuevo.'}, 500
+            return {'ok': False, 'mensaje': 'No se pudo actualizar el estado. Intenta de nuevo.'}, 500
         flash('Error al actualizar el estado. Intenta de nuevo.', 'danger')
     finally:
         conn.close()
-    # Volver a la lista si el cambio vino desde /pedidos, sino al detalle
+    # No-AJAX: volver a la lista si el cambio vino desde /pedidos, sino al detalle
     ref = request.referrer or ''
     if '/pedidos?' in ref or ref.rstrip('/').endswith('/pedidos'):
         return redirect(url_for('pedidos'))
