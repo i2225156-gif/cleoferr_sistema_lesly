@@ -17,6 +17,7 @@ Reglas (paso 2b aprobado):
   estado_resultante en pago_evento).
 """
 import json
+import logging
 import os
 import re
 import uuid
@@ -25,9 +26,11 @@ from decimal import Decimal
 import db_supabase
 from psycopg2 import errors as _pg_errores
 
+from .comprobantes import emitir_comprobante_del_pago
 from .inventario import devolver_stock_venta
 from .pasarela.base import EstadoPago, PagoResultado
 
+_log = logging.getLogger(__name__)
 _LOCK_DEFECTO = "5s"
 _RE_TIMEOUT = re.compile(r"^\d+(\.\d+)?(s|ms)?$")
 
@@ -108,6 +111,23 @@ def cancelar_pedido_con_pago_inicial(conn, id_venta):
         raise
 
 
+def _emitir_comprobante(cur, pago):
+    """D1: emisión del comprobante en la MISMA transacción, aislada por
+    SAVEPOINT. Si la emisión falla (p. ej. RUC inválido para factura), el
+    pago y la venta QUEDAN confirmados y el comprobante queda pendiente;
+    el próximo evento de confirmación (ya_confirmado) lo reintenta."""
+    try:
+        cur.execute("SAVEPOINT sp_emision_comprobante")
+        emitir_comprobante_del_pago(cur, pago)
+        cur.execute("RELEASE SAVEPOINT sp_emision_comprobante")
+        return True
+    except Exception:
+        cur.execute("ROLLBACK TO SAVEPOINT sp_emision_comprobante")
+        _log.exception("Emision de comprobante pendiente para la venta %s",
+                       pago.get("id_venta"))
+        return False
+
+
 def confirmar_pago(id_pago, resultado, conn=None, fuente="retorno",
                    id_pago_evento=None):
     """ÚNICA puerta del código para pasar un pago a 'confirmado'.
@@ -152,7 +172,8 @@ def confirmar_pago(id_pago, resultado, conn=None, fuente="retorno",
         cur.execute("SET LOCAL lock_timeout = '%s'" % _lock_timeout())
         cur.execute("""
             SELECT p.id_venta, p.pasarela, p.estado AS pago_estado,
-                   p.monto, p.id_transaccion, ev.nombre AS venta_estado
+                   p.monto, p.id_transaccion, p.detalle_proveedor,
+                   ev.nombre AS venta_estado
               FROM pago p
               JOIN venta v ON v.id_venta = p.id_venta
               JOIN estado_venta ev ON ev.id_estado_venta = v.id_estado_venta
@@ -174,6 +195,9 @@ def confirmar_pago(id_pago, resultado, conn=None, fuente="retorno",
 
         if estado is EstadoPago.CONFIRMADO:
             if pago["pago_estado"] == "confirmado":
+                # Reintento idempotente de emisión si quedó pendiente en un
+                # intento anterior (p. ej. RUC inválido para factura).
+                _emitir_comprobante(cur, pago)
                 _marcar_evento("pago ya estaba confirmado", procesado=True)
                 if propia:
                     conn.commit()
@@ -219,6 +243,9 @@ def confirmar_pago(id_pago, resultado, conn=None, fuente="retorno",
                    AND id_estado_venta <> (SELECT id_estado_venta FROM estado_venta
                                              WHERE nombre = 'confirmado')
             """, (pago["id_venta"],))
+            # D1: emisión del comprobante en la MISMA transacción, solo para
+            # ventas pagadas. Idempotente por venta; aislada por SAVEPOINT.
+            _emitir_comprobante(cur, pago)
             _marcar_evento("confirmado", procesado=True)
             if id_pago_evento:
                 cur.execute("UPDATE pago_evento SET id_pago = %s WHERE id_pago_evento = %s",
