@@ -4010,6 +4010,124 @@ def admin_reservas_liberar():
 
 # ── Consultas RUC/DNI (proxy seguro hacia la API Perú; placeholder de la futura API SUNAT) ──
 # El token NUNCA se expone al cliente: se lee únicamente del entorno del servidor.
+# -- Dashboard del administrador (Fase D: KPIs y menu) ------------
+# Solo lectura: NUNCA escribe en un GET. Ruta admin-only.
+@app.route('/admin/dashboard')
+@login_required
+@admin_required
+def admin_dashboard():
+    """Panel de administracion: 6 KPIs + 2 graficos (solo lectura).
+
+    Criterio global: solo pagos 'confirmado' cuentan como vendidos.
+    Zona horaria: America/Lima para todos los agrupamientos por dia.
+    """
+    conn = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        kpis = {}
+        cursor.execute("""
+            SELECT COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS ventas_hoy
+              FROM venta v
+              JOIN pago pg ON pg.id_venta = v.id_venta AND pg.estado = 'confirmado'
+              JOIN detalle_venta d ON d.id_venta = v.id_venta
+             WHERE DATE(v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima') = CURRENT_DATE
+        """)
+        kpis['ventas_hoy'] = float(cursor.fetchone()['ventas_hoy'] or 0)
+
+        cursor.execute("""
+            SELECT COUNT(*) AS pendientes_pago
+              FROM venta v
+              JOIN pago p ON p.id_venta = v.id_venta AND p.estado = 'pendiente'
+              JOIN tipo_venta tv ON tv.id_tipo_venta = v.id_tipo_venta
+              JOIN estado_venta ev ON ev.id_estado_venta = v.id_estado_venta
+             WHERE ev.nombre = 'pendiente' AND tv.nombre <> 'local'
+        """)
+        kpis['pendientes_pago'] = int(cursor.fetchone()['pendientes_pago'])
+
+        cursor.execute("""
+            SELECT COUNT(*) AS por_preparar
+              FROM venta v
+              JOIN estado_venta ev ON ev.id_estado_venta = v.id_estado_venta
+             WHERE ev.nombre = 'confirmado'
+        """)
+        kpis['por_preparar'] = int(cursor.fetchone()['por_preparar'])
+
+        cursor.execute("""
+            SELECT COUNT(*) AS stock_bajo
+              FROM producto
+             WHERE activo = TRUE AND stock < COALESCE(stock_minimo, 15)
+        """)
+        kpis['stock_bajo'] = int(cursor.fetchone()['stock_bajo'])
+
+        cursor.execute("""
+            SELECT COALESCE(
+                       SUM(d.cantidad * d.precio_unitario) / NULLIF(COUNT(DISTINCT v.id_venta), 0),
+                       0) AS ticket_promedio
+              FROM venta v
+              JOIN pago pg ON pg.id_venta = v.id_venta AND pg.estado = 'confirmado'
+              JOIN detalle_venta d ON d.id_venta = v.id_venta
+             WHERE v.fecha >= NOW() - INTERVAL '30 days'
+        """)
+        kpis['ticket_promedio'] = round(float(cursor.fetchone()['ticket_promedio'] or 0), 2)
+
+        cursor.execute("""
+            SELECT COUNT(*) FILTER (WHERE estado_sunat = 'enviado') AS emitidos,
+                   COUNT(*) FILTER (WHERE estado_sunat = 'pendiente') AS pendientes
+              FROM comprobante
+             WHERE DATE(fecha_emision AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima') = CURRENT_DATE
+        """)
+        fila_comp = cursor.fetchone()
+        kpis['comprobantes_emitidos'] = int(fila_comp['emitidos'])
+        kpis['comprobantes_pendientes'] = int(fila_comp['pendientes'])
+
+        cursor.execute("""
+            WITH dias AS (
+                SELECT (d::date) AS dia
+                  FROM generate_series(
+                      (NOW() AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima')::date - 6,
+                      (NOW() AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima')::date,
+                      '1 day'::interval
+                  ) d
+            ),
+            ventas_dia AS (
+                SELECT DATE(v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima') AS dia,
+                       COALESCE(SUM(det.cantidad * det.precio_unitario), 0) AS total
+                  FROM venta v
+                  JOIN pago pg ON pg.id_venta = v.id_venta AND pg.estado = 'confirmado'
+                  JOIN detalle_venta det ON det.id_venta = v.id_venta
+                 WHERE v.fecha >= NOW() - INTERVAL '7 days'
+                 GROUP BY 1
+            )
+            SELECT TO_CHAR(d.dia, 'DD/MM') AS etiqueta,
+                   COALESCE(v.total, 0) AS total
+              FROM dias d
+              LEFT JOIN ventas_dia v ON v.dia = d.dia
+             ORDER BY d.dia
+        """)
+        ventas_por_dia = cursor.fetchall()
+
+        cursor.execute("""
+            SELECT ev.nombre AS estado, COUNT(*) AS n
+              FROM venta v
+              JOIN estado_venta ev ON ev.id_estado_venta = v.id_estado_venta
+             GROUP BY ev.nombre, ev.orden
+             ORDER BY ev.orden
+        """)
+        pedidos_por_estado = cursor.fetchall()
+
+        from services.reservas import preview_reservas_vencidas
+        vencidas = preview_reservas_vencidas(cursor)
+        reservas_vencidas = len(vencidas)
+    finally:
+        conn.close()
+
+    return render_template('admin_dashboard.html',
+                           kpis=kpis,
+                           ventas_por_dia=ventas_por_dia,
+                           pedidos_por_estado=pedidos_por_estado,
+                           reservas_vencidas=reservas_vencidas)
+
+
 import json as _json
 import urllib.request as _urllib_request
 import urllib.error as _urllib_error
