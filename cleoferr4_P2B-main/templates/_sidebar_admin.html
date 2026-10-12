@@ -1,9 +1,11 @@
 {# Sidebar oscuro único para TODAS las páginas admin (módulo admin unificado).
 
-   Variables opcionales:
-     - seccion_activa: resalta el ítem actual ('dashboard', 'productos', ...).
-     - reservas_vencidas / alertas_pendientes: badges numéricos (los pasa la
-       ruta o el context_processor; si fallan o no existen, sin badge).
+    Variables opcionales:
+      - seccion_activa: resalta el ítem actual ('dashboard', 'productos', ...).
+      - sidebar_colapsado: la página pide pantalla completa (solo POS):
+        el sidebar arranca oculto (off-canvas también en escritorio).
+      - reservas_vencidas / alertas_pendientes: badges numéricos (los pasa la
+        ruta o el context_processor; si fallan o no existen, sin badge).
 
    Restauración del navbar anulado en admin_base: chip de usuario+rol,
    botón "Cambiar clave", interruptor de tema claro/oscuro (reutiliza el
@@ -15,7 +17,7 @@
 
    Responsive: hamburguesa fija + sidebar off-canvas en <992px, sin scroll
    horizontal del cuerpo (sidebar fijo y contenido con margen). #}
-<nav class="admin-sidebar d-flex flex-column" id="adminSidebar" style="background:#1a1a2e">
+<nav class="admin-sidebar d-flex flex-column{% if sidebar_colapsado %} admin-sidebar-off{% endif %}" id="adminSidebar" style="background:#1a1a2e">
   <div class="p-3 border-bottom" style="border-color:#30363d!important">
     <a href="{{ '/admin/dashboard' if session.rol == 'administrador' else '/pedidos' }}"
        class="text-decoration-none d-flex align-items-center gap-2">
@@ -94,7 +96,7 @@
   </div>
 </nav>
 
-<button class="admin-hamburguesa" onclick="toggleAdminSidebar()" aria-label="Abrir menú">
+<button class="admin-hamburguesa{% if sidebar_colapsado %} admin-hamburguesa-off{% endif %}" onclick="toggleAdminSidebar()" aria-label="Abrir menú">
   <i class="fa fa-bars"></i>
 </button>
 <div class="admin-overlay" id="adminOverlay" onclick="toggleAdminSidebar()"></div>
@@ -142,6 +144,9 @@ function toggleAdminSidebar() {
   display: none; position: fixed; inset: 0;
   background: rgba(0,0,0,0.45); z-index: 1035;
 }
+/* Overlay visible siempre que el menú esté abierto (antes solo en móvil;
+   ahora también en escritorio en páginas con sidebar_colapsado, p. ej. POS) */
+body.admin-menu-abierto .admin-overlay { display: block; }
 @media (max-width: 991.98px) {
   .admin-sidebar { transform: translateX(-105%); }
   .admin-sidebar.abierto {
@@ -150,6 +155,17 @@ function toggleAdminSidebar() {
   }
   .admin-contenido { margin-left: 0; }
   .admin-hamburguesa { display: block; }
-  body.admin-menu-abierto .admin-overlay { display: block; }
 }
+
+/* ── Colapso por página (variable sidebar_colapsado; solo POS hoy):
+   el mismo off-canvas TAMBIÉN en escritorio: contenido a ancho completo
+   y hamburguesa siempre visible. Convive con el media query de arriba:
+   en <992px ambas dicen lo mismo (sin contradicción). ── */
+.admin-sidebar.admin-sidebar-off { transform: translateX(-105%); }
+.admin-sidebar.admin-sidebar-off.abierto {
+  transform: translateX(0);
+  box-shadow: 4px 0 24px rgba(0,0,0,0.35);
+}
+.admin-contenido.admin-contenido-off { margin-left: 0; }
+.admin-hamburguesa.admin-hamburguesa-off { display: block; }
 </style>

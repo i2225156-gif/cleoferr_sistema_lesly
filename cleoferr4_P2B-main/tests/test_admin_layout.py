@@ -1,8 +1,9 @@
-"""Módulo admin unificado (C2a..C2d): sidebar único; hijas migradas:
+"""Módulo admin unificado (C2a..C2e): sidebar único; hijas migradas:
 dashboard/pedidos/pedido_detalle/ofertas (C2a),
 productos/producto_form/producto_detalle/inventario/alertas (C2b),
-admin_pagos_simulados/admin_reservas (C2c, rutas solo admin) y
-clientes/cliente_form/proveedores/proveedor_form/reportes (C2d).
+admin_pagos_simulados/admin_reservas (C2c, rutas solo admin),
+clientes/cliente_form/proveedores/proveedor_form/reportes (C2d) y
+caja/venta_form (C2e: POS con sidebar_colapsado, caja con sidebar fijo).
 
 Contra la BD real con conexión proxied (rollback): nada persiste. Por
 plantilla migrada verifica: 200 para admin y vendedor (donde el rol lo
@@ -344,3 +345,61 @@ def test_reportes_vendedor_sin_items_solo_admin(fx):
     assert '/admin/dashboard' not in html
     assert '/admin/pagos_simulados' not in html
     assert '/admin/reservas' not in html
+
+
+# ── C2e: POS (venta_form) con sidebar colapsado; caja y resto fijos ─
+
+def test_venta_form_admin_sidebar_colapsado(fx):
+    r = fx['admin'].get('/ventas/nueva')
+    assert r.status_code == 200
+    html = r.get_data(as_text=True)
+    # El POS pide pantalla completa: sidebar presente pero off-canvas.
+    # Se aserta el marcado exacto: el CSS del sidebar menciona estas clases
+    # en TODAS las páginas, lo que cuenta es que estén APLICADAS aquí.
+    assert 'CLEOFERR Admin' in html
+    assert 'class="admin-sidebar d-flex flex-column admin-sidebar-off"' in html
+    assert 'class="admin-hamburguesa admin-hamburguesa-off"' in html
+    assert 'class="admin-contenido p-4 admin-contenido-off"' in html
+    assert 'href="/caja" class="sidebar-item activo"' in html
+    assert 'navbar navbar-cleoferr navbar-expand-lg' not in html
+    # JS del POS intacto: catálogo, Enter del escáner, cobro y datos
+    assert 'renderCatalogo' in html
+    assert "e.key === 'Enter'" in html
+    assert 'validarVenta' in html
+    assert 'const PRODUCTOS' in html
+
+
+def test_venta_form_vendedor_sidebar_colapsado(fx):
+    r = fx['vendedor'].get('/ventas/nueva')
+    assert r.status_code == 200
+    html = r.get_data(as_text=True)
+    assert 'class="admin-sidebar d-flex flex-column admin-sidebar-off"' in html
+    # Ocultos para vendedor (permiso real en backend igualmente)
+    assert '/admin/dashboard' not in html
+    assert '/admin/pagos_simulados' not in html
+    assert '/admin/reservas' not in html
+
+
+def test_caja_admin_sidebar_fijo_normal(fx):
+    r = fx['admin'].get('/caja')
+    assert r.status_code == 200
+    html = r.get_data(as_text=True)
+    assert 'href="/caja" class="sidebar-item activo"' in html
+    assert 'navbar navbar-cleoferr navbar-expand-lg' not in html
+    assert 'Historial de cierres' in html          # contenido de la hija vivo
+    # Sin la variable: nav, hamburguesa y contenedor SIN clases de colapso
+    assert 'class="admin-sidebar d-flex flex-column" id="adminSidebar"' in html
+    assert '<button class="admin-hamburguesa" onclick=' in html
+    assert 'class="admin-contenido p-4">' in html
+    assert 'class="admin-sidebar d-flex flex-column admin-sidebar-off"' not in html
+    assert 'class="admin-hamburguesa admin-hamburguesa-off"' not in html
+    assert 'class="admin-contenido p-4 admin-contenido-off"' not in html
+
+
+def test_pagina_sin_variable_sidebar_fijo(fx):
+    # Cualquier otra página admin (sin sidebar_colapsado) queda igual
+    html = fx['admin'].get('/productos').get_data(as_text=True)
+    assert 'class="admin-sidebar d-flex flex-column" id="adminSidebar"' in html
+    assert 'class="admin-sidebar d-flex flex-column admin-sidebar-off"' not in html
+    assert 'class="admin-hamburguesa admin-hamburguesa-off"' not in html
+    assert 'class="admin-contenido p-4 admin-contenido-off">' not in html

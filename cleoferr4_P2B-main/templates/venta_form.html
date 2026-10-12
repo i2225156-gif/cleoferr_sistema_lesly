@@ -1,6 +1,8 @@
-{% extends 'base.html' %}
+{% extends 'admin_base.html' %}
+{% set seccion_activa = 'caja' %}
+{% set sidebar_colapsado = True %}
 {% block titulito %}Nueva Venta – Cleoferr POS{% endblock %}
-{% block contenido %}
+{% block admin_contenido %}
 
 <style>
 .pos-wrap { display:grid; grid-template-columns: 1fr 440px; gap:20px; align-items:start; }
@@ -22,6 +24,10 @@
 .pos-buscar-wrap i.fa-search {
     position: absolute; left: 15px; top: 50%; transform: translateY(-50%); color: #aaa;
 }
+
+/* La hamburguesa del sidebar (colapsado solo en esta página) flota sobre
+   este buscador sticky: se le deja su hueco a la izquierda. */
+.pos-buscar { padding-left: 62px; }
 .pos-grid {
     display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px;
     max-height: calc(100vh - 260px); overflow-y: auto; padding-right: 4px;
