@@ -1,0 +1,96 @@
+{% extends 'base.html' %}
+{% block titulito %}Pagos simulados – Cleoferr{% endblock %}
+{% block contenido %}
+<div class="container py-4">
+
+  <!-- Bandera SIEMPRE visible en el panel de demo -->
+  <div class="alert alert-warning text-center fw-bold" role="alert"
+       style="border:2px dashed #d97706;font-size:1rem">
+    <i class="fa fa-flask me-2"></i>PAGO SIMULADO – sin cobro real
+  </div>
+
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h4 class="fw-bold mb-0"><i class="fa fa-flask me-2"></i>Eventos de pago simulado</h4>
+  </div>
+
+  <!-- Gatillo de la demo: dispara un webhook firmado por el servidor -->
+  <div class="card shadow-sm mb-4" style="border-radius:12px">
+    <div class="card-body">
+      <h6 class="fw-bold"><i class="fa fa-bolt me-2"></i>Disparar evento simulado</h6>
+      <p class="text-muted" style="font-size:0.85rem">
+        Genera un evento firmado (el secreto nunca sale del servidor) para un pago
+        PENDIENTE. El monto lo recalcula el servidor desde el detalle de la venta.
+      </p>
+      <form method="POST" action="/admin/pagos_simulados/disparar" class="row g-2 align-items-end">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="col-md-6">
+          <label class="form-label mb-1">Pago pendiente</label>
+          <select name="id_pago" class="form-select" required>
+            <option value="" disabled selected>Selecciona un pago…</option>
+            {% for p in pendientes %}
+            <option value="{{ p.id_pago }}">
+              Venta #{{ p.id_venta }} · {{ p.id_transaccion }} · S/ {{ '%.2f'|format(p.monto|float) }}
+            </option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-md-3">
+          <label class="form-label mb-1">Resultado</label>
+          <select name="estado" class="form-select" required>
+            <option value="confirmado">Aprobar</option>
+            <option value="rechazado">Rechazar</option>
+          </select>
+        </div>
+        <div class="col-md-3">
+          <button type="submit" class="btn btn-naranja w-100 fw-bold">
+            <i class="fa fa-paper-plane me-1"></i>Disparar
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="card shadow-sm" style="border-radius:12px">
+    <div class="card-body">
+      <h6 class="fw-bold mb-3"><i class="fa fa-list me-2"></i>Últimos eventos (máx. 30)</h6>
+      {% if eventos %}
+      <div class="table-responsive">
+        <table class="table table-sm table-hover align-middle mb-0">
+          <thead>
+            <tr>
+              <th>Recibido</th><th>Evento</th><th>Pago</th><th>Estado</th>
+              <th>Firma</th><th>Toler.</th><th>Procesado</th><th>Motivo</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for e in eventos %}
+            <tr>
+              <td style="white-space:nowrap;font-size:0.8rem">{{ e.recibido_en.strftime('%d/%m %H:%M:%S') }}</td>
+              <td style="font-size:0.75rem"><code>{{ e.id_evento_proveedor[:28] }}</code>
+                {% if e.tipo %}<span class="badge bg-secondary">{{ e.tipo }}</span>{% endif %}</td>
+              <td style="font-size:0.8rem">
+                {% if e.id_venta %}#{{ e.id_venta }}{% else %}–{% endif %}
+              </td>
+              <td>
+                {% if e.estado_resultante %}
+                  <span class="badge {% if e.estado_resultante == 'confirmado' %}bg-success{% elif e.estado_resultante == 'rechazado' %}bg-danger{% else %}bg-secondary{% endif %}">
+                    {{ e.estado_resultante }}
+                  </span>
+                {% else %}–{% endif %}
+              </td>
+              <td>{% if e.firma_valida %}<i class="fa fa-check text-success"></i>{% else %}<i class="fa fa-times text-danger"></i>{% endif %}</td>
+              <td>{% if e.dentro_de_tolerancia %}<i class="fa fa-check text-success"></i>{% else %}<i class="fa fa-times text-danger"></i>{% endif %}</td>
+              <td>{% if e.procesado_en %}<i class="fa fa-check text-success"></i>{% else %}<i class="fa fa-hourglass text-muted"></i>{% endif %}</td>
+              <td style="font-size:0.75rem">{{ e.detalle.motivo if e.detalle and e.detalle.motivo else '' }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <p class="text-muted mb-0">Todavía no hay eventos de pago registrados.</p>
+      {% endif %}
+    </div>
+  </div>
+</div>
+{% endblock %}

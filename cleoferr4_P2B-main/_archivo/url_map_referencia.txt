@@ -58,3 +58,11 @@ GET | /ventas/<int:id_venta>/comprobante | comprobante_venta
 GET | /ventas/nueva | venta_nueva_form
 POST | /ventas/nueva | venta_nueva_guardar
 POST | /verificar_registro | verificar_registro
+
+── ADICIONES tras la referencia (el volcado original no se modifica) ──
+Fase 2.1, Tramo 2 (2b) — 2026-10-11:
+POST | /webhooks/pago/<proveedor> | webhook_pago
+  Única ruta exenta de CSRF (documentada): la llama la pasarela, no el
+  navegador; se autentica con la firma HMAC de PAGO_SIMULADA_WEBHOOK_SECRETO.
+  Solo POST: nunca escribe en un GET. Acepta únicamente el proveedor
+  configurado en PAGO_PROVEEDOR (cualquier otro nombre de URL da 404).

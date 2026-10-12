@@ -1,0 +1,163 @@
+{% extends 'base.html' %}
+{% block titulito %}Pago simulado – Cleoferr{% endblock %}
+{% block contenido %}
+<div class="container py-4" style="max-width:640px">
+
+  <!-- Bandera SIEMPRE visible en el checkout simulado -->
+  <div class="alert alert-warning text-center fw-bold" role="alert"
+       style="border:2px dashed #d97706;font-size:1rem">
+    <i class="fa fa-flask me-2"></i>PAGO SIMULADO – sin cobro real
+  </div>
+
+  <div class="card shadow-sm" style="border-radius:14px">
+    <div class="card-body p-4">
+      <h4 class="fw-bold mb-1"><i class="fa fa-credit-card me-2"></i>Pagar pedido #{{ pago.id_venta }}</h4>
+      <p class="text-muted mb-3">Referencia de la pasarela: <code>{{ pago.id_transaccion }}</code></p>
+
+      <div class="d-flex justify-content-between align-items-center mb-3 p-2"
+           style="background:#f8f9fa;border-radius:10px">
+        <span class="fw-semibold text-muted">Total a pagar</span>
+        <span class="fw-bold fs-4" style="color:var(--naranja)">S/ {{ '%.2f'|format(total|float) }}</span>
+      </div>
+
+      <!-- Tarjetas de prueba deterministas de la demo -->
+      <div class="alert alert-light border mb-3" style="font-size:0.85rem">
+        <strong>Tarjetas de prueba (simulación):</strong><br>
+        <span class="badge bg-success me-1">APRUEBA</span> 4111 1111 1111 1111<br>
+        <span class="badge bg-danger me-1">RECHAZA</span> 4000 0000 0000 0002<br>
+        Cualquier otra tarjeta válida se simula como <strong>rechazada</strong>.
+      </div>
+
+      <form id="formPagoSimulado" autocomplete="off">
+        <div class="mb-3">
+          <label class="form-label fw-semibold">Número de tarjeta</label>
+          <input type="text" id="numTarjeta" class="form-control" inputmode="numeric"
+                 placeholder="0000 0000 0000 0000" maxlength="19" required>
+          <div class="form-text text-danger d-none" id="errNumero">Número inválido (Luhn).</div>
+        </div>
+        <div class="row g-3 mb-3">
+          <div class="col-6">
+            <label class="form-label fw-semibold">Vencimiento</label>
+            <input type="text" id="vencimiento" class="form-control" inputmode="numeric"
+                   placeholder="MM/AA" maxlength="5" required>
+            <div class="form-text text-danger d-none" id="errVenc">Debe ser una fecha futura.</div>
+          </div>
+          <div class="col-6">
+            <label class="form-label fw-semibold">CVV</label>
+            <input type="password" id="cvv" class="form-control" inputmode="numeric"
+                   placeholder="123" maxlength="3" required>
+            <div class="form-text text-danger d-none" id="errCvv">CVV de 3 dígitos.</div>
+          </div>
+        </div>
+        <button type="submit" id="btnPagar" class="btn btn-naranja w-100 fw-bold" disabled>
+          <i class="fa fa-lock me-2"></i>Pagar S/ {{ '%.2f'|format(total|float) }} (simulado)
+        </button>
+      </form>
+
+      <div id="resultado" class="mt-3 d-none"></div>
+      <p class="text-center mt-3 mb-0">
+        <a href="/mis_pedidos" class="text-muted" style="font-size:0.85rem">Volver a mis pedidos</a>
+      </p>
+    </div>
+  </div>
+</div>
+
+<script>
+// Constantes de la demo: deben coincidir con services/pasarela/simulada.py
+// (lo vigila tests/test_pago_simulado.py).
+const TARJETA_APRUEBA = '4111111111111111';
+const TARJETA_RECHAZA = '4000000000000002';
+const CSRF_TOKEN = {{ csrf_token|tojson }};
+
+const elNum = document.getElementById('numTarjeta');
+const elVenc = document.getElementById('vencimiento');
+const elCvv = document.getElementById('cvv');
+const btn = document.getElementById('btnPagar');
+
+elNum.addEventListener('input', () => {
+  // Formato: grupos de 4 dígitos
+  const d = elNum.value.replace(/\D/g, '').slice(0, 16);
+  elNum.value = d.replace(/(\d{4})(?=\d)/g, '$1 ');
+  validar();
+});
+elVenc.addEventListener('input', () => {
+  let d = elVenc.value.replace(/\D/g, '').slice(0, 4);
+  if (d.length >= 3) d = d.slice(0, 2) + '/' + d.slice(2);
+  elVenc.value = d;
+  validar();
+});
+elCvv.addEventListener('input', () => {
+  elCvv.value = elCvv.value.replace(/\D/g, '').slice(0, 3);
+  validar();
+});
+
+function luhn(num) {
+  let suma = 0, doble = false;
+  for (let i = num.length - 1; i >= 0; i--) {
+    let n = parseInt(num[i], 10);
+    if (doble) { n *= 2; if (n > 9) n -= 9; }
+    suma += n; doble = !doble;
+  }
+  return suma % 10 === 0;
+}
+
+function validar() {
+  const dNum = elNum.value.replace(/\D/g, '');
+  const dVenc = elVenc.value.replace(/\D/g, '');
+  const dCvv = elCvv.value;
+  const okNum = dNum.length === 16 && luhn(dNum);
+  const okVenc = (() => {
+    if (dVenc.length !== 4) return false;
+    const mm = parseInt(dVenc.slice(0, 2), 10);
+    const aa = 2000 + parseInt(dVenc.slice(2), 10);
+    if (mm < 1 || mm > 12) return false;
+    const hoy = new Date();
+    return aa > hoy.getFullYear() || (aa === hoy.getFullYear() && mm >= hoy.getMonth() + 1);
+  })();
+  const okCvv = /^\d{3}$/.test(dCvv);
+  document.getElementById('errNumero').classList.toggle('d-none', okNum || dNum.length === 0);
+  document.getElementById('errVenc').classList.toggle('d-none', okVenc || dVenc.length === 0);
+  document.getElementById('errCvv').classList.toggle('d-none', okCvv || dCvv.length === 0);
+  btn.disabled = !(okNum && okVenc && okCvv);
+}
+
+document.getElementById('formPagoSimulado').addEventListener('submit', (e) => {
+  e.preventDefault();
+  btn.disabled = true;
+  const dNum = elNum.value.replace(/\D/g, '');
+  // La decisión es determinista según la tarjeta de prueba. Los datos de
+  // la tarjeta NUNCA salen de este navegador: al servidor solo viaja el
+  // RESULTADO simulado. El monto real lo recalcula el servidor.
+  const resultado = (dNum === TARJETA_APRUEBA) ? 'aprobado' : 'rechazado';
+
+  fetch('/pago/simulado/{{ pago.id_transaccion }}/procesar', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-CSRFToken': CSRF_TOKEN },
+    body: JSON.stringify({ resultado: resultado })
+  })
+  .then(r => r.json())
+  .then(d => {
+    const caja = document.getElementById('resultado');
+    caja.classList.remove('d-none');
+    if (d.ok && (d.estado === 'confirmado' || d.estado === 'ya_confirmado')) {
+      caja.innerHTML = '<div class="alert alert-success mb-0"><i class="fa fa-check-circle me-2"></i>' +
+        'Pago aprobado (simulado). Redirigiendo a tu pedido…</div>';
+      setTimeout(() => {
+        window.location.href = '/pedido_aceptado?id=' + (d.id_pedido || {{ pago.id_venta }});
+      }, 1200);
+    } else if (d.estado === 'rechazado' || d.estado === 'ya_rechazado') {
+      caja.innerHTML = '<div class="alert alert-danger mb-0"><i class="fa fa-times-circle me-2"></i>' +
+        'El pago fue rechazado (simulado). Puedes ver el estado en <a href="/mis_pedidos">mis pedidos</a>.</div>';
+    } else {
+      caja.innerHTML = '<div class="alert alert-warning mb-0"><i class="fa fa-exclamation-triangle me-2"></i>' +
+        (d.motivo || d.error || ('Estado: ' + d.estado)) + '</div>';
+    }
+  })
+  .catch(() => {
+    const caja = document.getElementById('resultado');
+    caja.classList.remove('d-none');
+    caja.innerHTML = '<div class="alert alert-danger mb-0">Error de conexión. Intenta de nuevo.</div>';
+  });
+});
+</script>
+{% endblock %}

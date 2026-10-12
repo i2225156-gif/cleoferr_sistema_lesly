@@ -117,9 +117,12 @@
                                     <select name="estado" class="form-select form-select-sm form-select-estado" style="display:inline-block;width:auto"
                                             data-pedido-id="{{ ped.id_pedido }}" data-estado-actual="{{ ped.estado }}">
                                         {% for e in estados %}
+                                        {% if e == ped.estado or e in transiciones.get(ped.estado, ()) %}
                                         <option value="{{ e }}" {% if ped.estado == e %}selected{% endif %}>{{ e|capitalize }}</option>
+                                        {% endif %}
                                         {% endfor %}
                                     </select>
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                                 </form>
                                 {% endif %}
                                 {% if ped.url_whatsapp_pedido %}
@@ -146,7 +149,12 @@
 </div>
 
 <script>
-// Actualización de estado vía AJAX con feedback visible (toast)
+// Cambio de estado vía AJAX. Contrato JSON {ok, mensaje, estado_nuevo?}:
+// el token CSRF viaja en CABECERA (el body solo lleva el estado), la
+// respuesta se valida por Content-Type antes de .json() y los errores
+// se muestran legibles (nunca el error de parseo del navegador).
+const CSRF_TOKEN = {{ csrf_token|tojson }};
+
 function mostrarToast(mensaje, tipo) {
     var previo = document.getElementById('toast-estado');
     if (previo) previo.remove();
@@ -157,6 +165,16 @@ function mostrarToast(mensaje, tipo) {
     el.textContent = mensaje;
     document.body.appendChild(el);
     setTimeout(function () { el.remove(); }, 4000);
+}
+
+function leerJSON(resp) {
+    // Jamás confiar en que el cuerpo sea JSON: si no lo es (sesión caída,
+    // página HTML del servidor), se lanza un error LEGIBLE.
+    var ct = resp.headers.get('Content-Type') || '';
+    if (ct.indexOf('application/json') === -1) {
+        throw new Error('Respuesta inesperada del servidor (no es JSON). Recarga la página.');
+    }
+    return resp.json();
 }
 
 document.querySelectorAll('.form-select-estado').forEach(function (sel) {
@@ -170,33 +188,41 @@ document.querySelectorAll('.form-select-estado').forEach(function (sel) {
         fd.append('estado', nuevo);
         fetch(form.getAttribute('action'), {
             method: 'POST',
-            headers: { 'X-Requested-With': 'XMLHttpRequest' },
+            headers: {
+                'X-Requested-With': 'XMLHttpRequest',
+                'X-CSRFToken': CSRF_TOKEN
+            },
             body: fd
         })
         .then(function (resp) {
-            if (!resp.ok) return resp.json().then(function (d) { throw new Error(d.error || 'Error al actualizar'); });
-            return resp.json();
+            if (resp.status === 401) {
+                mostrarToast('Tu sesión expiró. Te llevamos al login…', 'error');
+                setTimeout(function () { window.location.href = '/login'; }, 1200);
+                throw new Error('sesion-expirada');
+            }
+            return leerJSON(resp).then(function (data) {
+                if (!resp.ok || !data.ok) {
+                    throw new Error(data.mensaje || 'No se pudo actualizar el estado.');
+                }
+                return data;
+            });
         })
         .then(function (data) {
-            if (data.ok) {
-                this.setAttribute('data-estado-actual', nuevo);
-                mostrarToast(data.mensaje || 'Estado actualizado.', 'ok');
-                // Actualizar el badge de "PROGRESO" localmente y luego recargar
-                // para que TODA la fila (progreso, dots) quede consistente con la BD.
-                var fila = form.closest('tr');
-                if (fila) {
-                    var badges = fila.querySelectorAll('.badge-estado-mini, [data-estado]');
-                    badges.forEach(function (b) {
-                        b.textContent = (nuevo.charAt(0).toUpperCase() + nuevo.slice(1));
-                    });
-                }
-                setTimeout(function () { location.reload(); }, 800);
-            } else {
-                this.value = anterior;
-                mostrarToast(data.error || 'No se pudo actualizar el estado.', 'error');
+            this.setAttribute('data-estado-actual', nuevo);
+            mostrarToast(data.mensaje || 'Estado actualizado.', 'ok');
+            var fila = form.closest('tr');
+            if (fila) {
+                var badges = fila.querySelectorAll('.badge-estado-mini, [data-estado]');
+                badges.forEach(function (b) {
+                    b.textContent = (nuevo.charAt(0).toUpperCase() + nuevo.slice(1));
+                });
             }
+            // Recarga la lista para que progreso, dots y las opciones del
+            // desplegable queden filtradas según el nuevo estado.
+            setTimeout(function () { location.reload(); }, 800);
         }.bind(this))
         .catch(function (err) {
+            if (err && err.message === 'sesion-expirada') return;
             this.value = anterior;
             mostrarToast(err.message || 'Ocurrió un error al actualizar el estado.', 'error');
         }.bind(this))

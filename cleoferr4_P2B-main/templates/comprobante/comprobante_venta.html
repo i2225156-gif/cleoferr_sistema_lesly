@@ -50,6 +50,11 @@
     border: 2px dashed #999; color: #888; font-weight: 700;
   }
   .comp-leyenda { font-size: 0.75rem; color: #555; max-width: 520px; }
+  .comp-rotulo-simulado {
+    border: 2px dashed #d97706; background: #fff7ed; color: #b45309;
+    font-weight: 800; text-align: center; padding: 6px 8px; margin-bottom: 12px;
+    font-size: 0.85rem; letter-spacing: 0.5px; border-radius: 4px;
+  }
 
   /* ── Variante TICKET 80 mm ── */
   .comp-doc.ticket {
@@ -84,14 +89,23 @@
   <button type="button" class="btn btn-naranja" onclick="window.print()">
     <i class="fa fa-print me-1"></i>Imprimir
   </button>
+  {% if es_cliente %}
+  <a class="btn btn-outline-primary" href="{{ url_for('mis_comprobantes') }}">
+    <i class="fa fa-list me-1"></i>Mis comprobantes
+  </a>
+  <a class="btn btn-outline-secondary" href="{{ url_for('mis_pedidos') }}">
+    <i class="fa fa-box me-1"></i>Mis pedidos
+  </a>
+  {% else %}
   <a class="btn btn-outline-primary" href="{{ url_for('venta_nueva_form') }}">
     <i class="fa fa-plus me-1"></i>Nueva venta
   </a>
   <a class="btn btn-outline-secondary" href="{{ url_for('pedidos') }}">
     <i class="fa fa-arrow-left me-1"></i>Volver al panel
   </a>
+  {% endif %}
   <a class="btn btn-outline-dark"
-     href="{{ url_for('comprobante_venta', id_venta=venta.id_venta) }}{% if formato == 'ticket' %}?formato=a4{% else %}?formato=ticket{% endif %}">
+     href="{{ url_for('mi_comprobante' if es_cliente else 'comprobante_venta', id_venta=venta.id_venta) }}{% if formato == 'ticket' %}?formato=a4{% else %}?formato=ticket{% endif %}">
     <i class="fa fa-receipt me-1"></i>
     {% if formato == 'ticket' %}Ver A4{% else %}Ver ticket 80 mm{% endif %}
   </a>

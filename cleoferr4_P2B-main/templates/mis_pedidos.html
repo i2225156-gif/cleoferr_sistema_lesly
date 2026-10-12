@@ -66,9 +66,14 @@
         <h2><i class="fa fa-box me-2"></i>Mis Pedidos</h2>
         <p style="margin:4px 0 0;opacity:0.8;font-size:0.9rem">Revisa el estado de tus pedidos en tiempo real</p>
     </div>
-    <a href="/catalogo" class="btn btn-outline-light">
-        <i class="fa fa-arrow-left me-1"></i> Seguir comprando
-    </a>
+    <div class="d-flex gap-2">
+        <a href="/mis_comprobantes" class="btn btn-outline-light" title="Mis comprobantes">
+            <i class="fa fa-file-invoice me-1"></i> Comprobantes
+        </a>
+        <a href="/catalogo" class="btn btn-outline-light">
+            <i class="fa fa-arrow-left me-1"></i> Seguir comprando
+        </a>
+    </div>
 </div>
 
 {% if not pedidos %}

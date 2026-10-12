@@ -1,0 +1,65 @@
+{# Sidebar oscuro reutilizable para páginas admin.
+   Variables opcionales: reservas_vencidas (badge), seccion_activa (string) #}
+<nav class="admin-sidebar d-flex flex-column" style="background:#1a1a2e;min-height:100vh;width:240px;flex-shrink:0">
+  <div class="p-3 border-bottom" style="border-color:#30363d!important">
+    <a href="/admin/dashboard" class="text-decoration-none d-flex align-items-center gap-2">
+      <i class="fa fa-tools" style="color:var(--naranja);font-size:1.4rem"></i>
+      <span class="fw-bold text-white" style="font-size:0.95rem">CLEOFERR Admin</span>
+    </a>
+  </div>
+
+  <div class="flex-grow-1 py-2">
+    <a href="/admin/dashboard" class="sidebar-item {{ 'activo' if seccion_activa == 'dashboard' else '' }}">
+      <i class="fa fa-chart-line me-2"></i>Dashboard
+    </a>
+    <a href="/productos" class="sidebar-item {{ 'activo' if seccion_activa == 'productos' else '' }}">
+      <i class="fa fa-box me-2"></i>Productos
+    </a>
+    <a href="/pedidos" class="sidebar-item {{ 'activo' if seccion_activa == 'pedidos' else '' }}">
+      <i class="fa fa-shopping-cart me-2"></i>Pedidos
+    </a>
+    <a href="/clientes" class="sidebar-item {{ 'activo' if seccion_activa == 'clientes' else '' }}">
+      <i class="fa fa-users me-2"></i>Clientes
+    </a>
+    <a href="/inventario" class="sidebar-item {{ 'activo' if seccion_activa == 'inventario' else '' }}">
+      <i class="fa fa-warehouse me-2"></i>Inventario
+    </a>
+    <a href="/reportes" class="sidebar-item {{ 'activo' if seccion_activa == 'reportes' else '' }}">
+      <i class="fa fa-file-alt me-2"></i>Reportes
+    </a>
+    <div class="sidebar-separator"></div>
+    <a href="/admin/pagos_simulados" class="sidebar-item {{ 'activo' if seccion_activa == 'pagos_simulados' else '' }}">
+      <i class="fa fa-flask me-2"></i>Pagos Simulados
+    </a>
+    <a href="/admin/reservas" class="sidebar-item {{ 'activo' if seccion_activa == 'reservas' else '' }}">
+      <i class="fa fa-hourglass-end me-2"></i>Reservas
+      {% if reservas_vencidas and reservas_vencidas > 0 %}
+      <span class="badge bg-danger ms-auto">{{ reservas_vencidas }}</span>
+      {% endif %}
+    </a>
+    <a href="/caja" class="sidebar-item {{ 'activo' if seccion_activa == 'caja' else '' }}">
+      <i class="fa fa-cash-register me-2"></i>Caja
+    </a>
+  </div>
+
+  <div class="p-3 border-top" style="border-color:#30363d!important">
+    <a href="/logout" class="sidebar-item" style="color:#f85149">
+      <i class="fa fa-sign-out-alt me-2"></i>Salir
+    </a>
+  </div>
+</nav>
+
+<style>
+.admin-sidebar .sidebar-item {
+  display: flex; align-items: center; padding: 10px 16px;
+  color: #c9d1d9; text-decoration: none; font-size: 0.87rem; font-weight: 500;
+  border-left: 3px solid transparent; transition: all 0.15s;
+}
+.admin-sidebar .sidebar-item:hover { color: #fff; background: #21262d; }
+.admin-sidebar .sidebar-item.activo {
+  color: #fff; background: #21262d; border-left-color: var(--naranja);
+}
+.admin-sidebar .sidebar-separator {
+  border-top: 1px solid #30363d; margin: 8px 12px;
+}
+</style>

@@ -18,15 +18,20 @@ from sqlalchemy import create_engine
 
 load_dotenv()
 
-# NullPool: sin reutilización de conexiones persistentes.
-# Justificación: Supabase ya tiene su propio pooler (pgbouncer); usar un pool de
-# conexiones en Python + pool_pre_ping sobre psycopg2 provocaba el error
-# "set_session cannot be used inside a transaction" al reciclar conexiones.
-# Con NullPool cada get_connection_* abre una conexión fresca y la cierra al terminar.
-from sqlalchemy.pool import NullPool
+# B0: QueuePool en el cliente. El host de este proyecto es el pooler de Supabase
+# en modo SESIÓN (puerto 5432), que tolera conexiones persistentes. El error
+# "set_session cannot be used inside a transaction" que motivó NullPool se evita
+# con el rollback defensivo de _CompatConnection.close() antes de devolver la
+# conexión al pool, junto con pool_pre_ping.
+from sqlalchemy.pool import QueuePool
 
 _ENGINE_OPTIONS = {
-    "poolclass": NullPool,
+    "poolclass": QueuePool,
+    "pool_size": 5,
+    "max_overflow": 10,
+    "pool_timeout": 30,
+    "pool_recycle": 280,
+    "pool_pre_ping": True,
 }
 
 

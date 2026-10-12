@@ -109,8 +109,10 @@
         <div class="d-flex flex-wrap gap-2 align-items-center">
             <span class="fw-semibold" style="font-size:0.85rem">Cambiar a:</span>
             {% for fase in fases_orden %}
+            {% if fase == pedido.estado or fase in transiciones.get(pedido.estado, ()) %}
             <form method="POST" action="/pedidos/{{ pedido.id_venta }}/estado" style="display:inline">
                 <input type="hidden" name="estado" value="{{ fase }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <button type="submit" class="btn-fase {% if pedido.estado == fase %}activo{% endif %}">
                     {% if fase == 'pendiente' %}<i class="fa fa-clock me-1"></i>
                     {% elif fase == 'confirmado' %}<i class="fa fa-check-circle me-1"></i>
@@ -123,6 +125,7 @@
                     {% endif %}{{ fase|capitalize }}
                 </button>
             </form>
+            {% endif %}
             {% endfor %}
         </div>
         {% endif %}

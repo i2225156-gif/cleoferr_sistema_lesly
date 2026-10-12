@@ -3,6 +3,8 @@ import sys
 import uuid
 import secrets
 import hmac
+import hashlib
+import json
 # AÑADIR después de: import uuid
 from urllib.parse import quote
 # Intento seguro de importar dependencias externas; si faltan, mostrar instrucciones claras y salir.
@@ -24,6 +26,19 @@ except Exception as e:
 
 from db import db
 from db_supabase import get_connection_auth, get_connection_tienda
+from services.comprobantes import (EMISOR, UMBRAL_BOLETA_SIN_DOC,
+                                    boleta_necesita_documento,
+                                    ruc_valido_para_factura,
+                                    siguiente_numero as _siguiente_numero_comprobante,
+                                    texto_qr)
+from services.documentos import (NOMBRES_TIPO, normalizar_numero,
+                                 tipo_documento_de_cliente, validar_documento)
+from services.inventario import devolver_stock_venta
+from services.reservas import liberar_reservas_vencidas, preview_reservas_vencidas
+from services.pagos import (cancelar_pedido_con_pago_inicial, confirmar_pago,
+                            registrar_evento)
+from services.pasarela import (EstadoPago, PagoResultado, PagoSolicitud,
+                               crear_pasarela)
 from sqlalchemy import text
 
 load_dotenv()
@@ -190,6 +205,11 @@ _CSRF_PROTEGIDAS = {
     'recuperar_contrasena', 'restablecer_contrasena', 'cambiar_clave',
     'carrito_confirmar_v2', 'carrito_agregar',
     'registrar_pos',
+    'pedido_cambiar_estado',
+    'pago_simulado_procesar',
+    'admin_pagos_disparar',
+    'admin_reservas_liberar',
+    'perfil_actualizar_documento',
 }
 
 
@@ -206,6 +226,12 @@ def _ctx_csrf_token():
     return {'csrf_token': _obtener_csrf_token()}
 
 
+def _es_ajax():
+    """Petición AJAX: fetch del frontend (cabecera) o Accept: application/json."""
+    return (request.headers.get('X-Requested-With') == 'XMLHttpRequest'
+            or 'application/json' in (request.headers.get('Accept') or ''))
+
+
 @app.before_request
 def _validar_csrf():
     if request.method not in ('POST', 'PUT', 'PATCH', 'DELETE'):
@@ -217,6 +243,11 @@ def _validar_csrf():
         or (request.get_json(silent=True) or {}).get('csrf_token')
     if procedente and hmac.compare_digest(str(procedente), session.get('_csrf_token', '')):
         return None
+    if _es_ajax():
+        # Contrato JSON para fetch: nunca una página HTML de error (bug
+        # del desplegable de /pedidos: response.json() sobre <!doctype>).
+        return {'ok': False,
+                'mensaje': 'Token CSRF inválido o ausente. Recarga la página e inténtalo de nuevo.'}, 400
     return abort(400)
 
 
@@ -235,6 +266,9 @@ def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if "usuario_id" not in session:
+            if _es_ajax():
+                return {'ok': False,
+                        'mensaje': 'Tu sesión expiró. Inicia sesión de nuevo.'}, 401
             # Si la petición viene de una ruta de cliente, mandar a login de clientes
             if any(request.path.startswith(r) for r in _RUTAS_CLIENTE):
                 return redirect(url_for("login_cliente"))
@@ -246,6 +280,9 @@ def admin_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if session.get("rol") != "administrador":
+            if _es_ajax():
+                return {'ok': False,
+                        'mensaje': 'No tienes permisos para esta acción.'}, 403
             flash("Acceso denegado.", "danger")
             return redirect(url_for("productos"))
         return f(*args, **kwargs)
@@ -255,6 +292,9 @@ def escritura_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if session.get("rol") not in ("administrador", "vendedor"):
+            if _es_ajax():
+                return {'ok': False,
+                        'mensaje': 'No tienes permisos para esta acción.'}, 403
             flash("No tienes permisos para realizar esta acción.", "danger")
             return redirect(url_for("productos"))
         return f(*args, **kwargs)
@@ -871,7 +911,23 @@ def actualizar_producto(id):
 @login_required
 @admin_required
 def eliminar_producto(id):
+    # Regla del alcance (§6.3): no eliminar físicamente un producto con
+    # historial (ventas/pedidos o movimientos de inventario); priorizar la
+    # desactivación, que se hace desde Editar (estado -> inactivo).
     producto = db.get_or_404(Producto, id)
+    ventas = db.session.execute(
+        text("SELECT COUNT(*) FROM detalle_venta WHERE id_producto = :id"),
+        {"id": id}).scalar()
+    movimientos = db.session.execute(
+        text("SELECT COUNT(*) FROM inventario_movimiento WHERE id_producto = :id"),
+        {"id": id}).scalar()
+    if ventas or movimientos:
+        cantidad = ventas if ventas else movimientos
+        motivo = ("ventas o pedidos" if ventas else "movimientos de inventario")
+        flash(f"No se puede eliminar: el producto tiene {cantidad} "
+              f"{motivo} asociados. Desactívalo desde Editar para retirarlo "
+              "del catálogo sin perder el historial.", "danger")
+        return redirect(url_for('productos'))
     db.session.delete(producto)
     db.session.commit()
     flash("Producto eliminado correctamente.", "success")
@@ -960,11 +1016,63 @@ def editar_cliente(id):
         email     = _normalizar_correo(request.form['email'])
         telefono  = request.form.get('telefono', '')
         direccion = request.form.get('direccion', '')
+        # Documento de identidad (admin puede corregirlo)
+        tipo_doc_nombre = (request.form.get('tipo_documento') or '').strip().lower()
+        nro_documento  = normalizar_numero(request.form.get('nro_documento', ''))
+        if tipo_doc_nombre and nro_documento:
+            ok_doc, msg_doc = validar_documento(tipo_doc_nombre, nro_documento)
+            if not ok_doc:
+                flash(msg_doc, 'danger')
+                return redirect(url_for('editar_cliente', id=id))
+        else:
+            tipo_doc_nombre = None
+            nro_documento = None
         try:
-            cursor.execute(
-                "UPDATE cliente SET nombre=%s, email=%s, telefono=%s, direccion=%s WHERE id_cliente=%s",
-                (nombre, email, telefono, direccion, id)
-            )
+            if tipo_doc_nombre:
+                cursor.execute(
+                    "SELECT id_tipo_documento FROM tipo_documento WHERE LOWER(TRIM(nombre)) = %s",
+                    (tipo_doc_nombre,)
+                )
+                fila_td = cursor.fetchone()
+                id_tipo_doc = fila_td['id_tipo_documento'] if fila_td else 1
+                # Leer el documento ANTERIOR para auditoria
+                cursor.execute(
+                    "SELECT LOWER(TRIM(td.nombre)) AS tipo, c.nro_documento"
+                    "  FROM cliente c"
+                    "  LEFT JOIN tipo_documento td ON td.id_tipo_documento = c.id_tipo_documento"
+                    " WHERE c.id_cliente = %s",
+                    (id,)
+                )
+                doc_anterior = cursor.fetchone() or {}
+                doc_anterior_txt = f"{doc_anterior.get('tipo') or ''}:{doc_anterior.get('nro_documento') or ''}"
+                cursor.execute(
+                    "UPDATE cliente SET nombre=%s, email=%s, telefono=%s, direccion=%s,"
+                    " id_tipo_documento=%s, nro_documento=%s WHERE id_cliente=%s",
+                    (nombre, email, telefono, direccion, id_tipo_doc, nro_documento or None, id)
+                )
+                # AUDITORIA (TIENDA): quien cambio el documento de quien
+                if doc_anterior_txt != f"{tipo_doc_nombre}:{nro_documento}":
+                    conn_t = get_connection_tienda()
+                    cur_t = conn_t.cursor()
+                    try:
+                        cur_t.execute(
+                            "INSERT INTO auditoria (id_usuario, tabla_afectada, id_registro,"
+                            " accion, valor_anterior, valor_nuevo)"
+                            " VALUES (%s, 'cliente_documento', %s, 'admin_cambio_documento', %s, %s)",
+                            (session.get('usuario_id'), id, doc_anterior_txt,
+                             f"{tipo_doc_nombre}:{nro_documento}")
+                        )
+                        conn_t.commit()
+                    except Exception:
+                        conn_t.rollback()
+                        app.logger.exception('Error auditando cambio de documento')
+                    finally:
+                        conn_t.close()
+            else:
+                cursor.execute(
+                    "UPDATE cliente SET nombre=%s, email=%s, telefono=%s, direccion=%s WHERE id_cliente=%s",
+                    (nombre, email, telefono, direccion, id)
+                )
             conn.commit()
             flash("Cliente actualizado correctamente.", "success")
         except Exception as e:
@@ -976,11 +1084,20 @@ def editar_cliente(id):
 
     cursor.execute("SELECT * FROM cliente WHERE id_cliente = %s", (id,))
     cliente = cursor.fetchone()
+    cursor.execute("SELECT LOWER(TRIM(nombre)) AS nombre FROM tipo_documento ORDER BY id_tipo_documento")
+    tipos_doc = [r['nombre'] for r in cursor.fetchall()]
+    cursor.execute(
+        "SELECT LOWER(TRIM(td.nombre)) AS tipo FROM cliente c"
+        " LEFT JOIN tipo_documento td ON td.id_tipo_documento = c.id_tipo_documento"
+        " WHERE c.id_cliente = %s", (id,))
+    fila_doc = cursor.fetchone()
+    doc_tipo_actual = fila_doc['tipo'] if fila_doc and fila_doc['tipo'] else ''
     conn.close()
     if not cliente:
         flash("Cliente no encontrado.", "danger")
         return redirect(url_for('clientes'))
-    return render_template('cliente_form.html', cliente=cliente)
+    return render_template('cliente_form.html', cliente=cliente,
+                           tipos_doc=tipos_doc, doc_tipo_actual=doc_tipo_actual)
 
 
 @app.route('/clientes/eliminar/<int:id>')
@@ -1051,6 +1168,14 @@ def registrar_pos():
             WHERE id_tipo_documento = %s AND nro_documento = %s
         """, (id_tipo_doc, doc))
         existente = cursor.fetchone()
+        # Buscar el id del tipo de documento POR NOMBRE (no por id).
+        cursor.execute("""
+            SELECT id_tipo_documento FROM tipo_documento
+             WHERE LOWER(TRIM(nombre)) = %s
+        """, (tipo_doc_nombre,))
+        fila_td = cursor.fetchone()
+        _id_tipo_doc = fila_td['id_tipo_documento'] if fila_td else 1
+
         if existente:
             if telefono and not (existente.get('telefono') or '').strip():
                 cursor.execute(
@@ -1384,7 +1509,8 @@ def pedidos():
         pedidos = []
     finally:
         conn.close()
-    return render_template('pedidos.html', pedidos=pedidos, estados=lista_estados)
+    return render_template('pedidos.html', pedidos=pedidos, estados=lista_estados,
+                           transiciones=TRANSICIONES_PEDIDO)
 
 @app.route('/ventas/nueva', methods=['GET'])
 @login_required
@@ -1974,7 +2100,7 @@ def pedido_detalle(id):
     return render_template('pedido_detalle.html', pedido=pedido, items=items,
                            comprobante=comprobante, id=id,
                            idx_actual=idx_actual, fases_orden=PASOS,
-                           estados=PASOS)
+                           estados=PASOS, transiciones=TRANSICIONES_PEDIDO)
 
 @app.route('/ventas/<int:id_venta>/comprobante')
 @login_required
@@ -1982,13 +2108,27 @@ def pedido_detalle(id):
 def comprobante_venta(id_venta):
     """Muestra el comprobante (boleta/factura SIMULADA) de una venta.
 
-    Si la venta aún no tiene registro en la tabla comprobante, se crea aquí
-    mismo (numeración correlativa + subtotal/igv/total) dentro de una
-    transacción; si ya existía solo se lee. Nunca falla por datos parciales:
-    cliente sin DNI, vendedor nulo, etc. se muestran como campos vacíos.
+    SOLO LECTURA: si la venta aún no tiene comprobante, avisa que se emite
+    al confirmar el pago (D1). Nunca crea ni escribe en un GET.
     """
     formato = 'ticket' if request.args.get('formato') == 'ticket' else 'a4'
+    resultado = _datos_comprobante(id_venta)
+    if resultado is None:
+        abort(404)
+    if resultado['render'] is None:
+        flash('El comprobante aún no se emitió: se emite al confirmar el pago.', 'info')
+        return redirect(url_for('pedido_detalle', id=id_venta))
+    return render_template('comprobante/comprobante_venta.html',
+                           formato=formato, es_cliente=False,
+                           **resultado['render'])
 
+
+def _datos_comprobante(id_venta):
+    """Carga TODO lo necesario para renderizar un comprobante (solo SELECT).
+
+    Devuelve None si la venta no existe, {'venta':..., 'render': None} si
+    la venta no tiene comprobante aún, o {'venta':..., 'render': {...}}.
+    """
     conn   = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
     venta = comprobante = None
@@ -1999,12 +2139,12 @@ def comprobante_venta(id_venta):
             SELECT v.*, tv.nombre AS tipo_venta, ev.nombre AS estado_venta
             FROM venta v
             LEFT JOIN tipo_venta tv   ON v.id_tipo_venta   = tv.id_tipo_venta
-            LEFT JOIN estado_venta ev ON v.id_estado_venta  = ev.id_estado_venta
+            LEFT JOIN estado_venta ev ON v.id_estado_venta  = v.id_estado_venta
             WHERE v.id_venta = %s
         """, (id_venta,))
         venta = cursor.fetchone()
         if not venta:
-            abort(404)
+            return None
 
         cursor.execute("""
             SELECT d.id_detalle, d.cantidad, d.precio_unitario,
@@ -2026,52 +2166,18 @@ def comprobante_venta(id_venta):
         fila_pago = cursor.fetchone()
         metodo_pago = fila_pago['nombre'] if fila_pago else None
 
-        # Comprobante: leer o crear si falta
         cursor.execute("""
             SELECT c.*, tc.nombre AS tipo
             FROM comprobante c
-            LEFT JOIN tipo_comprobante tc ON c.id_tipo_comprobante = tc.id_tipo_comprobante
+            LEFT JOIN tipo_comprobante tc ON c.id_tipo_comprobante = c.id_tipo_comprobante
             WHERE c.id_venta = %s LIMIT 1
         """, (id_venta,))
         comprobante = cursor.fetchone()
-
-        # Totales desde el detalle (precios con IGV 18% incluido)
-        total_calc    = round(sum(float(i['importe'] or 0) for i in items), 2)
-        subtotal_calc = round(total_calc / 1.18, 2)
-        igv_calc      = round(total_calc - subtotal_calc, 2)
-
-        if not comprobante:
-            # Crear comprobante en el momento (ventas antiguas sin registro).
-            # Por defecto se emite boleta; la factura solo la genera el flujo
-            # de cobro, que recibe el RUC del cliente.
-            tipo_comp_db = 'boleta'
-            num_comp = _siguiente_numero_comprobante(cursor, tipo_comp_db)
-            cursor.execute("""
-                INSERT INTO comprobante
-                    (id_venta, id_tipo_comprobante, numero, ruc, serie, subtotal, igv, total)
-                VALUES (%s, (SELECT id_tipo_comprobante FROM tipo_comprobante WHERE nombre = %s),
-                        %s, NULL, %s, %s, %s, %s)
-                RETURNING *
-            """, (id_venta, tipo_comp_db, num_comp,
-                  'B001', subtotal_calc, igv_calc, total_calc))
-            comprobante = cursor.fetchone()
-            comprobante['tipo'] = tipo_comp_db
-            conn.commit()
-        elif comprobante.get('total') is None:
-            # Registro viejo sin totales: completarlos con lo calculado.
-            cursor.execute("""
-                UPDATE comprobante SET subtotal = %s, igv = %s, total = %s
-                WHERE id_comprobante = %s
-            """, (subtotal_calc, igv_calc, total_calc, comprobante['id_comprobante']))
-            conn.commit()
-            comprobante.update(subtotal=subtotal_calc, igv=igv_calc, total=total_calc)
-    except Exception:
-        conn.rollback()
-        app.logger.exception("Error en comprobante_venta %s", id_venta)
-        flash('No se pudo cargar el comprobante de la venta.', 'danger')
-        return redirect(url_for('pedido_detalle', id=id_venta))
     finally:
         conn.close()
+
+    if not comprobante:
+        return {'venta': venta, 'render': None}
 
     # Datos en la BD Auth: cliente (DNI/nombre) y vendedor (solo lectura).
     cliente_doc = cliente_nombre = vendedor = None
@@ -2096,32 +2202,107 @@ def comprobante_venta(id_venta):
         app.logger.exception("Error consultando datos de Auth para el comprobante %s", id_venta)
 
     tipo = (comprobante.get('tipo') or 'boleta').lower()
-    # serie-numero legible: p. ej. serie 'B001' + numero 'B000046' -> 'B001-000046'
     serie  = comprobante.get('serie') or ('F001' if tipo == 'factura' else 'B001')
     numero = comprobante.get('numero') or ''
     dig    = numero[-6:] if numero else '000000'
     serie_numero = f'{serie}-{dig}'
 
-    # RUC del cliente: en facturas viene en comprobante.ruc; en boletas se
-    # muestra el DNI del cliente si existe (si no, "CLIENTES VARIOS").
-    total       = round(float(comprobante.get('total') or 0), 2)
-    subtotal    = round(float(comprobante.get('subtotal') or 0), 2)
-    igv         = round(float(comprobante.get('igv') or 0), 2)
+    # Totales: de la fila del comprobante; si es una fila vieja sin
+    # totales, se calculan para MOSTRAR (sin escribir en el GET).
+    total    = round(float(comprobante.get('total') or 0), 2)
+    subtotal = round(float(comprobante.get('subtotal') or 0), 2)
+    igv      = round(float(comprobante.get('igv') or 0), 2)
+    if not total and items:
+        total    = round(sum(float(i['importe'] or 0) for i in items), 2)
+        subtotal = round(total / 1.18, 2)
+        igv      = round(total - subtotal, 2)
     total_letras = numero_a_letras(total)
 
-    # Contenido del QR: resumen del comprobante (formato estilo SUNAT simulado)
-    qr_texto = ('20605977074|{}|{}|{}|{:.2f}|{:.2f}|{}'
-                .format('03' if tipo == 'boleta' else '01', serie, dig,
-                        igv, total, comprobante.get('fecha_emision') or ''))
+    # QR con el RUC del emisor desde el .env (EMISOR de services/comprobantes)
+    qr_texto = texto_qr(tipo, serie, dig, igv, total,
+                        comprobante.get('fecha_emision') or '')
     qr_data = _qr_data_uri(qr_texto)
 
+    render = {
+        'venta': venta, 'comprobante': comprobante, 'items': items,
+        'cliente_doc': cliente_doc, 'cliente_nombre': cliente_nombre,
+        'vendedor': vendedor, 'metodo_pago': metodo_pago,
+        'subtotal': subtotal, 'igv': igv, 'total': total,
+        'total_letras': total_letras, 'serie_numero': serie_numero,
+        'qr_data': qr_data, 'emisor': EMISOR,
+    }
+    return {'venta': venta, 'render': render}
+
+
+@app.route('/mi_comprobante/<int:id_venta>')
+@login_required
+def mi_comprobante(id_venta):
+    """Comprobante del CLIENTE: solo el dueño de la venta (ajeno -> 403).
+
+    Solo lectura (GET sin escrituras); si la venta aún no tiene comprobante,
+    avisa que se emite al confirmar el pago.
+    """
+    resultado = _datos_comprobante(id_venta)
+    if resultado is None:
+        abort(404)
+    venta = resultado['venta']
+    if session.get('rol') != 'cliente' or venta['id_cliente'] != session.get('usuario_id'):
+        abort(403)
+    if resultado['render'] is None:
+        flash('Tu comprobante se emitirá cuando se confirme el pago.', 'info')
+        return redirect(url_for('mis_pedidos'))
+    formato = 'ticket' if request.args.get('formato') == 'ticket' else 'a4'
     return render_template('comprobante/comprobante_venta.html',
-                           venta=venta, comprobante=comprobante, items=items,
-                           cliente_doc=cliente_doc, cliente_nombre=cliente_nombre,
-                           vendedor=vendedor, metodo_pago=metodo_pago,
-                           subtotal=subtotal, igv=igv, total=total,
-                           total_letras=total_letras, serie_numero=serie_numero,
-                           qr_data=qr_data, formato=formato)
+                           formato=formato, es_cliente=True,
+                           **resultado['render'])
+
+
+@app.route('/mis_comprobantes')
+@login_required
+def mis_comprobantes():
+    """Historial de comprobantes del cliente (solo los suyos; solo lectura)."""
+    if session.get('rol') != 'cliente':
+        return redirect(url_for('pedidos'))
+    conn   = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("""
+            SELECT c.serie, c.numero, c.total, c.fecha_emision, c.estado_sunat,
+                   tc.nombre AS tipo, v.id_venta,
+                   v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima' AS fecha_venta
+              FROM venta v
+              JOIN comprobante c ON c.id_venta = v.id_venta
+              LEFT JOIN tipo_comprobante tc ON tc.id_tipo_comprobante = c.id_tipo_comprobante
+             WHERE v.id_cliente = %s
+             ORDER BY c.fecha_emision DESC
+             LIMIT 100
+        """, (session['usuario_id'],))
+        comprobantes = cursor.fetchall()
+    finally:
+        conn.close()
+    return render_template('mis_comprobantes.html', comprobantes=comprobantes)
+
+
+# Criterio del alcance (§6.9): solo cuentan como vendidas las ventas con pago
+# CONFIRMADO (uq_pago_venta garantiza un único pago por venta: JOIN directo).
+SQL_VENTAS_HOY_PAGADAS = """
+    SELECT COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS ventas_hoy
+    FROM venta v
+    JOIN pago pg ON pg.id_venta = v.id_venta AND pg.estado = 'confirmado'
+    JOIN detalle_venta d ON d.id_venta = v.id_venta
+    WHERE DATE(v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima') = CURRENT_DATE
+"""
+
+# Sintaxis PostgreSQL: DATE_SUB es MySQL y fallaba aquí, dejando la sección
+# "Resultados" (movimientos de los últimos 30 días) siempre vacía.
+SQL_MOVIMIENTOS_30DIAS = """
+    SELECT tipo,
+           COALESCE(SUM(cantidad),0) AS total_cantidad,
+           COALESCE(SUM(precio_unitario * cantidad),0) AS total_valor
+    FROM inventario_movimiento
+    WHERE fecha >= NOW() - INTERVAL '30 days'
+    GROUP BY tipo
+"""
 
 
 @app.route('/reportes')
@@ -2134,14 +2315,9 @@ def reportes():
     reportes_data = None
 
     try:
-        # Ventas hoy (si existe tabla pedido con campo total y fecha)
+        # Ventas de hoy SOLO con pago confirmado (criterio del alcance §6.9).
         try:
-            cursor.execute("""
-                SELECT COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS ventas_hoy
-                FROM venta v
-                JOIN detalle_venta d ON v.id_venta = d.id_venta
-                WHERE DATE(v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima') = CURRENT_DATE
-            """)
+            cursor.execute(SQL_VENTAS_HOY_PAGADAS)
             row = cursor.fetchone()
             resumen['ventas_hoy'] = float(row['ventas_hoy'] or 0)
         except Exception:
@@ -2165,14 +2341,7 @@ def reportes():
 
         # Dashboard inventario: entradas/salidas últimos 30 días (cantidad y valor)
         try:
-            cursor.execute("""
-                SELECT tipo,
-                       COALESCE(SUM(cantidad),0) AS total_cantidad,
-                       COALESCE(SUM(precio_unitario * cantidad),0) AS total_valor
-                FROM inventario_movimiento
-                WHERE fecha >= DATE_SUB(NOW(), INTERVAL 30 DAY)
-                GROUP BY tipo
-            """)
+            cursor.execute(SQL_MOVIMIENTOS_30DIAS)
             agg = cursor.fetchall()
             # Construir filas para la tabla de reportes
             headers = ['Tipo', 'Cantidad (30d)', 'Valor (30d)']
@@ -2391,6 +2560,26 @@ def registro_cliente():
     contrasena = request.form.get('contrasena', '')
     confirmar  = request.form.get('confirmar', '')
 
+    # Documento de identidad OPCIONAL en el registro: si el cliente escribe
+    # el número, se valida por tipo y se normaliza; si no, se guarda NULL.
+    # El registro NUNCA se bloquea por la API de DNI/RUC. El nombre es
+    # editable y marcado "no verificado".
+    tipo_doc_nombre = (request.form.get('tipo_documento') or '').strip().lower()
+    nro_documento   = normalizar_numero(request.form.get('nro_documento', ''))
+
+    # Validar SOLO si el cliente escribió un número
+    if nro_documento:
+        if not tipo_doc_nombre:
+            tipo_doc_nombre = 'dni'   # default razonable
+        doc_ok, doc_msg = validar_documento(tipo_doc_nombre, nro_documento)
+        if not doc_ok:
+            return render_template('login_cliente.html',
+                                   error=doc_msg, registro_activo=True)
+    else:
+        # Sin número: NULL en la BD (no cadena vacía; no bloquea)
+        nro_documento = None
+        tipo_doc_nombre = tipo_doc_nombre or 'dni'   # tipo default, número NULL
+
     if not nombre or not correo or not contrasena:
         return render_template('login_cliente.html',
                                error='Nombre, correo y contrasena son obligatorios.',
@@ -2448,9 +2637,11 @@ def registro_cliente():
             # sin contrasena: se reutiliza la fila y se vuelve a verificar.
             id_cliente = existente['id_cliente']
             cursor.execute("""
-                UPDATE cliente SET nombre=%s, apellido=%s, telefono=%s, contrasena=%s, direccion=%s
+                UPDATE cliente SET nombre=%s, apellido=%s, telefono=%s, contrasena=%s,
+                       direccion=%s, id_tipo_documento=%s, nro_documento=%s
                 WHERE id_cliente=%s
-            """, (nombre, apellido, telefono or None, hash_pw, direccion, id_cliente))
+            """, (nombre, apellido, telefono or None, hash_pw, direccion,
+                  _id_tipo_doc, nro_documento or None, id_cliente))
         else:
             # id_tipo_documento=1 (DNI) y nro_documento NULL por defecto;
             # el formulario web no pide documento todavía.
@@ -2459,9 +2650,10 @@ def registro_cliente():
             cursor.execute("""
                 INSERT INTO cliente (nombre, apellido, email, telefono, contrasena,
                                      id_tipo_documento, nro_documento, direccion, activo)
-                VALUES (%s, %s, %s, %s, %s, 1, NULL, %s, FALSE)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, FALSE)
                 RETURNING id_cliente
-            """, (nombre, apellido, correo, telefono or None, hash_pw, direccion))
+            """, (nombre, apellido, correo, telefono or None, hash_pw,
+                  _id_tipo_doc, nro_documento or None, direccion))
             id_cliente = cursor.fetchone()['id_cliente']
 
         # Invalidar codigos anteriores y guardar el nuevo (solo el hash)
@@ -2894,50 +3086,125 @@ def pedido_aceptado():
     return render_template('pedido_aceptado.html', id_pedido=id_pedido, estado=estado)
 
 
+# Transiciones válidas del flujo de pedidos (regla 6): el desplegable y los
+# botones se filtran con este mismo mapa. 'entregado' y 'cancelado' son
+# finales. Decisión (a) del propietario: pasar a 'confirmado' exige pago
+# CONFIRMADO (gate en la ruta); confirmar_pago sigue siendo la única
+# puerta al dinero.
+TRANSICIONES_PEDIDO = {
+    'pendiente': ('confirmado', 'cancelado'),
+    'confirmado': ('preparando', 'cancelado'),
+    'preparando': ('listo', 'cancelado'),
+    'listo': ('entregado',),
+    'entregado': (),
+    'cancelado': (),
+}
+
+
 @app.route('/pedidos/<int:id>/estado', methods=['POST'])
 @login_required
 @escritura_required
 def pedido_cambiar_estado(id):
     """Vendedor/Admin cambia el estado (fase) de un pedido.
-    Responde JSON si la petición es AJAX (X-Requested-With), o redirige
-    si llega desde un formulario clásico. (Integrado desde origin/Lesly.)
+
+    Contrato (fix del bug del desplegable): si la petición es AJAX, TODAS
+    las respuestas son JSON {ok, mensaje, estado_nuevo?} — 400 CSRF (capa
+    global), 401/403 sin sesión o permisos (capa global), 404 inexistente,
+    409 transición no permitida, 200 éxito o no-op, 500 error interno. Si
+    no es AJAX, redirect con flash como hoy. El cambio a 'cancelado'
+    respeta B2 (devolución idempotente de stock) y el trigger audita.
     """
-    conn_v   = get_connection_tienda()
-    cursor_v = conn_v.cursor(dictionary=True)
-    cursor_v.execute("SELECT nombre FROM estado_venta WHERE activo = TRUE ORDER BY orden")
-    estados_validos = tuple(r['nombre'] for r in cursor_v.fetchall())
-    conn_v.close()
-
+    is_ajax = _es_ajax()
     nuevo_estado = (request.form.get('estado') or '').strip()
-    is_ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
-
-    if nuevo_estado not in estados_validos:
-        if is_ajax:
-            return {'ok': False, 'error': f'Estado "{nuevo_estado}" no es válido.'}, 400
-        flash('Estado no válido.', 'danger')
-        return redirect(url_for('pedido_detalle', id=id))
-    conn   = get_connection_tienda()
+    conn = get_connection_tienda()
     cursor = conn.cursor()
     try:
+        cursor.execute("SELECT nombre FROM estado_venta WHERE activo = TRUE ORDER BY orden")
+        estados_validos = tuple(r[0] for r in cursor.fetchall())
+
+        if nuevo_estado not in estados_validos:
+            if is_ajax:
+                return {'ok': False, 'mensaje': f'Estado "{nuevo_estado}" no es válido.'}, 400
+            flash('Estado no válido.', 'danger')
+            return redirect(url_for('pedido_detalle', id=id))
+
         cursor.execute("""
-            UPDATE venta
-            SET id_estado_venta = (SELECT id_estado_venta FROM estado_venta WHERE nombre = %s)
-            WHERE id_venta = %s
-        """, (nuevo_estado, id))
+            SELECT ev.nombre AS actual
+              FROM venta v
+              JOIN estado_venta ev ON ev.id_estado_venta = v.id_estado_venta
+             WHERE v.id_venta = %s
+        """, (id,))
+        fila = cursor.fetchone()
+        if not fila:
+            if is_ajax:
+                return {'ok': False, 'mensaje': 'El pedido no existe.'}, 404
+            abort(404)
+        actual = fila[0]
+
+        if nuevo_estado == actual:
+            # Sin cambios: no es error (idempotente). Hasta aquí solo hubo
+            # SELECTs: el finally se encarga de cerrar la transacción.
+            if is_ajax:
+                return {'ok': True, 'mensaje': 'El pedido ya estaba en ese estado.',
+                        'estado_nuevo': actual}
+            flash('El pedido ya estaba en ese estado.', 'info')
+            return redirect(url_for('pedido_detalle', id=id))
+
+        permitidas = TRANSICIONES_PEDIDO.get(actual, ())
+        if nuevo_estado not in permitidas:
+            mensaje = ('Confirma el pago antes de preparar el pedido.'
+                       if (actual, nuevo_estado) == ('pendiente', 'preparando')
+                       else f'Transición no permitida: de "{actual}" a "{nuevo_estado}".')
+            if is_ajax:
+                return {'ok': False, 'mensaje': mensaje}, 409
+            flash(mensaje, 'danger')
+            return redirect(url_for('pedido_detalle', id=id))
+
+        if nuevo_estado == 'confirmado':
+            # Bloqueo (a): solo se confirma una venta con pago CONFIRMADO.
+            # El cambio manual no puede crear ventas "pagadas": confirmar_pago
+            # es la única puerta al dinero. POS no usa esta ruta.
+            cursor.execute("SELECT estado FROM pago WHERE id_venta = %s", (id,))
+            fila_pago = cursor.fetchone()
+            if not fila_pago or fila_pago[0] != 'confirmado':
+                mensaje = 'El pago no está confirmado; confírmalo desde el flujo de pago.'
+                if is_ajax:
+                    return {'ok': False, 'mensaje': mensaje}, 409
+                flash(mensaje, 'danger')
+                return redirect(url_for('pedido_detalle', id=id))
+
+        if nuevo_estado == 'cancelado':
+            # B2: solo si la venta NO estaba ya cancelada se devuelve el stock
+            # (idempotente: la condición del UPDATE + la marca del movimiento).
+            cursor.execute("""
+                UPDATE venta
+                SET id_estado_venta = (SELECT id_estado_venta FROM estado_venta WHERE nombre = 'cancelado')
+                WHERE id_venta = %s
+                  AND id_estado_venta <> (SELECT id_estado_venta FROM estado_venta WHERE nombre = 'cancelado')
+                RETURNING id_venta
+            """, (id,))
+            if cursor.fetchone():
+                devolver_stock_venta(cursor, id)
+        else:
+            cursor.execute("""
+                UPDATE venta
+                SET id_estado_venta = (SELECT id_estado_venta FROM estado_venta WHERE nombre = %s)
+                WHERE id_venta = %s
+            """, (nuevo_estado, id))
         conn.commit()
+        mensaje = f'Estado actualizado a "{nuevo_estado}".'
         if is_ajax:
-            return {'ok': True, 'estado': nuevo_estado,
-                    'mensaje': f'Estado actualizado a "{nuevo_estado}".'}
-        flash(f'Estado actualizado a "{nuevo_estado}".', 'success')
+            return {'ok': True, 'mensaje': mensaje, 'estado_nuevo': nuevo_estado}
+        flash(mensaje, 'success')
     except Exception:
         conn.rollback()
         app.logger.exception("Error al actualizar estado del pedido %s", id)
         if is_ajax:
-            return {'ok': False, 'error': 'No se pudo actualizar el estado. Intenta de nuevo.'}, 500
+            return {'ok': False, 'mensaje': 'No se pudo actualizar el estado. Intenta de nuevo.'}, 500
         flash('Error al actualizar el estado. Intenta de nuevo.', 'danger')
     finally:
         conn.close()
-    # Volver a la lista si el cambio vino desde /pedidos, sino al detalle
+    # No-AJAX: volver a la lista si el cambio vino desde /pedidos, sino al detalle
     ref = request.referrer or ''
     if '/pedidos?' in ref or ref.rstrip('/').endswith('/pedidos'):
         return redirect(url_for('pedidos'))
@@ -3019,23 +3286,6 @@ def _qr_data_uri(texto):
     except Exception:
         app.logger.exception("No se pudo generar el QR del comprobante")
         return None
-
-
-def _siguiente_numero_comprobante(cursor, tipo_comp):
-    """Devuelve el siguiente número de comprobante correlativo por tipo.
-
-    Serie: 'B' + 6 dígitos para boleta, 'F' + 6 dígitos para factura
-    (p. ej. B000123). Se calcula dentro de la misma transacción de la venta
-    a partir del máximo existente, garantizando unicidad y correlatividad.
-    """
-    serie = 'F' if tipo_comp == 'factura' else 'B'
-    cursor.execute("""
-        SELECT COALESCE(MAX(CAST(SUBSTRING(numero FROM '^[BF](\\d+)') AS INTEGER)), 0) + 1 AS seq
-        FROM comprobante WHERE numero LIKE %s
-    """, (serie + '%',))
-    row = cursor.fetchone()
-    seq = row['seq'] if isinstance(row, dict) else row[0]
-    return f"{serie}{seq:06d}"
 
 
 @app.route('/carrito/confirmar_v2', methods=['POST'])
@@ -3136,14 +3386,62 @@ def carrito_confirmar_v2():
 
     tipo_boleta  = 'electronica' if tipo_comprobante == 'boleta_electronica' else 'simple'
     tipo_comp_db = 'factura' if (ruc and len(ruc) == 11 and ruc.startswith('20')) else 'boleta'
+    if tipo_comp_db == 'factura' and not ruc_valido_para_factura(ruc):
+        return {'ok': False,
+                'error': 'El RUC no es válido (revisa el dígito verificador). El pedido no se creó.'}, 400
+
+    # AUTORRELLENO (documento): el SERVIDOR lee el documento del cliente
+    # desde AUTH y no confía en el navegador. Si el cliente ya tiene RUC,
+    # el servidor lo usa para factura; si tiene DNI, lo usa para boleta.
+    conn_auth_doc = get_connection_auth()
+    cursor_auth_doc = conn_auth_doc.cursor(dictionary=True)
+    try:
+        cursor_auth_doc.execute(
+            """SELECT LOWER(TRIM(td.nombre)) AS tipo, c.nro_documento
+              FROM cliente c
+              LEFT JOIN tipo_documento td ON td.id_tipo_documento = c.id_tipo_documento
+             WHERE c.id_cliente = %s""",
+            (session['usuario_id'],))
+        fila_doc = cursor_auth_doc.fetchone()
+    finally:
+        conn_auth_doc.close()
+    doc_tipo_actual = fila_doc['tipo'] if fila_doc else None
+    doc_numero_actual = normalizar_numero(fila_doc['nro_documento']) if fila_doc and fila_doc['nro_documento'] else None
+
+    if doc_tipo_actual == 'ruc' and doc_numero_actual:
+        # El servidor TIENE el RUC: lo usa (autoritativo) para factura
+        ruc = doc_numero_actual
+        tipo_comp_db = 'factura'
+        dni = None
+    elif doc_tipo_actual == 'ruc' and not doc_numero_actual and tipo_comp_db == 'factura':
+        return {'ok': False,
+                'error': 'Tu perfil tiene RUC sin número. Corrígelo en tu perfil.'}, 400
+    elif doc_numero_actual:
+        # El cliente tiene DNI/CE/pasaporte: el servidor lo usa para boleta
+        dni = doc_numero_actual
+        tipo_comp_db = 'boleta'
+
+    # CLIENTES VARIOS (fase B): boleta sin documento sobre el umbral se
+    # rechaza; debajo del umbral se emite a "CLIENTES VARIOS" sin exigir DNI.
+    dni = (data.get('dni') or '').strip() or None
+    if tipo_comp_db == 'boleta':
+        total_estimado = sum(it['cantidad'] * it['precio'] for it in items_ok)
+        if boleta_necesita_documento(total_estimado, dni):
+            return {'ok': False,
+                    'error': f'Para compras sobre S/ {UMBRAL_BOLETA_SIN_DOC:.0f} necesitas '
+                             'ingresar tu DNI (o RUC si quieres factura).'}, 400
+
     metodo_db    = 'yape_plin' if metodo_pago == 'yape' else (
                    'tarjeta'   if metodo_pago == 'tarjeta' else 'efectivo')
 
     conn   = get_connection_tienda()
     cursor = conn.cursor()
     try:
-        # El esquema real de venta usa FKs: id_tipo_venta e id_estado_venta.
-        # El método de pago se registra en la tabla pago (id_tipo_pago).
+        # TXN corta (corrección 1): venta + pago 'pendiente' + detalle +
+        # stock + movimiento + comprobante (D1). El monto del pago es el
+        # total RECALCULADO de detalle_venta (Decimal), jamás del navegador.
+        # La pasarela se llama SOLO después del commit: nunca con una
+        # transacción abierta ni antes de guardar.
         cursor.execute("""
             INSERT INTO venta (id_tipo_venta, id_cliente, id_estado_venta, num_operacion)
             VALUES ((SELECT id_tipo_venta FROM tipo_venta WHERE nombre = 'online'),
@@ -3153,20 +3451,11 @@ def carrito_confirmar_v2():
             RETURNING id_venta
         """, (session['usuario_id'], num_operacion))
         id_venta = cursor.fetchone()[0]
-        try:
-            # Si hay caja abierta, asociar el pago a la caja actual
-            cursor.execute("SELECT id_caja FROM caja WHERE estado = 'abierta' LIMIT 1")
-            fila_caja  = cursor.fetchone()
-            id_caja_a  = fila_caja[0] if fila_caja else None
-            cursor.execute("""
-                INSERT INTO pago (id_venta, id_tipo_pago, id_caja, estado)
-                VALUES (%s, (SELECT id_tipo_pago FROM tipo_pago WHERE nombre = %s), %s, 'pendiente')
-            """, (id_venta, metodo_db, id_caja_a))
-        except Exception:
-            conn.rollback()
-            app.logger.exception("Error al insertar pago del pedido id_venta=%s", id_venta)
-            return {'ok': False,
-                    'error': 'No se pudo registrar el pago. El pedido no se creó. Intenta de nuevo.'}, 500
+
+        # Si hay caja abierta, asociar el pago a la caja actual
+        cursor.execute("SELECT id_caja FROM caja WHERE estado = 'abierta' LIMIT 1")
+        fila_caja  = cursor.fetchone()
+        id_caja_a  = fila_caja[0] if fila_caja else None
 
         for it in items_ok:
             id_producto = it['id_producto']
@@ -3190,24 +3479,76 @@ def carrito_confirmar_v2():
                   f'Venta online #{id_venta} (cliente #{session["usuario_id"]})',
                   nuevo_stock))
 
-        # Generar número de comprobante correlativo por tipo (B000001 / F000001)
-        # dentro de la misma transacción: si falla, toda la venta se revierte.
-        num_comp = _siguiente_numero_comprobante(cursor, tipo_comp_db)
+        # Total oficial de la venta, recalculado dentro de la misma TXN.
+        cursor.execute("""
+            SELECT COALESCE(SUM(cantidad * precio_unitario), 0) AS total
+              FROM detalle_venta WHERE id_venta = %s
+        """, (id_venta,))
+        total = cursor.fetchone()[0]
+
+        # Pago 'pendiente' con el monto oficial (Decimal) y la pasarela
+        cursor.execute("""
+            INSERT INTO pago (id_venta, id_tipo_pago, id_caja, estado, pasarela, monto)
+            VALUES (%s, (SELECT id_tipo_pago FROM tipo_pago WHERE nombre = %s), %s,
+                    'pendiente', %s, %s)
+            RETURNING id_pago
+        """, (id_venta, metodo_db, id_caja_a, _PASARELA.nombre, total))
+        id_pago = cursor.fetchone()[0]
+
+        # D1 (2.2): el comprobante ya NO se crea aquí; se emite al
+        # CONFIRMAR el pago (confirmar_pago), de modo que los correlativos
+        # solo los consumen ventas pagadas. El tipo y el RUC viajan al
+        # detalle_proveedor del pago para esa emisión.
+
+        conn.commit()   # fin de la TXN corta: el pedido quedó guardado
+
+        # AHORA se habla con la pasarela (sin transacción abierta).
+        try:
+            resultado_pasarela = _PASARELA.crear_pago(PagoSolicitud(
+                id_venta=id_venta,
+                monto=total,
+                metodo=metodo_db,
+                clave_idempotencia=f"venta-{id_venta}",
+                datos_cliente={'nombre': session.get('nombre') or ''}))
+        except Exception:
+            app.logger.exception("crear_pago falló para la venta %s", id_venta)
+            cancelar_pedido_con_pago_inicial(conn, id_venta)
+            return {'ok': False,
+                    'error': 'No se pudo iniciar el pago. El pedido fue cancelado. Intenta de nuevo.'}, 502
+
+        if not resultado_pasarela.id_pago_proveedor or resultado_pasarela.estado is not EstadoPago.PENDIENTE:
+            cancelar_pedido_con_pago_inicial(conn, id_venta)
+            return {'ok': False,
+                    'error': 'La pasarela no pudo iniciar el pago. El pedido fue cancelado.'}, 502
+
+        # Segunda TXN: guardar la referencia del proveedor (id_transaccion
+        # y metadatos neutrales en detalle_proveedor).
         try:
             cursor.execute("""
-                INSERT INTO comprobante (id_venta, id_tipo_comprobante, numero, ruc, serie)
-                VALUES (%s, (SELECT id_tipo_comprobante FROM tipo_comprobante WHERE nombre = %s), %s, %s, %s)
-            """, (id_venta, tipo_comp_db, num_comp, ruc,
-                  'F001' if tipo_comp_db == 'factura' else 'B001'))
+                UPDATE pago
+                   SET id_transaccion = %s,
+                       detalle_proveedor = COALESCE(detalle_proveedor, '{}'::jsonb) || %s::jsonb
+                 WHERE id_pago = %s
+            """, (resultado_pasarela.id_pago_proveedor,
+                  json.dumps({'checkout_url': resultado_pasarela.checkout_url,
+                              'requiere_verificacion': bool(resultado_pasarela.requiere_verificacion),
+                              'tipo_comprobante': tipo_comp_db,
+                              'ruc': ruc,
+                              'cliente_documento': dni},
+                             ensure_ascii=False),
+                  id_pago))
+            conn.commit()
         except Exception:
-            conn.rollback()
-            app.logger.exception("Error al insertar comprobante del pedido id_venta=%s", id_venta)
+            app.logger.exception("No se pudo guardar la referencia de la pasarela (venta %s)", id_venta)
+            cancelar_pedido_con_pago_inicial(conn, id_venta)
             return {'ok': False,
-                    'error': 'No se pudo generar el comprobante. El pedido no se creó. Intenta de nuevo.'}, 500
+                    'error': 'No se pudo registrar el pago. El pedido fue cancelado. Intenta de nuevo.'}, 500
 
-        conn.commit()
         session['ultimo_pedido'] = items_ok
-        return {'ok': True, 'id_pedido': id_venta, 'excluidos': excluidos}
+        return {'ok': True, 'id_pedido': id_venta, 'id_pago': id_pago,
+                'excluidos': excluidos,
+                'checkout_url': resultado_pasarela.checkout_url,
+                'requiere_verificacion': bool(resultado_pasarela.requiere_verificacion)}, 200
 
     except Exception:
         conn.rollback()
@@ -3217,8 +3558,576 @@ def carrito_confirmar_v2():
         conn.close()
 
 
+# ── Pantalla de pago simulado (checkout de la demo, Tramo 2) ────
+# Deshabilitada si PAGO_MODO != 'simulado'. El GET solo consulta (nunca
+# escribe). Los datos de tarjeta JAMÁS salen del navegador: el POST recibe
+# únicamente el resultado simulado; el monto lo recalcula el servidor desde
+# detalle_venta y confirmar_pago sigue siendo la única puerta a 'confirmado'.
+def _pago_por_transaccion(cursor, id_transaccion):
+    cursor.execute("""
+        SELECT p.id_pago, p.id_transaccion, p.monto, p.estado, v.id_venta,
+               v.id_cliente, v.id_estado_venta, ev.nombre AS venta_estado
+          FROM pago p
+          JOIN venta v ON v.id_venta = p.id_venta
+          JOIN estado_venta ev ON ev.id_estado_venta = v.id_estado_venta
+         WHERE p.id_transaccion = %s
+    """, (id_transaccion,))
+    return cursor.fetchone()
+
+
+@app.route('/pago/simulado/<id_transaccion>')
+@login_required
+def pago_simulado(id_transaccion):
+    if _PASARELA.modo != 'simulado':
+        flash('El pago simulado está deshabilitado (PAGO_MODO).', 'danger')
+        return redirect(url_for('catalogo_cliente'))
+    conn = get_connection_tienda()
+    try:
+        cursor = conn.cursor(dictionary=True)
+        pago = _pago_por_transaccion(cursor, id_transaccion)
+        total = None
+        if pago:
+            cursor.execute("""
+                SELECT COALESCE(SUM(cantidad * precio_unitario), 0) AS total
+                  FROM detalle_venta WHERE id_venta = %s
+            """, (pago['id_venta'],))
+            total = cursor.fetchone()['total']
+    finally:
+        conn.close()
+    if not pago:
+        abort(404)
+    if session.get('rol') == 'cliente' and pago['id_cliente'] != session.get('usuario_id'):
+        abort(403)   # un cliente no ve el pago de otro
+    if pago['estado'] != 'pendiente':
+        flash('Este pago ya fue procesado.', 'info')
+        return redirect(url_for('pedido_aceptado', id=pago['id_venta']))
+    return render_template('pago_simulado.html', pago=pago, total=total)
+
+
+@app.route('/pago/simulado/<id_transaccion>/procesar', methods=['POST'])
+@login_required
+def pago_simulado_procesar(id_transaccion):
+    """Recibe SOLO el resultado simulado ('aprobado'|'rechazado') con CSRF.
+
+    Nada de datos de tarjeta: se ignoran campos extra si llegaran. El
+    monto se recalcula del servidor y la transición pasa por confirmar_pago.
+    """
+    if _PASARELA.modo != 'simulado':
+        return {'ok': False, 'error': 'pago simulado deshabilitado'}, 403
+    data = request.get_json(silent=True) or request.form or {}
+    resultado_sim = str(data.get('resultado') or '').strip().lower()
+    if resultado_sim not in ('aprobado', 'rechazado'):
+        return {'ok': False, 'error': 'resultado simulado inválido'}, 400
+
+    conn = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        pago = _pago_por_transaccion(cursor, id_transaccion)
+        if not pago:
+            return {'ok': False, 'error': 'pago no encontrado'}, 404
+        if session.get('rol') == 'cliente' and pago['id_cliente'] != session.get('usuario_id'):
+            return {'ok': False, 'error': 'no autorizado'}, 403
+        if pago['estado'] != 'pendiente':
+            return {'ok': True, 'estado': 'ya_procesado',
+                    'mensaje': f"El pago ya está {pago['estado']}."}, 200
+
+        # Monto del servidor, recalculado de detalle_venta (nunca del navegador)
+        cursor.execute("""
+            SELECT COALESCE(SUM(cantidad * precio_unitario), 0) AS total
+              FROM detalle_venta WHERE id_venta = %s
+        """, (pago['id_venta'],))
+        total = cursor.fetchone()['total']
+
+        estado_final = (EstadoPago.CONFIRMADO if resultado_sim == 'aprobado'
+                        else EstadoPago.RECHAZADO)
+        id_evento = f"checkout-{id_transaccion}-{resultado_sim}"
+        id_pago_evento = registrar_evento(
+            cursor, _PASARELA.nombre, id_evento, 'checkout_simulado',
+            pago['id_pago'], estado_final.value, True, True,
+            {'fuente': 'checkout', 'tipo': 'checkout_simulado'})
+        if id_pago_evento is None:
+            # doble clic / reenvío del mismo intento: no reprocesar
+            conn.commit()
+            return {'ok': True, 'estado': 'repetido'}, 200
+
+        res = confirmar_pago(pago['id_pago'],
+                             PagoResultado(id_pago_proveedor=id_transaccion,
+                                           estado=estado_final, monto=total),
+                             conn=conn, fuente='checkout',
+                             id_pago_evento=id_pago_evento)
+        conn.commit()
+        return {'ok': res['estado'] in ('confirmado', 'rechazado',
+                                        'ya_confirmado', 'ya_rechazado'),
+                'estado': res['estado'], 'motivo': res.get('motivo'),
+                'id_pedido': pago['id_venta']}, 200
+    except Exception:
+        conn.rollback()
+        app.logger.exception("Error procesando pago simulado %s", id_transaccion)
+        return {'ok': False, 'error': 'error interno'}, 500
+    finally:
+        conn.close()
+
+
+# ── Webhook de la pasarela (Fase 2.1, Tramo 2) ──────────────────
+# ÚNICA ruta exenta de CSRF: no está en _CSRF_PROTEGIDAS porque la llama
+# la pasarela (no el navegador) y se autentica con la firma HMAC del
+# secreto PAGO_SIMULADA_WEBHOOK_SECRETO, verificada en tiempo constante
+# dentro de la pasarela. Excepción documentada y única.
+# crear_pasarela() falla al ARRANCAR si falta el secreto, si es el de
+# ejemplo o si PAGO_MODO no es 'simulado' (validación en registro.py).
+_PASARELA = crear_pasarela()
+
+
+def _procesar_evento_pago(ev, id_evento_fallback=None):
+    """Núcleo del webhook: reclamar el evento (idempotencia por id),
+    registrar rechazados sin tocar el pago y pasar por confirmar_pago.
+    Lo usan la ruta HTTP y el gatillo del panel de demo. Devuelve
+    (respuesta, codigo_http)."""
+    id_evento = ev.id_evento or id_evento_fallback or ('int-' + uuid.uuid4().hex[:16])
+    conn = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        id_pago = None
+        if ev.id_pago_proveedor:
+            cursor.execute(
+                "SELECT id_pago FROM pago WHERE id_transaccion = %s LIMIT 1",
+                (ev.id_pago_proveedor,))
+            fila = cursor.fetchone()
+            id_pago = fila['id_pago'] if fila else None
+
+        detalle = {'tipo': str(ev.detalle_sin_sensibles.get('tipo') or ''),
+                   'fuente': 'webhook'}
+        id_pago_evento = registrar_evento(
+            cursor, _PASARELA.nombre, id_evento, detalle['tipo'] or 'evento',
+            id_pago, ev.estado.value if ev.estado else None,
+            ev.firma_valida, not ev.fuera_de_tiempo, detalle)
+
+        if id_pago_evento is None:
+            # Evento ya registrado: solo se reanuda si antes fue rechazado
+            # por firma o quedó sin procesar (p. ej. bloqueado); si ya se
+            # procesó, es un reenvío y no se reprocesa nada.
+            cursor.execute("""SELECT id_pago_evento, firma_valida, procesado_en
+                                FROM pago_evento
+                               WHERE proveedor = %s AND id_evento_proveedor = %s""",
+                           (_PASARELA.nombre, id_evento))
+            previo = cursor.fetchone()
+            reanudar = (ev.firma_valida and not ev.fuera_de_tiempo
+                        and previo
+                        and (not previo['firma_valida'] or previo['procesado_en'] is None))
+            if reanudar:
+                cursor.execute("""UPDATE pago_evento
+                                     SET firma_valida = TRUE,
+                                         dentro_de_tolerancia = %s,
+                                         estado_resultante = %s,
+                                         id_pago = %s,
+                                         detalle = %s,
+                                         procesado_en = NULL
+                                   WHERE id_pago_evento = %s""",
+                               (not ev.fuera_de_tiempo,
+                                ev.estado.value if ev.estado else None,
+                                id_pago, json.dumps(detalle, ensure_ascii=False),
+                                previo['id_pago_evento']))
+                id_pago_evento = previo['id_pago_evento']
+            else:
+                conn.commit()
+                return {'ok': True, 'estado': 'repetido'}, 200
+
+        if not ev.firma_valida:
+            conn.commit()
+            return {'ok': False, 'error': 'firma inválida'}, 400
+        if ev.fuera_de_tiempo:
+            conn.commit()
+            return {'ok': False, 'error': 'evento fuera de tolerancia'}, 400
+        if ev.estado is None or ev.estado is EstadoPago.DESCONOCIDO:
+            # 'desconocido' JAMAS se escribe en pago.estado (regla D7).
+            conn.commit()
+            return {'ok': True, 'estado': 'ignorado'}, 200
+        if id_pago is None:
+            conn.commit()
+            return {'ok': True, 'estado': 'sin_pago_asociado'}, 200
+
+        resultado = PagoResultado(id_pago_proveedor=ev.id_pago_proveedor,
+                                  estado=ev.estado, monto=ev.monto)
+        res = confirmar_pago(id_pago, resultado, conn=conn, fuente='webhook',
+                             id_pago_evento=id_pago_evento)
+        conn.commit()
+        codigo = 200
+        if res['estado'] == 'bloqueado':
+            # El proveedor debe reintentar el mismo evento: quedó sin
+            # procesar (procesado_en NULL) y la reanudación lo retomará.
+            codigo = 503
+        return {'ok': res['estado'] in ('confirmado', 'ya_confirmado',
+                                       'rechazado', 'ya_rechazado'),
+                'estado': res['estado'], 'motivo': res.get('motivo')}, codigo
+    except Exception:
+        conn.rollback()
+        app.logger.exception("Error procesando webhook de pago")
+        return {'ok': False, 'error': 'error interno'}, 500
+    finally:
+        conn.close()
+
+
+@app.route('/webhooks/pago/<proveedor>', methods=['POST'])
+def webhook_pago(proveedor):
+    """Notificaciones del proveedor configurado (nunca de nombres de URL).
+
+    Flujo en UNA transacción por petición: verificar firma -> reclamar el
+    evento (idempotencia por id de evento en pago_evento) -> registrar
+    rechazados sin tocar el pago -> confirmar_pago (única puerta a
+    'confirmado'). Solo POST: nunca se escribe en un GET.
+    """
+    if proveedor != _PASARELA.nombre:
+        abort(404)
+    payload = request.get_data()
+    ev = _PASARELA.procesar_webhook(payload, request.headers)
+    id_evento = ev.id_evento or ('sin-id-' + hashlib.sha256(payload).hexdigest()[:24])
+    return _procesar_evento_pago(ev, id_evento)
+
+
+# ── Panel de demo: eventos de pago simulado (2c) ────────────────
+# Solo administradores. El gatillo dispara un webhook simulado FIRMADO por
+# el servidor (el secreto jamás sale de él). El GET solo consulta: nunca
+# se escribe en un GET. Deshabilitado si PAGO_MODO != 'simulado'.
+@app.route('/admin/pagos_simulados')
+@login_required
+@admin_required
+def admin_pagos_simulados():
+    if _PASARELA.modo != 'simulado':
+        flash('Panel de pagos simulados deshabilitado (PAGO_MODO).', 'danger')
+        return redirect(url_for('productos'))
+    conn = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("""
+            SELECT pe.recibido_en, pe.proveedor, pe.id_evento_proveedor, pe.tipo,
+                   pe.id_pago, pe.estado_resultante, pe.firma_valida,
+                   pe.dentro_de_tolerancia, pe.procesado_en, pe.detalle,
+                   p.id_transaccion, p.monto AS pago_monto, v.id_venta
+              FROM pago_evento pe
+              LEFT JOIN pago p ON p.id_pago = pe.id_pago
+              LEFT JOIN venta v ON v.id_venta = p.id_venta
+             ORDER BY pe.recibido_en DESC
+             LIMIT 30
+        """)
+        eventos = cursor.fetchall()
+        cursor.execute("""
+            SELECT p.id_pago, p.id_transaccion, p.monto, v.id_venta
+              FROM pago p
+              JOIN venta v ON v.id_venta = p.id_venta
+             WHERE p.estado = 'pendiente' AND p.id_transaccion IS NOT NULL
+               AND p.monto IS NOT NULL
+             ORDER BY v.id_venta DESC
+             LIMIT 50
+        """)
+        pendientes = cursor.fetchall()
+    finally:
+        conn.close()
+    return render_template('admin_pagos_simulados.html',
+                           eventos=eventos, pendientes=pendientes)
+
+
+@app.route('/admin/pagos_simulados/disparar', methods=['POST'])
+@login_required
+@admin_required
+def admin_pagos_disparar():
+    """Gatillo de la demo: dispara un evento firmado para un pago
+    PENDIENTE. El monto lo recalcula el servidor desde detalle_venta."""
+    if _PASARELA.modo != 'simulado':
+        return {'ok': False, 'error': 'deshabilitado'}, 403
+    id_pago = request.form.get('id_pago', type=int)
+    estado = (request.form.get('estado') or '').strip()
+    if not id_pago or estado not in ('confirmado', 'rechazado'):
+        flash('Parámetros inválidos para el gatillo de demo.', 'danger')
+        return redirect(url_for('admin_pagos_simulados'))
+    conn = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("""
+            SELECT p.id_pago, p.id_transaccion, p.id_venta
+              FROM pago p
+             WHERE p.id_pago = %s AND p.estado = 'pendiente'
+               AND p.id_transaccion IS NOT NULL
+        """, (id_pago,))
+        pago = cursor.fetchone()
+        if not pago:
+            flash('El pago no existe o ya no está pendiente.', 'warning')
+            return redirect(url_for('admin_pagos_simulados'))
+        cursor.execute("""
+            SELECT COALESCE(SUM(cantidad * precio_unitario), 0) AS total
+              FROM detalle_venta WHERE id_venta = %s
+        """, (pago['id_venta'],))
+        total = cursor.fetchone()['total']
+    finally:
+        conn.close()
+    payload, headers = _PASARELA.firmar_evento(
+        pago['id_transaccion'], EstadoPago(estado), total, tipo='pago_actualizado')
+    ev = _PASARELA.procesar_webhook(payload, headers)
+    respuesta, _codigo = _procesar_evento_pago(ev)
+    est = respuesta.get('estado')
+    if respuesta.get('ok') or est in ('repetido', 'ignorado', 'sin_pago_asociado'):
+        flash(f"Evento simulado procesado: estado '{est}'.", 'success')
+    else:
+        flash(f"Evento simulado no aplicado: {respuesta.get('error') or respuesta.get('motivo') or est}.", 'warning')
+    return redirect(url_for('admin_pagos_simulados'))
+
+
+# -- Perfil del cliente (documento de identidad) ----------------
+@app.route('/perfil')
+@login_required
+def perfil():
+    """Perfil del cliente: ver y corregir su documento de identidad.
+
+    GET solo lectura; POST actualiza el documento con validación.
+    Aviso de snapshot: los comprobantes ya emitidos NO cambian.
+    """
+    if session.get('rol') != 'cliente':
+        return redirect(url_for('pedidos'))
+    conn = get_connection_auth()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("""
+            SELECT c.nombre, c.apellido, c.email, c.direccion, c.telefono,
+                   LOWER(TRIM(td.nombre)) AS tipo_doc, c.nro_documento
+              FROM cliente c
+              LEFT JOIN tipo_documento td ON td.id_tipo_documento = c.id_tipo_documento
+             WHERE c.id_cliente = %s
+        """, (session['usuario_id'],))
+        fila = cursor.fetchone()
+        if not fila:
+            flash('No se pudo cargar tu perfil.', 'danger')
+            return redirect(url_for('mis_pedidos'))
+        doc_actual = {
+            'tipo': fila['tipo_doc'] or '',
+            'numero': normalizar_numero(fila['nro_documento']) if fila['nro_documento'] else None,
+        }
+        cliente = {
+            'nombre': fila['nombre'], 'apellido': fila['apellido'],
+            'email': fila['email'], 'direccion': fila['direccion'],
+            'telefono': fila['telefono'],
+        }
+    finally:
+        conn.close()
+    from services.comprobantes import UMBRAL_BOLETA_SIN_DOC
+    return render_template('perfil.html', cliente=cliente, doc_actual=doc_actual,
+                           umbral_sin_doc=int(UMBRAL_BOLETA_SIN_DOC))
+
+
+@app.route('/perfil', methods=['POST'])
+@login_required
+def perfil_actualizar_documento():
+    """Actualiza el documento de identidad del cliente (validado + normalizado)."""
+    if session.get('rol') != 'cliente':
+        return redirect(url_for('pedidos'))
+    tipo_doc_nombre = (request.form.get('tipo_documento') or '').strip().lower()
+    nro_documento   = normalizar_numero(request.form.get('nro_documento', ''))
+    ok, msg = validar_documento(tipo_doc_nombre, nro_documento)
+    if not ok:
+        flash(msg, 'danger')
+        return redirect(url_for('perfil'))
+    conn = get_connection_auth()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("""
+            SELECT id_tipo_documento FROM tipo_documento
+             WHERE LOWER(TRIM(nombre)) = %s
+        """, (tipo_doc_nombre,))
+        fila_td = cursor.fetchone()
+        if not fila_td:
+            flash('Tipo de documento no encontrado.', 'danger')
+            return redirect(url_for('perfil'))
+        id_tipo_doc = fila_td['id_tipo_documento']
+        try:
+            cursor.execute("""
+                UPDATE cliente SET id_tipo_documento=%s, nro_documento=%s
+                 WHERE id_cliente=%s
+            """, (id_tipo_doc, nro_documento, session['usuario_id']))
+            conn.commit()
+            flash('Documento actualizado correctamente.', 'success')
+        except Exception as e:
+            conn.rollback()
+            if 'uq_cliente_documento' in str(e):
+                flash('Ese documento ya está registrado por otro cliente.', 'danger')
+            else:
+                app.logger.exception("Error actualizando documento del cliente")
+                flash('No se pudo actualizar el documento.', 'danger')
+    finally:
+        conn.close()
+    return redirect(url_for('perfil'))
+
+
+# ── Reservas de stock vencidas (Fase C) ─────────────────────────
+# Botón POST admin con vista previa en el GET (solo lectura).
+# Plazos: 30 min tarjeta / 24 h N.o de operación, desde venta.fecha,
+# SOLO mientras el pago siga 'pendiente'. Nunca en un GET.
+@app.route('/admin/reservas')
+@login_required
+@admin_required
+def admin_reservas():
+    """Vista previa de reservas vencidas: qué se libera si pulsas el botón.
+
+    Solo lectura: NO libera nada. Muestra ids, tipo de pago y tiempo
+    transcurrido (sin datos personales).
+    """
+    conn = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        vencidas = preview_reservas_vencidas(cursor)
+    finally:
+        conn.close()
+    return render_template('admin_reservas.html', vencidas=vencidas)
+
+
+@app.route('/admin/reservas/liberar', methods=['POST'])
+@login_required
+@admin_required
+def admin_reservas_liberar():
+    """Libera TODAS las reservas vencidas (venta+pago->cancelado, stock B2).
+
+    Transacción única con FOR UPDATE por venta; idempotente.
+    El trigger de auditoria registra cada cancelación.
+    """
+    conn = get_connection_tienda()
+    try:
+        resultado = liberar_reservas_vencidas(conn)
+    except Exception:
+        conn.rollback()
+        app.logger.exception("Error liberando reservas vencidas")
+        flash('Error al liberar las reservas. Revisa el log.', 'danger')
+        return redirect(url_for('admin_reservas'))
+    finally:
+        conn.close()
+    if resultado['liberadas'] > 0:
+        flash(f"Se liberaron {resultado['liberadas']} reservas "
+              f"(ids: {', '.join(str(i) for i in resultado['ids'])}).",
+              'success')
+    else:
+        flash('No había reservas vencidas que liberar.', 'info')
+    if resultado['errores'] > 0:
+        flash(f"{resultado['errores']} ventas no se pudieron liberar "
+              '(revisa el log).', 'warning')
+    return redirect(url_for('admin_reservas'))
+
+
 # ── Consultas RUC/DNI (proxy seguro hacia la API Perú; placeholder de la futura API SUNAT) ──
 # El token NUNCA se expone al cliente: se lee únicamente del entorno del servidor.
+# -- Dashboard del administrador (Fase D: KPIs y menu) ------------
+# Solo lectura: NUNCA escribe en un GET. Ruta admin-only.
+@app.route('/admin/dashboard')
+@login_required
+@admin_required
+def admin_dashboard():
+    """Panel de administracion: 6 KPIs + 2 graficos (solo lectura).
+
+    Criterio global: solo pagos 'confirmado' cuentan como vendidos.
+    Zona horaria: America/Lima para todos los agrupamientos por dia.
+    """
+    conn = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        kpis = {}
+        cursor.execute("""
+            SELECT COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS ventas_hoy
+              FROM venta v
+              JOIN pago pg ON pg.id_venta = v.id_venta AND pg.estado = 'confirmado'
+              JOIN detalle_venta d ON d.id_venta = v.id_venta
+             WHERE DATE(v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima') = CURRENT_DATE
+        """)
+        kpis['ventas_hoy'] = float(cursor.fetchone()['ventas_hoy'] or 0)
+
+        cursor.execute("""
+            SELECT COUNT(*) AS pendientes_pago
+              FROM venta v
+              JOIN pago p ON p.id_venta = v.id_venta AND p.estado = 'pendiente'
+              JOIN tipo_venta tv ON tv.id_tipo_venta = v.id_tipo_venta
+              JOIN estado_venta ev ON ev.id_estado_venta = v.id_estado_venta
+             WHERE ev.nombre = 'pendiente' AND tv.nombre <> 'local'
+        """)
+        kpis['pendientes_pago'] = int(cursor.fetchone()['pendientes_pago'])
+
+        cursor.execute("""
+            SELECT COUNT(*) AS por_preparar
+              FROM venta v
+              JOIN estado_venta ev ON ev.id_estado_venta = v.id_estado_venta
+             WHERE ev.nombre = 'confirmado'
+        """)
+        kpis['por_preparar'] = int(cursor.fetchone()['por_preparar'])
+
+        cursor.execute("""
+            SELECT COUNT(*) AS stock_bajo
+              FROM producto
+             WHERE activo = TRUE AND stock < COALESCE(stock_minimo, 15)
+        """)
+        kpis['stock_bajo'] = int(cursor.fetchone()['stock_bajo'])
+
+        cursor.execute("""
+            SELECT COALESCE(
+                       SUM(d.cantidad * d.precio_unitario) / NULLIF(COUNT(DISTINCT v.id_venta), 0),
+                       0) AS ticket_promedio
+              FROM venta v
+              JOIN pago pg ON pg.id_venta = v.id_venta AND pg.estado = 'confirmado'
+              JOIN detalle_venta d ON d.id_venta = v.id_venta
+             WHERE v.fecha >= NOW() - INTERVAL '30 days'
+        """)
+        kpis['ticket_promedio'] = round(float(cursor.fetchone()['ticket_promedio'] or 0), 2)
+
+        cursor.execute("""
+            SELECT COUNT(*) FILTER (WHERE estado_sunat = 'enviado') AS emitidos,
+                   COUNT(*) FILTER (WHERE estado_sunat = 'pendiente') AS pendientes
+              FROM comprobante
+             WHERE DATE(fecha_emision AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima') = CURRENT_DATE
+        """)
+        fila_comp = cursor.fetchone()
+        kpis['comprobantes_emitidos'] = int(fila_comp['emitidos'])
+        kpis['comprobantes_pendientes'] = int(fila_comp['pendientes'])
+
+        cursor.execute("""
+            WITH dias AS (
+                SELECT (d::date) AS dia
+                  FROM generate_series(
+                      (NOW() AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima')::date - 6,
+                      (NOW() AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima')::date,
+                      '1 day'::interval
+                  ) d
+            ),
+            ventas_dia AS (
+                SELECT DATE(v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima') AS dia,
+                       COALESCE(SUM(det.cantidad * det.precio_unitario), 0) AS total
+                  FROM venta v
+                  JOIN pago pg ON pg.id_venta = v.id_venta AND pg.estado = 'confirmado'
+                  JOIN detalle_venta det ON det.id_venta = v.id_venta
+                 WHERE v.fecha >= NOW() - INTERVAL '7 days'
+                 GROUP BY 1
+            )
+            SELECT TO_CHAR(d.dia, 'DD/MM') AS etiqueta,
+                   COALESCE(v.total, 0) AS total
+              FROM dias d
+              LEFT JOIN ventas_dia v ON v.dia = d.dia
+             ORDER BY d.dia
+        """)
+        ventas_por_dia = cursor.fetchall()
+
+        cursor.execute("""
+            SELECT ev.nombre AS estado, COUNT(*) AS n
+              FROM venta v
+              JOIN estado_venta ev ON ev.id_estado_venta = v.id_estado_venta
+             GROUP BY ev.nombre, ev.orden
+             ORDER BY ev.orden
+        """)
+        pedidos_por_estado = cursor.fetchall()
+
+        from services.reservas import preview_reservas_vencidas
+        vencidas = preview_reservas_vencidas(cursor)
+        reservas_vencidas = len(vencidas)
+    finally:
+        conn.close()
+
+    return render_template('admin_dashboard.html',
+                           kpis=kpis,
+                           ventas_por_dia=ventas_por_dia,
+                           pedidos_por_estado=pedidos_por_estado,
+                           reservas_vencidas=reservas_vencidas)
+
+
 import json as _json
 import urllib.request as _urllib_request
 import urllib.error as _urllib_error

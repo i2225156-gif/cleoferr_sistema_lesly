@@ -1,0 +1,75 @@
+{% extends 'base.html' %}
+{% block titulito %}Mis Comprobantes - Cleoferr{% endblock %}
+{% block contenido %}
+<div class="container py-4">
+  <div class="d-flex justify-content-between align-items-center mb-4">
+    <h4 class="fw-bold mb-0"><i class="fa fa-file-invoice me-2"></i>Mis Comprobantes</h4>
+    <a class="btn btn-outline-secondary btn-sm" href="/mis_pedidos">
+      <i class="fa fa-box me-1"></i>Mis pedidos
+    </a>
+  </div>
+
+  <!-- Rótulo SIEMPRE visible (fase 2.2) -->
+  <div class="alert alert-warning text-center fw-bold" role="alert"
+       style="border:2px dashed #d97706;font-size:0.9rem">
+    <i class="fa fa-flask me-2"></i>COMPROBANTE SIMULADO &ndash; sin validez tributaria
+  </div>
+
+  {% if comprobantes %}
+  <div class="card shadow-sm" style="border-radius:12px">
+    <div class="card-body">
+      <div class="table-responsive">
+        <table class="table table-hover align-middle mb-0">
+          <thead>
+            <tr>
+              <th>Fecha</th>
+              <th>Serie - N&uacute;mero</th>
+              <th>Tipo</th>
+              <th class="text-end">Total</th>
+              <th>Estado</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for c in comprobantes %}
+            <tr>
+              <td style="white-space:nowrap">{{ c.fecha_emision.strftime('%d/%m/%Y %H:%M') if c.fecha_emision else c.fecha_venta.strftime('%d/%m/%Y') if c.fecha_venta else '-' }}</td>
+              <td><strong>{{ c.serie }}-{{ (c.numero or '')[-6:] }}</strong></td>
+              <td>
+                {% if (c.tipo or '')|lower == 'factura' %}
+                <span class="badge bg-info">Factura</span>
+                {% else %}
+                <span class="badge bg-secondary">Boleta</span>
+                {% endif %}
+              </td>
+              <td class="text-end fw-bold">S/ {{ '%.2f'|format(c.total or 0) }}</td>
+              <td>
+                {% if c.estado_sunat == 'enviado' %}
+                <span class="badge bg-success">Emitido</span>
+                {% elif c.estado_sunat == 'pendiente' %}
+                <span class="badge bg-warning text-dark">Pendiente</span>
+                {% else %}
+                <span class="badge bg-secondary">{{ c.estado_sunat or 'no_aplica' }}</span>
+                {% endif %}
+              </td>
+              <td>
+                <a class="btn btn-sm btn-outline-info" href="/mi_comprobante/{{ c.id_venta }}">
+                  <i class="fa fa-eye"></i> Ver
+                </a>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+  {% else %}
+  <div class="text-center text-muted py-5">
+    <i class="fa fa-file-invoice fa-3x mb-3 d-block"></i>
+    <p class="mb-1">Aún no tienes comprobantes.</p>
+    <p class="mb-0" style="font-size:0.85rem">Se emiten automáticamente cuando se confirma el pago de tus pedidos.</p>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}
