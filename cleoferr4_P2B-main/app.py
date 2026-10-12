@@ -1016,11 +1016,63 @@ def editar_cliente(id):
         email     = _normalizar_correo(request.form['email'])
         telefono  = request.form.get('telefono', '')
         direccion = request.form.get('direccion', '')
+        # Documento de identidad (admin puede corregirlo)
+        tipo_doc_nombre = (request.form.get('tipo_documento') or '').strip().lower()
+        nro_documento  = normalizar_numero(request.form.get('nro_documento', ''))
+        if tipo_doc_nombre and nro_documento:
+            ok_doc, msg_doc = validar_documento(tipo_doc_nombre, nro_documento)
+            if not ok_doc:
+                flash(msg_doc, 'danger')
+                return redirect(url_for('editar_cliente', id=id))
+        else:
+            tipo_doc_nombre = None
+            nro_documento = None
         try:
-            cursor.execute(
-                "UPDATE cliente SET nombre=%s, email=%s, telefono=%s, direccion=%s WHERE id_cliente=%s",
-                (nombre, email, telefono, direccion, id)
-            )
+            if tipo_doc_nombre:
+                cursor.execute(
+                    "SELECT id_tipo_documento FROM tipo_documento WHERE LOWER(TRIM(nombre)) = %s",
+                    (tipo_doc_nombre,)
+                )
+                fila_td = cursor.fetchone()
+                id_tipo_doc = fila_td['id_tipo_documento'] if fila_td else 1
+                # Leer el documento ANTERIOR para auditoria
+                cursor.execute(
+                    "SELECT LOWER(TRIM(td.nombre)) AS tipo, c.nro_documento"
+                    "  FROM cliente c"
+                    "  LEFT JOIN tipo_documento td ON td.id_tipo_documento = c.id_tipo_documento"
+                    " WHERE c.id_cliente = %s",
+                    (id,)
+                )
+                doc_anterior = cursor.fetchone() or {}
+                doc_anterior_txt = f"{doc_anterior.get('tipo') or ''}:{doc_anterior.get('nro_documento') or ''}"
+                cursor.execute(
+                    "UPDATE cliente SET nombre=%s, email=%s, telefono=%s, direccion=%s,"
+                    " id_tipo_documento=%s, nro_documento=%s WHERE id_cliente=%s",
+                    (nombre, email, telefono, direccion, id_tipo_doc, nro_documento or None, id)
+                )
+                # AUDITORIA (TIENDA): quien cambio el documento de quien
+                if doc_anterior_txt != f"{tipo_doc_nombre}:{nro_documento}":
+                    conn_t = get_connection_tienda()
+                    cur_t = conn_t.cursor()
+                    try:
+                        cur_t.execute(
+                            "INSERT INTO auditoria (id_usuario, tabla_afectada, id_registro,"
+                            " accion, valor_anterior, valor_nuevo)"
+                            " VALUES (%s, 'cliente_documento', %s, 'admin_cambio_documento', %s, %s)",
+                            (session.get('usuario_id'), id, doc_anterior_txt,
+                             f"{tipo_doc_nombre}:{nro_documento}")
+                        )
+                        conn_t.commit()
+                    except Exception:
+                        conn_t.rollback()
+                        app.logger.exception('Error auditando cambio de documento')
+                    finally:
+                        conn_t.close()
+            else:
+                cursor.execute(
+                    "UPDATE cliente SET nombre=%s, email=%s, telefono=%s, direccion=%s WHERE id_cliente=%s",
+                    (nombre, email, telefono, direccion, id)
+                )
             conn.commit()
             flash("Cliente actualizado correctamente.", "success")
         except Exception as e:
@@ -1032,11 +1084,20 @@ def editar_cliente(id):
 
     cursor.execute("SELECT * FROM cliente WHERE id_cliente = %s", (id,))
     cliente = cursor.fetchone()
+    cursor.execute("SELECT LOWER(TRIM(nombre)) AS nombre FROM tipo_documento ORDER BY id_tipo_documento")
+    tipos_doc = [r['nombre'] for r in cursor.fetchall()]
+    cursor.execute(
+        "SELECT LOWER(TRIM(td.nombre)) AS tipo FROM cliente c"
+        " LEFT JOIN tipo_documento td ON td.id_tipo_documento = c.id_tipo_documento"
+        " WHERE c.id_cliente = %s", (id,))
+    fila_doc = cursor.fetchone()
+    doc_tipo_actual = fila_doc['tipo'] if fila_doc and fila_doc['tipo'] else ''
     conn.close()
     if not cliente:
         flash("Cliente no encontrado.", "danger")
         return redirect(url_for('clientes'))
-    return render_template('cliente_form.html', cliente=cliente)
+    return render_template('cliente_form.html', cliente=cliente,
+                           tipos_doc=tipos_doc, doc_tipo_actual=doc_tipo_actual)
 
 
 @app.route('/clientes/eliminar/<int:id>')
