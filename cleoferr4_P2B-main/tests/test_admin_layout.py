@@ -403,3 +403,11 @@ def test_pagina_sin_variable_sidebar_fijo(fx):
     assert 'class="admin-sidebar d-flex flex-column admin-sidebar-off"' not in html
     assert 'class="admin-hamburguesa admin-hamburguesa-off"' not in html
     assert 'class="admin-contenido p-4 admin-contenido-off">' not in html
+
+
+def test_venta_form_guard_venta_en_curso(fx):
+    # Marcador del guard: aviso nativo beforeunload al salir de la página
+    # con ticket armado (y no durante el cobro). El diálogo es el nativo.
+    html = fx['admin'].get('/ventas/nueva').get_data(as_text=True)
+    assert "window.addEventListener('beforeunload'" in html
+    assert 'Object.keys(carrito).length > 0 && !cobrando' in html

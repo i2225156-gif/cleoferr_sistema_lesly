@@ -514,5 +514,17 @@ async function guardarClientePos() {
         setCliMsg(false, 'No se pudo conectar con el servidor.');
     }
 }
+
+// ── Venta en curso: aviso nativo al salir con ticket armado ─────────
+// Solo salta si hay ítems en el ticket y no se está cobrando (cobrando
+// se pone true en validarVenta justo antes del submit: el flujo normal
+// tras COBRAR no molesta). El diálogo es el nativo del navegador; al
+// vaciar o quitar ítems el guard se desarma solo (carrito vacío).
+window.addEventListener('beforeunload', (e) => {
+    if (Object.keys(carrito).length > 0 && !cobrando) {
+        e.preventDefault();
+        e.returnValue = '';
+    }
+});
 </script>
 {% endblock %}
