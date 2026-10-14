@@ -522,8 +522,14 @@ function eliminarItem(idx) {
     carrito.splice(idx, 1);
     saveCarrito(carrito);
 }
-function vaciarCarrito() {
-    if (!confirm('¿Vaciar el carrito?')) return;
+async function vaciarCarrito() {
+    const ok = await confirmarAccion({
+        titulo: 'Vaciar carrito',
+        mensaje: '¿Vaciar el carrito?',
+        tipo: 'peligro',
+        textoAceptar: 'Vaciar'
+    });
+    if (!ok) return;
     localStorage.removeItem('carrito_cleoferr');
     window.location.href = '/catalogo';
 }
@@ -531,12 +537,17 @@ function vaciarCarrito() {
 // ===== Wizard Pago =====
 let metodoPago = null, tipoComprobante = null, razonSocialActual = '', nombreCompletoDni = '';
 
-function abrirModalPago() {
+async function abrirModalPago() {
     const carrito = getCarrito();
     if (carrito.length === 0) return;
     // Verificar si está logueado; si no, redirigir al login
     {% if not session.usuario_id or session.rol != 'cliente' %}
-    if (confirm('Para realizar tu pedido debes iniciar sesión o crear una cuenta. ¿Deseas ir al login?')) {
+    const irLogin = await confirmarAccion({
+        titulo: 'Inicia sesión',
+        mensaje: 'Para realizar tu pedido debes iniciar sesión o crear una cuenta. ¿Deseas ir al login?',
+        textoAceptar: 'Ir al login'
+    });
+    if (irLogin) {
         window.location.href = '/login_cliente';
     }
     return;
@@ -585,7 +596,8 @@ function irPaso2() {
         const venc = document.getElementById('vencTarjeta').value;
         const cvv = document.getElementById('cvvTarjeta').value;
         if (num.length < 16 || !nom || venc.length < 5 || cvv.length < 3) {
-            alert('Por favor completa todos los datos de la tarjeta.'); return;
+            avisoAccion({ mensaje: 'Por favor completa todos los datos de la tarjeta.', tipo: 'error' });
+            return;
         }
     }
     irPaso(2);
@@ -719,6 +731,16 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 });
 
+// Validación compartida del RUC de factura (unifica el aviso que estaba
+// duplicado en irPaso3 y confirmarPedidoFinal; toast breve, no bloquea)
+function validarRucFactura(ruc) {
+    if (tipoComprobante === 'factura' && ruc.length !== 11) {
+        avisoAccion({ mensaje: 'Para factura debes ingresar el RUC de 11 dígitos.', tipo: 'error' });
+        return false;
+    }
+    return true;
+}
+
 function irPaso3() {
     if (!tipoComprobante) return;
     // Construir resumen
@@ -729,9 +751,7 @@ function irPaso3() {
     const metodoLabel = metodoPago === 'tarjeta' ? 'Tarjeta de débito/crédito' : 'Yape / Plin';
     const compLabel = tipoComprobante === 'boleta_electronica' ? 'Boleta Electrónica' : 'Factura';
     // Validar RUC obligatorio para factura
-    if (tipoComprobante === 'factura' && ruc.length !== 11) {
-        alert('Para factura debes ingresar el RUC de 11 dígitos.'); return;
-    }
+    if (!validarRucFactura(ruc)) return;
     let html = `
         <div class="mb-2"><strong>Método de pago:</strong> ${metodoLabel}</div>
         <div class="mb-2"><strong>Comprobante:</strong> ${compLabel}`;
@@ -757,9 +777,7 @@ function confirmarPedidoFinal() {
     const dni = document.getElementById('inputDni') ? document.getElementById('inputDni').value.trim() : '';
     const numOp = document.getElementById('numOperacion') ? document.getElementById('numOperacion').value.trim() : '';
     // Validar RUC si es factura
-    if (tipoComprobante === 'factura' && ruc.length !== 11) {
-        alert('Para factura debes ingresar el RUC de 11 dígitos.'); return;
-    }
+    if (!validarRucFactura(ruc)) return;
     fetch('/carrito/confirmar_v2', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -774,20 +792,25 @@ function confirmarPedidoFinal() {
         })
     })
     .then(r => r.json())
-    .then(d => {
+    .then(async d => {
         // Ítems que la BD ya no reconoce como válidos: retirarlos del carrito
         const excluidos = d.excluidos || [];
+        let avisoExcluidos = null;
         if (excluidos.length > 0) {
             const idsExcl = new Set(excluidos.map(e => e.id_producto));
             saveCarrito(getCarrito().filter(i => !idsExcl.has(i.id)));
             const detalle = excluidos.map(e => `• ${e.nombre}: ${e.motivo}`).join('\n');
-            if (d.ok) {
-                alert('Pedido registrado, pero estos productos fueron excluidos:\n' + detalle);
-            } else {
-                alert(d.error + '\n\nProductos excluidos del carrito:\n' + detalle);
-            }
+            avisoExcluidos = d.ok
+                ? 'Pedido registrado, pero estos productos fueron excluidos:\n' + detalle
+                : d.error + '\n\nProductos excluidos del carrito:\n' + detalle;
         }
         if (d.ok) {
+            // El aviso persistente NO bloquea por sí solo: la redirección
+            // ocurre DESPUÉS de que el cliente pulse "Entiendo" (antes
+            // bloqueaba el alert nativo; el await reproduce ese orden).
+            if (avisoExcluidos) {
+                await avisoAccion({ mensaje: avisoExcluidos, tipo: 'info', persistente: true });
+            }
             localStorage.removeItem('carrito_cleoferr');
             const idPedido = d.id_pedido || '';
             bootstrap.Modal.getInstance(document.getElementById('modalPago')).hide();
@@ -795,11 +818,19 @@ function confirmarPedidoFinal() {
             // de pago simulado); si no, al resumen del pedido.
             window.location.href = d.checkout_url
                 || ('/pedido_aceptado' + (idPedido ? '?id=' + idPedido : ''));
-        } else if (excluidos.length === 0) {
-            alert('Error al procesar el pedido: ' + (d.error || 'intenta de nuevo'));
+        } else {
+            // Sin pedido registrado: el aviso persiste hasta "Entiendo" y
+            // el modal de pago queda como estaba para reintentar.
+            if (avisoExcluidos) {
+                await avisoAccion({ mensaje: avisoExcluidos, tipo: 'error', persistente: true });
+            } else {
+                await avisoAccion({ mensaje: 'Error al procesar el pedido: ' + (d.error || 'intenta de nuevo'), tipo: 'error', persistente: true });
+            }
         }
     })
-    .catch(() => alert('Error de conexión. Intenta de nuevo.'));
+    .catch(async () => {
+        await avisoAccion({ mensaje: 'Error de conexión. Intenta de nuevo.', tipo: 'error', persistente: true });
+    });
 }
 
 // Formateo tarjeta

@@ -470,7 +470,7 @@ function validarConServidor(id) {
         if (!d.ok) {
             carrito.splice(idx, 1);
             saveCarrito(carrito);
-            alert(d.error || 'Este producto ya no está disponible.');
+            avisoAccion({ mensaje: d.error || 'Este producto ya no está disponible.', tipo: 'error' });
             return;
         }
         // Precios OFICIALES del servidor (base + dcto + final)
@@ -638,11 +638,16 @@ function modalAgregarCarrito() {
     }
 }
 
-function modalComprarAhora() {
+async function modalComprarAhora() {
     modalAgregarCarrito();
     // Redirigir al carrito para pagar
     if (!estaLogueado) {
-        if (confirm('Para comprar debes iniciar sesión. ¿Ir al login?')) {
+        const irLogin = await confirmarAccion({
+            titulo: 'Inicia sesión',
+            mensaje: 'Para comprar debes iniciar sesión. ¿Ir al login?',
+            textoAceptar: 'Ir al login'
+        });
+        if (irLogin) {
             window.location.href = '/login_cliente';
         }
     } else {
