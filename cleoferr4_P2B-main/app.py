@@ -218,6 +218,8 @@ _CSRF_PROTEGIDAS = {
     'admin_ofertas_nueva', 'admin_ofertas_editar',
     'admin_ofertas_activar', 'admin_ofertas_desactivar',
     'perfil_actualizar_documento',
+    # C3d: borrados destructivos convertidos de GET a POST con CSRF
+    'eliminar_producto', 'eliminar_cliente',
 }
 
 
@@ -915,7 +917,8 @@ def actualizar_producto(id):
     return redirect(url_for('productos'))
 
 
-@app.route('/productos/eliminar/<int:id>')
+# C3d: borrado destructivo SOLO por POST con CSRF (antes GET sin protección).
+@app.route('/productos/eliminar/<int:id>', methods=['POST'])
 @login_required
 @admin_required
 def eliminar_producto(id):
@@ -1115,7 +1118,8 @@ def editar_cliente(id):
                            tipos_doc=tipos_doc, doc_tipo_actual=doc_tipo_actual)
 
 
-@app.route('/clientes/eliminar/<int:id>')
+# C3d: borrado destructivo SOLO por POST con CSRF (antes GET sin protección).
+@app.route('/clientes/eliminar/<int:id>', methods=['POST'])
 @login_required
 @admin_required
 def eliminar_cliente(id):

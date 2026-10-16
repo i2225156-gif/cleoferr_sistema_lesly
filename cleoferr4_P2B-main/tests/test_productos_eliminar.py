@@ -1,8 +1,10 @@
-"""Fix DELETE de producto: bloquear si tiene historial y sugerir desactivar.
+"""Borrado de producto: bloquear si tiene historial y sugerir desactivar.
 
-SOLO LECTURA: se prueban los caminos que NO escriben (bloqueo, 404 y
-permisos). El borrado exitoso exigiría escribir en BD y queda cubierto por
-revisión, no por test.
+C3d: la ruta es SOLO POST con CSRF (GET → 405, sin token → 400). Aquí se
+prueban los caminos que NO escriben (bloqueo por historial, 404 y
+permisos). El borrado exitoso de producto exigiría escribir en BD y queda
+cubierto por revisión (el de clientes, que va por conexión proxied con
+rollback, se prueba en test_c3d_borrados_post.py).
 """
 import db_supabase
 from sqlalchemy import text
@@ -15,6 +17,7 @@ def _admin():
     with c.session_transaction() as s:
         s['usuario_id'] = 7
         s['rol'] = 'administrador'
+        s['_csrf_token'] = 'token-test'
     return c
 
 
@@ -28,7 +31,8 @@ def _producto_con_historial():
 
 def test_producto_con_ventas_no_se_elimina_y_sugiere_desactivar():
     pid = _producto_con_historial()
-    r = _admin().get(f'/productos/eliminar/{pid}', follow_redirects=True)
+    r = _admin().post(f'/productos/eliminar/{pid}',
+                      data={'csrf_token': 'token-test'}, follow_redirects=True)
     assert r.status_code == 200
     cuerpo = r.get_data(as_text=True)
     assert 'No se puede eliminar' in cuerpo
@@ -41,7 +45,9 @@ def test_producto_con_ventas_no_se_elimina_y_sugiere_desactivar():
 
 
 def test_producto_inexistente_da_404():
-    assert _admin().get('/productos/eliminar/999999').status_code == 404
+    r = _admin().post('/productos/eliminar/999999',
+                      data={'csrf_token': 'token-test'})
+    assert r.status_code == 404
 
 
 def test_vendedor_no_puede_eliminar():
@@ -49,4 +55,6 @@ def test_vendedor_no_puede_eliminar():
     with c.session_transaction() as s:
         s['usuario_id'] = 8
         s['rol'] = 'vendedor'
-    assert c.get('/productos/eliminar/1').status_code == 302
+        s['_csrf_token'] = 'token-test'
+    r = c.post('/productos/eliminar/1', data={'csrf_token': 'token-test'})
+    assert r.status_code == 302

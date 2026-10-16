@@ -9,11 +9,11 @@ C3b: las páginas de cliente (carrito, catálogo) llaman a la API del
 componente (confirmarAccion/avisoAccion) y sus fuentes ya no contienen
 confirm()/alert() nativos (el propio componente sí, como degradación).
 
-C3c: las páginas admin migran sus formularios POST a data-confirm y sus
-enlaces destructivos GET a data-confirm/data-href (la conversión a POST
-es C3d); alertas resuelve directo con toast; producto_form avisa por
-toast. El GET /alertas ESCRIBE la sincronización: se prueba con conexión
-proxied y rollback (nada persiste).
+C3c: las páginas admin migran sus formularios POST a data-confirm
+(alertas resuelve directo con toast; producto_form avisa por toast).
+C3d convierte los borrados de producto/cliente a form POST con CSRF
+(ya sin data-href). El GET /alertas ESCRIBE la sincronización: se
+prueba con conexión proxied y rollback (nada persiste).
 """
 from pathlib import Path
 
@@ -177,15 +177,16 @@ def test_forms_destruccion_con_data_confirm_peligro():
         assert mensaje in fuente, nombre
 
 
-def test_enlaces_destruccion_get_con_data_confirm():
-    # C3c solo migra el diálogo: data-confirm + data-href (href="#");
-    # la conversión a POST con CSRF es C3d
+def test_formularios_de_borrado_post_con_data_confirm():
+    # C3d: los borrados de producto/cliente son form POST con data-confirm
+    # peligro (el enlace data-href de C3c fue sustituido por el formulario)
     for nombre, mensaje in (('clientes.html', '¿Eliminar este cliente?'),
                             ('productos.html', '¿Eliminar este producto?')):
         fuente = (_TEMPLATES / nombre).read_text(encoding='utf-8')
-        assert 'data-href=' in fuente, nombre
+        assert 'method="POST" action=' in fuente, nombre
         assert f'data-confirm="{mensaje}"' in fuente, nombre
         assert 'data-confirm-tipo="peligro"' in fuente, nombre
+        assert 'data-href' not in fuente, nombre
 
 
 def test_admin_render_con_componente():

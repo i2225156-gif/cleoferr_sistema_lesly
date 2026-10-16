@@ -221,13 +221,16 @@
                                     <i class="fa fa-edit"></i>
                                 </a>
                                 {% if session.rol == 'administrador' %}
-                                <a href="#" data-href="/productos/eliminar/{{ p.id_producto }}" class="btn btn-sm btn-outline-danger"
-                                   data-confirm="¿Eliminar este producto?"
-                                   data-confirm-titulo="Eliminar producto"
-                                   data-confirm-tipo="peligro"
-                                   data-confirm-aceptar="Eliminar" title="Eliminar">
-                                    <i class="fa fa-trash"></i>
-                                </a>
+                                <form method="POST" action="/productos/eliminar/{{ p.id_producto }}" style="display:inline"
+                                      data-confirm="¿Eliminar este producto?"
+                                      data-confirm-titulo="Eliminar producto"
+                                      data-confirm-tipo="peligro"
+                                      data-confirm-aceptar="Eliminar">
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                    <button type="submit" class="btn btn-sm btn-outline-danger" title="Eliminar">
+                                        <i class="fa fa-trash"></i>
+                                    </button>
+                                </form>
                                 <a href="/productos/detalle/{{ p.id_producto }}" class="btn btn-sm btn-outline-info" title="Ver detalles">
                                     <i class="fa fa-eye"></i>
                                 </a>
