@@ -40,7 +40,11 @@
                         <i class="fa fa-edit me-1"></i>Editar
                     </a>
                     {# Reemplazar el link de eliminar por un formulario POST seguro #}
-                    <form method="POST" action="/proveedores/eliminar/{{ p.id_proveedor }}" style="display:inline" onsubmit="return confirm('¿Confirma eliminar este proveedor?');">
+                    <form method="POST" action="/proveedores/eliminar/{{ p.id_proveedor }}" style="display:inline"
+                          data-confirm="¿Confirma eliminar este proveedor?"
+                          data-confirm-titulo="Eliminar proveedor"
+                          data-confirm-tipo="peligro"
+                          data-confirm-aceptar="Eliminar">
                         <button type="submit" class="btn btn-sm btn-outline-danger" title="Eliminar">
                             <i class="fa fa-trash"></i>
                         </button>

@@ -221,8 +221,11 @@
                                     <i class="fa fa-edit"></i>
                                 </a>
                                 {% if session.rol == 'administrador' %}
-                                <a href="/productos/eliminar/{{ p.id_producto }}" class="btn btn-sm btn-outline-danger"
-                                   onclick="return confirm('¿Eliminar este producto?')" title="Eliminar">
+                                <a href="#" data-href="/productos/eliminar/{{ p.id_producto }}" class="btn btn-sm btn-outline-danger"
+                                   data-confirm="¿Eliminar este producto?"
+                                   data-confirm-titulo="Eliminar producto"
+                                   data-confirm-tipo="peligro"
+                                   data-confirm-aceptar="Eliminar" title="Eliminar">
                                     <i class="fa fa-trash"></i>
                                 </a>
                                 <a href="/productos/detalle/{{ p.id_producto }}" class="btn btn-sm btn-outline-info" title="Ver detalles">

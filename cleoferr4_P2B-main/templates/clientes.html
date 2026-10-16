@@ -57,8 +57,11 @@
                                     <i class="fa fa-edit"></i>
                                 </a>
                                 {% if session.rol == 'administrador' %}
-                                <a href="/clientes/eliminar/{{ c.id_cliente }}" class="btn btn-sm btn-outline-danger"
-                                   onclick="return confirm('¿Eliminar este cliente?')">
+                                <a href="#" data-href="/clientes/eliminar/{{ c.id_cliente }}" class="btn btn-sm btn-outline-danger"
+                                   data-confirm="¿Eliminar este cliente?"
+                                   data-confirm-titulo="Eliminar cliente"
+                                   data-confirm-tipo="peligro"
+                                   data-confirm-aceptar="Eliminar">
                                     <i class="fa fa-trash"></i>
                                 </a>
                                 {% endif %}

@@ -73,13 +73,17 @@
                   </button>
                   {% if o.activa %}
                   <form method="POST" action="/admin/ofertas/desactivar/{{ o.id_oferta }}"
-                        class="d-inline" onsubmit="return confirm('¿Desactivar esta oferta? El descuento deja de aplicarse de inmediato.')">
+                        class="d-inline"
+                        data-confirm="¿Desactivar esta oferta? El descuento deja de aplicarse de inmediato."
+                        data-confirm-titulo="Desactivar oferta">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                     <button class="btn btn-sm btn-outline-warning">Desactivar</button>
                   </form>
                   {% else %}
                   <form method="POST" action="/admin/ofertas/activar/{{ o.id_oferta }}"
-                        class="d-inline" onsubmit="return confirm('¿Activar esta oferta? Si solapa otra activa del mismo producto, la BD lo rechazará.')">
+                        class="d-inline"
+                        data-confirm="¿Activar esta oferta? Si solapa otra activa del mismo producto, la BD lo rechazará."
+                        data-confirm-titulo="Activar oferta">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                     <button class="btn btn-sm btn-outline-success">Activar</button>
                   </form>

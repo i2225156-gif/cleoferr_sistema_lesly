@@ -115,10 +115,9 @@
 </div>
 
 <script>
-// Resolver alerta mediante AJAX sin recargar la página
+// Resolución directa, sin confirmación previa (decisión del propietario):
+// acción de baja gravedad; el resultado se informa con el toast de abajo.
 async function resolverAlertaAjax(id) {
-    if (!confirm('¿Marcar esta alerta como resuelta?')) return;
-
     try {
         const resp = await fetch(`/alertas/resolver/${id}`, {
             method: 'POST',

@@ -64,10 +64,13 @@
         al catálogo (devolución idempotente B2). El trigger de auditoria
         registrará cada cambio.
       </p>
-      <form method="POST" action="/admin/reservas/liberar">
+      <form method="POST" action="/admin/reservas/liberar"
+            data-confirm="¿Liberar {{ vencidas|length }} reserva(s)? El stock volverá al catálogo y las ventas se cancelarán."
+            data-confirm-titulo="Liberar reservas"
+            data-confirm-tipo="peligro"
+            data-confirm-aceptar="Liberar">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <button type="submit" class="btn btn-naranja fw-bold"
-                onclick="return confirm('¿Liberar {{ vencidas|length }} reserva(s)? El stock volverá al catálogo y las ventas se cancelarán.')">
+        <button type="submit" class="btn btn-naranja fw-bold">
           <i class="fa fa-unlock me-1"></i>Liberar {{ vencidas|length }} reserva(s) vencida(s)
         </button>
       </form>

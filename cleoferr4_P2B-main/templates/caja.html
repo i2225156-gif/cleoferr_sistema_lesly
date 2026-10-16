@@ -179,7 +179,10 @@
                     Diferencias mayores a S/ {{ '%.0f'|format(umbral) }} se marcarán como advertencia.
                 </div>
                 <form method="POST" action="{{ url_for('caja_cerrar') }}"
-                      onsubmit="return confirm('¿Confirmar cierre de caja #{{ caja.id_caja }}?')">
+                      data-confirm="¿Confirmar cierre de caja #{{ caja.id_caja }}?"
+                      data-confirm-titulo="Cerrar caja"
+                      data-confirm-tipo="peligro"
+                      data-confirm-aceptar="Cerrar caja">
                     <div class="mb-3">
                         <label class="form-label fw-semibold">Efectivo contado (declarado)</label>
                         <div class="input-group">
