@@ -411,3 +411,30 @@ def test_venta_form_guard_venta_en_curso(fx):
     html = fx['admin'].get('/ventas/nueva').get_data(as_text=True)
     assert "window.addEventListener('beforeunload'" in html
     assert 'Object.keys(carrito).length > 0 && !cobrando' in html
+
+
+# ── Fix del flash: zona-flashes alineado con el contenido admin ─────
+
+def test_zona_flashes_presente_en_admin(fx):
+    # El wrapper viaja en base y el CSS del sidebar le hace hueco al
+    # sidebar fijo (antes quedaban tapados los primeros 240px)
+    html = fx['admin'].get('/productos').get_data(as_text=True)
+    assert 'class="zona-flashes"' in html
+    assert '.zona-flashes { margin-left: 240px; }' in html
+
+
+def test_zona_flashes_off_en_pos(fx):
+    # En el POS (pantalla completa) el wrapper lleva la clase off y el
+    # CSS la vuelve a 0
+    html = fx['admin'].get('/ventas/nueva').get_data(as_text=True)
+    assert 'class="zona-flashes zona-flashes-off"' in html
+    assert '.zona-flashes.zona-flashes-off { margin-left: 0; }' in html
+
+
+def test_zona_flashes_cliente_sin_css_admin(fx):
+    # Cliente: el wrapper existe (vive en base) pero SIN el CSS del
+    # sidebar admin → sin efecto visual, igual que siempre
+    html = fx['admin'].get('/catalogo').get_data(as_text=True)
+    assert 'class="zona-flashes"' in html
+    assert 'zona-flashes { margin-left' not in html
+    assert 'class="zona-flashes zona-flashes-off"' not in html

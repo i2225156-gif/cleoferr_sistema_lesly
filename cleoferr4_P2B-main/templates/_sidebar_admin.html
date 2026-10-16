@@ -116,6 +116,10 @@ function toggleAdminSidebar() {
   z-index: 1040; transition: transform 0.25s ease;
 }
 .admin-contenido { margin-left: 240px; min-height: 100vh; }
+/* Flashes de base.html: mismo hueco que el contenido para no quedar
+   tapados por el sidebar fijo; a 0 si la página pide pantalla completa. */
+.zona-flashes { margin-left: 240px; }
+.zona-flashes.zona-flashes-off { margin-left: 0; }
 .admin-sidebar-scroll { overflow-y: auto; }
 
 .admin-sidebar .sidebar-item {
@@ -154,6 +158,7 @@ body.admin-menu-abierto .admin-overlay { display: block; }
     box-shadow: 4px 0 24px rgba(0,0,0,0.35);
   }
   .admin-contenido { margin-left: 0; }
+  .zona-flashes { margin-left: 0; }
   .admin-hamburguesa { display: block; }
 }
 

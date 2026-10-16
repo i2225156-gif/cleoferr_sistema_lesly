@@ -395,6 +395,10 @@
 
 <div class="container-fluid px-4 py-3">
 
+    {# Flashes con wrapper estable: en admin el CSS del sidebar le hace
+       hueco al sidebar fijo (mismo margen que .admin-contenido) para que
+       no queden tapados; en cliente no hay regla y no cambia nada. #}
+    <div class="zona-flashes{% if sidebar_colapsado %} zona-flashes-off{% endif %}">
     {% with messages = get_flashed_messages(with_categories=true) %}
         {% if messages %}
             {% for category, message in messages %}
@@ -406,6 +410,7 @@
             {% endfor %}
         {% endif %}
     {% endwith %}
+    </div>
 
     {% block contenido %}{% endblock %}
 </div>
