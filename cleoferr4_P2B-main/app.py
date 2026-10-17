@@ -8,7 +8,7 @@ import json
 # A�'ADIR despuǸs de: import uuid
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 # Intento seguro de importar dependencias externas; si faltan, mostrar instrucciones claras y salir.
 try:
     from flask import Flask, render_template, request, redirect, url_for, session, flash, abort
@@ -1460,6 +1460,28 @@ def eliminar_proveedor(id):
     return redirect(url_for('proveedores'))
 
 
+# ── Paginación en servidor (P1..P4) ─────────────────────────────
+POR_PAGINA_ADMIN = 20   # listados admin (las páginas de cliente usarán 10)
+
+
+def _pagina_actual(total, por_pagina):
+    """?pagina= saneada: no numérica o <1 → 1; > última → última. Nunca 500."""
+    try:
+        p = int(request.args.get('pagina', 1))
+    except (TypeError, ValueError):
+        p = 1
+    ultima = max(1, -(-total // por_pagina))
+    return min(max(p, 1), ultima)
+
+
+def _filtros_sin_pagina():
+    """Query string de los filtros activos SIN 'pagina' (la macro de
+    paginación lo pega a cada enlace). Se calcula aquí en Python porque
+    en Jinja un {% set %} dentro de un {% for %} no sale del bucle."""
+    return urlencode([(k, v) for k, v in request.args.items(multi=True)
+                      if k != 'pagina'])
+
+
 # ── Pedidos ─────────────────────────────────────────────────
 @app.route('/pedidos')
 @login_required
@@ -1473,7 +1495,14 @@ def pedidos():
     """)
     lista_estados = [r['nombre'] for r in cursor.fetchall()]
     PASOS = [e for e in lista_estados if e != 'cancelado']
+    total, pagina = 0, 1
     try:
+        # P1: paginación en servidor — COUNT del conjunto COMPLETO y
+        # LIMIT/OFFSET parametrizados; ORDER BY estable con id de desempate
+        # (ventas del mismo instante no intercambian página entre recargas).
+        cursor.execute("SELECT COUNT(*) AS total FROM venta")
+        total = cursor.fetchone()['total']
+        pagina = _pagina_actual(total, POR_PAGINA_ADMIN)
         # Consulta 1 (Tienda): ventas + total, sin joins cross-BD
         cursor.execute(f"""
             SELECT
@@ -1490,9 +1519,9 @@ def pedidos():
             LEFT JOIN detalle_venta d ON v.id_venta = d.id_venta
             GROUP BY v.id_venta, v.fecha, tv.nombre, ev.nombre,
                      v.id_cliente, v.id_usuario_vendedor
-            ORDER BY v.fecha DESC
-            LIMIT 200
-        """)
+            ORDER BY v.fecha DESC, v.id_venta DESC
+            LIMIT %s OFFSET %s
+        """, (POR_PAGINA_ADMIN, (pagina - 1) * POR_PAGINA_ADMIN))
         pedidos_raw = cursor.fetchall()
 
         # Consulta 2 (Auth): clientes y usuarios
@@ -1544,7 +1573,10 @@ def pedidos():
     finally:
         conn.close()
     return render_template('pedidos.html', pedidos=pedidos, estados=lista_estados,
-                           transiciones=TRANSICIONES_PEDIDO)
+                           transiciones=TRANSICIONES_PEDIDO,
+                           pagina=pagina, total=total,
+                           por_pagina=POR_PAGINA_ADMIN,
+                           filtros_qs=_filtros_sin_pagina())
 
 @app.route('/ventas/nueva', methods=['GET'])
 @login_required

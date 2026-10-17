@@ -1,6 +1,7 @@
 {% extends 'admin_base.html' %}
 {% set seccion_activa = 'pedidos' %}
 {% block titulito %}Pedidos – Cleoferr{% endblock %}
+{% from 'components/paginacion.html' import paginacion %}
 {% block admin_contenido %}
 
 <div class="page-header">
@@ -148,6 +149,8 @@
         </div>
     </div>
 </div>
+
+{{ paginacion(pagina, total, por_pagina, filtros_qs) }}
 
 <script>
 // Cambio de estado vía AJAX. Contrato JSON {ok, mensaje, estado_nuevo?}:
