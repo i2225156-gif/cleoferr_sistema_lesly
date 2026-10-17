@@ -68,7 +68,8 @@ def test_alta_admin_inserta_cliente_con_apellido_y_tipo_doc(fx_auth):
                                     'email': correo,
                                     'telefono': '987654321',
                                     'direccion': 'Av. Prueba 123',
-                                    'contrasena': 'secreto123'},
+                                    'contrasena': 'secreto123',
+                                    'csrf_token': 'token-test'},
                               follow_redirects=True)
     assert r.status_code == 200
     # Camino feliz: el alta ya NO cae en el except con NotNullViolation
@@ -88,3 +89,12 @@ def test_alta_admin_inserta_cliente_con_apellido_y_tipo_doc(fx_auth):
     assert fila['nro_documento'] is None
     # El alta administrativa sigue verificando la cuenta (comportamiento actual)
     assert fila['activo'] is True
+
+
+def test_alta_admin_sin_csrf_rechazada(fx_auth):
+    # nuevo_cliente está en _CSRF_PROTEGIDAS: POST sin token → 400
+    r = fx_auth['admin'].post('/clientes/nuevo',
+                              data={'nombre': 'Test Sin Token',
+                                    'email': fx_auth['correo'],
+                                    'contrasena': 'secreto123'})
+    assert r.status_code == 400

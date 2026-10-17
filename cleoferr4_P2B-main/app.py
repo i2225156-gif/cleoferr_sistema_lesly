@@ -220,6 +220,8 @@ _CSRF_PROTEGIDAS = {
     'perfil_actualizar_documento',
     # C3d: borrados destructivos convertidos de GET a POST con CSRF
     'eliminar_producto', 'eliminar_cliente',
+    # Commit A: alta admin de clientes (form HTML con token en cliente_form)
+    'nuevo_cliente',
 }
 
 
