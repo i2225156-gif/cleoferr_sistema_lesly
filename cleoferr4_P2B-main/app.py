@@ -1004,18 +1004,31 @@ def nuevo_cliente():
         conn   = get_connection_auth()
         cursor = conn.cursor()
         try:
+            # El formulario envía nombre y apellidos CONCATENADOS en "nombre"
+            # (hidden nombreCompleto del cliente_form): se separan con el
+            # MISMO criterio del POS (registrar_pos): primera palabra =
+            # nombre, resto = apellido (el JS del form valida ambos).
+            partes = nombre.split()
+            nombre_db = partes[0] if partes else nombre
+            apellido_db = ' '.join(partes[1:])
+            # Sin documento: id_tipo_documento=1 (DNI) y nro_documento NULL,
+            # criterio del registro web (registro_cliente). OJO: nunca ''
+            # — la BD tiene UNIQUE (id_tipo_documento, nro_documento).
             cursor.execute(
                 # activo se fija de forma explicita: si se deja al DEFAULT de la
                 # columna (TRUE) el cliente queda "verificado" sin haberlo hecho y
                 # despues no puede registrarse por la web ("ya esta registrado").
-                "INSERT INTO cliente (nombre, email, telefono, direccion, contrasena, activo) "
-                "VALUES (%s,%s,%s,%s,%s,TRUE)",
-                (nombre, email, telefono, direccion, hash_pw)
+                "INSERT INTO cliente (nombre, apellido, email, telefono, direccion,"
+                " contrasena, activo, id_tipo_documento, nro_documento) "
+                "VALUES (%s,%s,%s,%s,%s,%s,TRUE,1,NULL)",
+                (nombre_db, apellido_db, email, telefono, direccion, hash_pw)
             )
             conn.commit()
             flash("Cliente registrado correctamente.", "success")
         except Exception as e:
             conn.rollback()
+            # El flash nunca oculta el bug: la excepción queda en el log.
+            app.logger.exception("Error al registrar cliente desde el panel admin")
             flash(f"Error al registrar cliente: {e}", "danger")
         finally:
             conn.close()
