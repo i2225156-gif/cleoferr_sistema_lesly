@@ -1,0 +1,273 @@
+{# ── Componente global de diálogos (C3) ──────────────────────────
+   UN SOLO include, en base.html: admin_base hereda de base y lo recibe
+   igual (no incluirlo también en admin_base: duplicaría el modal).
+
+   API global:
+     confirmarAccion({titulo, mensaje, textoAceptar, textoCancelar,
+                      tipo:'normal'|'peligro'}) → Promise<boolean>
+       Modal diseñado (Bootstrap 5): foco atrapado, Esc cancela, overlay
+       cancela, aria-modal. tipo 'peligro' → Aceptar en btn-danger y foco
+       inicial en Cancelar (opción segura por defecto).
+     avisoAccion({mensaje, tipo:'ok'|'error'|'info'}, persistente=false)
+       Toast breve no bloqueante; con persistente=true → modal con solo
+       "Entiendo" (mensajes largos/multilínea, p. ej. productos excluidos).
+
+   Contrato declarativo (fail-closed):
+     - Formularios POST: data-confirm="mensaje" (+ data-confirm-titulo,
+       data-confirm-tipo, data-confirm-aceptar, data-confirm-cancelar).
+       El submit se intercepta en CAPTURA y SIEMPRE se bloquea; solo el
+       modal (o el confirm() nativo de degradación) lo desbloquea. Al
+       aceptar se reenvía con requestSubmit(botón pulsado): el name/value
+       del botón y el CSRF (hidden input) viajan igual que antes.
+     - Enlaces destructivos: a data-confirm="..." href="#" data-href=destino.
+       Sin JS el enlace no navega (nunca una acción destructiva sin confirmar).
+
+   DEGRADACIÓN (fail-closed con explicación visible):
+     - avisoSinDialogos nace VISIBLE y lo oculta el JS al cargar: si el JS
+       no corre (o falla), la página explica que los diálogos no están
+       disponibles (nunca un botón mudo).
+     - Si el modal no puede abrirse en el momento del clic (Bootstrap
+       ausente o error), se degrada a confirm() nativo: la acción sigue
+       siendo confirmada por el usuario. Si hasta eso falla → false.
+     #}
+
+{# Aviso de degradación: visible sin JS; el script de abajo lo oculta #}
+<div id="avisoSinDialogos" role="alert"
+     style="position:fixed;top:0;left:50%;transform:translateX(-50%);z-index:1095;
+            background:#ffc107;color:#212529;padding:10px 18px;border-radius:0 0 10px 10px;
+            font-size:.85rem;font-weight:600;box-shadow:0 2px 12px rgba(0,0,0,.3);
+            max-width:92vw;text-align:center">
+  JavaScript est&aacute; desactivado o fall&oacute;: los di&aacute;logos de confirmaci&oacute;n
+  no est&aacute;n disponibles y las acciones que los requieren no se ejecutar&aacute;n.
+</div>
+
+{# Modal de confirmación / aviso persistente (Bootstrap 5) #}
+<div class="modal fade" id="modalConfirmar" tabindex="-1" role="dialog"
+     aria-labelledby="modalConfirmarTitulo" aria-describedby="modalConfirmarMensaje">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content" style="border:none;border-radius:14px;overflow:hidden">
+      <div class="modal-header" style="background:var(--gris-oscuro);color:#fff;border:none">
+        <h5 class="modal-title fw-bold" id="modalConfirmarTitulo"
+            style="font-size:1rem"><i class="fa fa-circle-question me-2"></i>Confirmar</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"
+                aria-label="Cerrar"></button>
+      </div>
+      <div class="modal-body pt-3">
+        <p id="modalConfirmarMensaje" class="mb-0" style="font-size:.95rem"></p>
+      </div>
+      <div class="modal-footer border-0">
+        <button type="button" id="modalConfirmarCancelar" class="btn btn-outline-secondary"
+                data-bs-dismiss="modal">Cancelar</button>
+        <button type="button" id="modalConfirmarAceptar" class="btn btn-naranja fw-bold">Aceptar</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+{# Contenedor de toasts breves (no bloqueantes) #}
+<div id="toastAvisos" aria-live="polite"
+     style="position:fixed;top:16px;right:16px;z-index:1080;display:flex;
+            flex-direction:column;gap:8px;max-width:min(360px,90vw)"></div>
+
+<style>
+  #modalConfirmarMensaje { color: #333; }
+  body.dark-mode #modalConfirmarMensaje { color: #c9d1d9; }
+</style>
+
+<script>
+(function () {
+  'use strict';
+
+  // El JS vive: se oculta el aviso de degradación (si el JS no corre o
+  // falla antes de esta línea, el aviso queda VISIBLE y explica por qué
+  // los botones confirmables no actúan).
+  var avisoDeg = document.getElementById('avisoSinDialogos');
+  if (avisoDeg) avisoDeg.hidden = true;
+
+  var instanciaModal = null;
+  var resolverPendiente = null;
+
+  function modalBootstrap() {
+    if (typeof bootstrap === 'undefined' || !bootstrap.Modal) return null;
+    if (!instanciaModal) {
+      instanciaModal = new bootstrap.Modal(document.getElementById('modalConfirmar'));
+    }
+    return instanciaModal;
+  }
+
+  function abrirModal(opciones) {
+    // opciones: {titulo, mensaje, textoAceptar, textoCancelar, tipo,
+    //            sinCancelar, multilinea}
+    return new Promise(function (resolver) {
+      var el = document.getElementById('modalConfirmar');
+      var btnAceptar = document.getElementById('modalConfirmarAceptar');
+      var btnCancelar = document.getElementById('modalConfirmarCancelar');
+      var m = modalBootstrap();
+      if (!el || !m) { resolver(null); return; }  // null = degradar
+
+      if (resolverPendiente) resolverPendiente(false);  // una confirmación a la vez
+
+      var peligro = opciones.tipo === 'peligro';
+      document.getElementById('modalConfirmarTitulo').textContent =
+        opciones.titulo || 'Confirmar acción';
+      var btnMensaje = document.getElementById('modalConfirmarMensaje');
+      btnMensaje.textContent = opciones.mensaje || '';
+      btnMensaje.style.whiteSpace = opciones.multilinea ? 'pre-line' : 'normal';
+      btnAceptar.textContent = opciones.textoAceptar || 'Aceptar';
+      btnAceptar.className = 'btn fw-bold ' + (peligro ? 'btn-danger' : 'btn-naranja');
+      if (opciones.sinCancelar) {
+        btnCancelar.style.display = 'none';
+      } else {
+        btnCancelar.style.display = '';
+        btnCancelar.textContent = opciones.textoCancelar || 'Cancelar';
+      }
+
+      function limpiar() {
+        el.removeEventListener('hidden.bs.modal', alOcultar);
+        el.removeEventListener('shown.bs.modal', alMostrar);
+        btnAceptar.removeEventListener('click', alAceptar);
+        btnCancelar.removeEventListener('click', alCancelar);
+      }
+      function cerrarY(ok) {
+        limpiar();
+        resolverPendiente = null;
+        try { m.hide(); } catch (e) {}
+        resolver(ok);
+      }
+      function alAceptar() { cerrarY(true); }
+      function alCancelar() { cerrarY(false); }
+      function alOcultar() {
+        if (resolverPendiente === cerrarY) {
+          limpiar();
+          resolverPendiente = null;
+          resolver(false);   // Esc, overlay o X: cancelar
+        }
+      }
+      function alMostrar() {
+        // Foco inicial: en 'peligro' la opción segura (Cancelar);
+        // en el resto, Aceptar. Enter solo actúa sobre el botón enfocado.
+        (peligro && !opciones.sinCancelar ? btnCancelar : btnAceptar).focus();
+      }
+
+      el.addEventListener('hidden.bs.modal', alOcultar);
+      el.addEventListener('shown.bs.modal', alMostrar);
+      btnAceptar.addEventListener('click', alAceptar);
+      btnCancelar.addEventListener('click', alCancelar);
+      resolverPendiente = cerrarY;
+      m.show();
+    });
+  }
+
+  function confirmarAccion(opciones) {
+    opciones = opciones || {};
+    return abrirModal(opciones).then(function (res) {
+      if (res !== null) return res;
+      // Degradación VISIBLE y segura: modal no disponible → confirm()
+      // nativo. La acción NUNCA se ejecuta sin confirmación del usuario.
+      try {
+        return window.confirm(opciones.mensaje || '¿Confirmar acción?');
+      } catch (e) {
+        return false;   // fail-closed
+      }
+    });
+  }
+
+  function avisoAccion(opciones) {
+    opciones = opciones || {};
+    var mensaje = opciones.mensaje || '';
+    if (opciones.persistente) {
+      // Aviso que no se cierra solo (mensajes largos/multilínea): modal "Entiendo"
+      return abrirModal({
+        titulo: opciones.titulo || 'Aviso',
+        mensaje: mensaje,
+        textoAceptar: 'Entiendo',
+        tipo: opciones.tipo === 'error' ? 'peligro' : 'normal',
+        multilinea: true,
+        sinCancelar: true
+      }).then(function (res) {
+        if (res === null) {
+          try { window.alert(mensaje); } catch (e) {}   // último recurso visible
+        }
+      });
+    }
+    // Toast breve, no bloqueante (clic para cerrarlo antes de tiempo)
+    try {
+      var cont = document.getElementById('toastAvisos');
+      var colores = { ok: '#198754', error: '#dc3545', info: '#4682B4' };
+      var t = document.createElement('div');
+      t.setAttribute('role', 'status');
+      t.style.cssText = 'background:' + (colores[opciones.tipo] || colores.info) +
+        ';color:#fff;padding:12px 16px;border-radius:10px;box-shadow:0 4px 14px rgba(0,0,0,.25);' +
+        'font-size:.9rem;cursor:pointer;transition:opacity .4s';
+      t.textContent = mensaje;
+      t.title = 'Cerrar';
+      t.addEventListener('click', function () { t.remove(); });
+      cont.appendChild(t);
+      setTimeout(function () {
+        t.style.opacity = '0';
+        setTimeout(function () { t.remove(); }, 450);
+      }, 4500);
+    } catch (e) {
+      try { window.alert(mensaje); } catch (e2) {}   // último recurso visible
+    }
+    return Promise.resolve();
+  }
+
+  window.confirmarAccion = confirmarAccion;
+  window.avisoAccion = avisoAccion;
+
+  // ── Interceptor de formularios con data-confirm (fase CAPTURA) ──
+  // Fail-closed: el envío SIEMPRE se bloquea; solo el modal (o el
+  // confirm() nativo de degradación) lo desbloquea. Al aceptar se
+  // reenvía con requestSubmit(botón): conservan el name/value del
+  // botón pulsado y el CSRF del hidden input, igual que antes.
+  document.addEventListener('submit', function (e) {
+    var form = e.target;
+    if (!(form instanceof HTMLFormElement)) return;
+    if (form.dataset.confirmado === '1') { form.dataset.confirmado = ''; return; }
+    if (!form.hasAttribute('data-confirm')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    var boton = e.submitter || null;
+    confirmarAccion({
+      mensaje: form.getAttribute('data-confirm'),
+      titulo: form.getAttribute('data-confirm-titulo') || undefined,
+      tipo: form.getAttribute('data-confirm-tipo') || 'normal',
+      textoAceptar: form.getAttribute('data-confirm-aceptar') || undefined,
+      textoCancelar: form.getAttribute('data-confirm-cancelar') || undefined
+    }).then(function (ok) {
+      if (!ok) return;
+      form.dataset.confirmado = '1';
+      if (typeof form.requestSubmit === 'function') {
+        if (boton && boton.form === form) form.requestSubmit(boton);
+        else form.requestSubmit();
+      } else if (boton && boton.name) {
+        var h = document.createElement('input');   // fallback viejo: replicar botón
+        h.type = 'hidden'; h.name = boton.name; h.value = boton.value;
+        form.appendChild(h);
+        form.submit();
+      } else {
+        form.submit();
+      }
+    });
+  }, true);
+
+  // ── Interceptor de enlaces destructivos: a[data-confirm] ──
+  // Fail-closed: el destino real viaja en data-href; sin JS no navega.
+  document.addEventListener('click', function (e) {
+    var a = e.target && e.target.closest ? e.target.closest('a[data-confirm]') : null;
+    if (!a) return;
+    e.preventDefault();
+    e.stopPropagation();
+    confirmarAccion({
+      mensaje: a.getAttribute('data-confirm'),
+      titulo: a.getAttribute('data-confirm-titulo') || undefined,
+      tipo: a.getAttribute('data-confirm-tipo') || 'normal'
+    }).then(function (ok) {
+      if (!ok) return;
+      var destino = a.getAttribute('data-href');
+      if (destino && destino !== '#') window.location.href = destino;
+    });
+  }, true);
+})();
+</script>

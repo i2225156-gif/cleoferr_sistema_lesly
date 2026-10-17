@@ -1,6 +1,7 @@
-{% extends 'base.html' %}
+{% extends 'admin_base.html' %}
+{% set seccion_activa = 'clientes' %}
 {% block titulito %}{% if cliente %}Editar{% else %}Nuevo{% endif %} Cliente – Cleoferr{% endblock %}
-{% block contenido %}
+{% block admin_contenido %}
 
 <style>
     .campo-estado { font-size: 0.82rem; margin-top: 4px; min-height: 18px; }
@@ -75,6 +76,7 @@
 <div class="card card-custom" style="max-width:700px">
     <div class="card-body p-4">
         <form method="POST" id="formCliente" novalidate>
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
 
             <!-- ── Bloque consulta DNI / RUC ── -->
             <div class="consulta-card">

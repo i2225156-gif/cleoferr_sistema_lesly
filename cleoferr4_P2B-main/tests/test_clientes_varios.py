@@ -17,6 +17,7 @@ from app import app
 from services.comprobantes import (UMBRAL_BOLETA_SIN_DOC,
                                     boleta_necesita_documento,
                                     emitir_comprobante_del_pago)
+from services.ofertas import SQL_IMPORTE_LINEA
 from services.pagos import confirmar_pago
 from services.pasarela.base import EstadoPago, PagoResultado
 
@@ -147,7 +148,7 @@ def test_emision_marca_clientes_varios_sin_documento(fx):
                 (d['id_pedido'],))
     fila = cur.fetchone()
     trx = fila['id_transaccion']
-    cur.execute("""SELECT SUM(cantidad * precio_unitario) AS t
+    cur.execute(f"""SELECT SUM({SQL_IMPORTE_LINEA.format(p='')}) AS t
                      FROM detalle_venta WHERE id_venta=%s""", (d['id_pedido'],))
     total = cur.fetchone()['t']
     confirmar_pago(fila['id_pago'],

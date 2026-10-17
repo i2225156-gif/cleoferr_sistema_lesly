@@ -84,7 +84,15 @@
       <tr>
         <td class="col-cant">{{ it.cantidad }}</td>
         <td>{{ it.descripcion or '-' }}</td>
-        <td class="col-num">S/ {{ '%.2f'|format(it.precio_unitario or 0) }}</td>
+        <td class="col-num">
+          {# P. Unit.: precio final pagado; base tachada solo si hubo dcto #}
+          {% if it.descuento_unitario and it.descuento_unitario > 0 %}
+          <s>S/ {{ '%.2f'|format(it.precio_unitario or 0) }}</s>
+          S/ {{ '%.2f'|format(it.precio_final or 0) }}
+          {% else %}
+          S/ {{ '%.2f'|format(it.precio_unitario or 0) }}
+          {% endif %}
+        </td>
         <td class="col-num">S/ {{ '%.2f'|format(it.importe or 0) }}</td>
       </tr>
       {% else %}
@@ -103,6 +111,12 @@
       <th>I.G.V. (18%)</th>
       <td>S/ {{ '%.2f'|format(igv) }}</td>
     </tr>
+    {% if descuento and descuento > 0 %}
+    <tr>
+      <th>Descuento</th>
+      <td>-S/ {{ '%.2f'|format(descuento) }}</td>
+    </tr>
+    {% endif %}
     <tr class="comp-total-final">
       <th>TOTAL</th>
       <td>S/ {{ '%.2f'|format(total) }}</td>

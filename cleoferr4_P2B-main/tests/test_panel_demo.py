@@ -12,6 +12,7 @@ import pytest
 import db_supabase
 import app as modulo_app
 from app import app
+from services.ofertas import SQL_IMPORTE_LINEA
 
 
 class ConnProxy:
@@ -64,7 +65,7 @@ def _pago_pendiente_sintetico(fx, monto=None):
     cur.execute("""INSERT INTO detalle_venta (id_venta, id_producto, cantidad, precio_unitario)
                    SELECT %s, id_producto, 1, precio FROM producto ORDER BY id_producto LIMIT 1""",
                 (id_venta,))
-    cur.execute("""SELECT COALESCE(SUM(cantidad*precio_unitario),0) AS t
+    cur.execute(f"""SELECT COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='')}),0) AS t
                      FROM detalle_venta WHERE id_venta=%s""", (id_venta,))
     total = cur.fetchone()['t']
     trx = f"sim_test_{_uuid.uuid4().hex[:10]}"

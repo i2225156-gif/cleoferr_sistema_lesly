@@ -5,8 +5,10 @@ import secrets
 import hmac
 import hashlib
 import json
-# AÑADIR después de: import uuid
-from urllib.parse import quote
+# A�'ADIR despuǸs de: import uuid
+from datetime import datetime
+from decimal import Decimal, InvalidOperation
+from urllib.parse import quote, urlencode
 # Intento seguro de importar dependencias externas; si faltan, mostrar instrucciones claras y salir.
 try:
     from flask import Flask, render_template, request, redirect, url_for, session, flash, abort
@@ -26,6 +28,7 @@ except Exception as e:
 
 from db import db
 from db_supabase import get_connection_auth, get_connection_tienda
+from psycopg2 import errors as _pg_errores
 from services.comprobantes import (EMISOR, UMBRAL_BOLETA_SIN_DOC,
                                     boleta_necesita_documento,
                                     ruc_valido_para_factura,
@@ -34,6 +37,9 @@ from services.comprobantes import (EMISOR, UMBRAL_BOLETA_SIN_DOC,
 from services.documentos import (NOMBRES_TIPO, normalizar_numero,
                                  tipo_documento_de_cliente, validar_documento)
 from services.inventario import devolver_stock_venta
+from services.ofertas import (SQL_IMPORTE_LINEA, SQL_PRECIO_VIGENTE,
+                              calcular_descuento_unitario, oferta_vigente,
+                              precios_vigentes)
 from services.reservas import liberar_reservas_vencidas, preview_reservas_vencidas
 from services.pagos import (cancelar_pedido_con_pago_inicial, confirmar_pago,
                             registrar_evento)
@@ -203,13 +209,19 @@ class Producto(db.Model):
 _CSRF_PROTEGIDAS = {
     'login', 'login_cliente', 'registro_cliente', 'verificar_registro',
     'recuperar_contrasena', 'restablecer_contrasena', 'cambiar_clave',
-    'carrito_confirmar_v2', 'carrito_agregar',
+    'carrito_confirmar_v2', 'carrito_agregar', 'carrito_precios',
     'registrar_pos',
     'pedido_cambiar_estado',
     'pago_simulado_procesar',
     'admin_pagos_disparar',
     'admin_reservas_liberar',
+    'admin_ofertas_nueva', 'admin_ofertas_editar',
+    'admin_ofertas_activar', 'admin_ofertas_desactivar',
     'perfil_actualizar_documento',
+    # C3d: borrados destructivos convertidos de GET a POST con CSRF
+    'eliminar_producto', 'eliminar_cliente',
+    # Commit A: alta admin de clientes (form HTML con token en cliente_form)
+    'nuevo_cliente',
 }
 
 
@@ -521,14 +533,14 @@ def exportar_pedidos_excel():
         # Consulta 1 (Tienda): ventas con total, sin joins cross-BD
         conn   = get_connection_tienda()
         cursor = conn.cursor(dictionary=True)
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT v.id_venta,
                    v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima' AS fecha,
                    v.id_cliente,
                    ev.nombre AS estado,
                    tv.nombre AS tipo_venta,
                    v.id_usuario_vendedor,
-                   COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS total
+                   COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='d.')}), 0) AS total
             FROM venta v
             LEFT JOIN estado_venta ev ON v.id_estado_venta = ev.id_estado_venta
             LEFT JOIN tipo_venta tv ON v.id_tipo_venta = tv.id_tipo_venta
@@ -787,13 +799,13 @@ def exportar_ventas_dia_excel():
     conn = get_connection_tienda(); cursor = conn.cursor(dictionary=True)
     try:
         # Consulta 1 (Tienda): ventas del día (hora Perú) sin join a cliente
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT v.id_venta,
                    v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima' AS fecha,
                    v.id_cliente,
                    ev.nombre AS estado,
                    tv.nombre AS tipo_venta,
-                   COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS total
+                   COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='d.')}), 0) AS total
             FROM venta v
             LEFT JOIN estado_venta ev ON v.id_estado_venta = ev.id_estado_venta
             LEFT JOIN tipo_venta tv ON v.id_tipo_venta = tv.id_tipo_venta
@@ -907,7 +919,8 @@ def actualizar_producto(id):
     return redirect(url_for('productos'))
 
 
-@app.route('/productos/eliminar/<int:id>')
+# C3d: borrado destructivo SOLO por POST con CSRF (antes GET sin protección).
+@app.route('/productos/eliminar/<int:id>', methods=['POST'])
 @login_required
 @admin_required
 def eliminar_producto(id):
@@ -939,13 +952,20 @@ def eliminar_producto(id):
 def catalogo_cliente():
     conn   = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
-    cursor.execute("""
-        SELECT p.*, c.nombre AS categoria, m.nombre AS marca
-        FROM producto p
-        LEFT JOIN categoria c ON p.id_categoria = c.id_categoria
-        LEFT JOIN marca m ON p.id_marca = m.id_marca
-        WHERE p.activo = TRUE
-        ORDER BY p.id_producto
+    # Precio vigente por producto (misma fuente que el checkout): el
+    # descuento de la oferta ACTIVA en curso lo calcula el servidor; la
+    # plantilla solo lo renderiza (tachado + precio final + badge).
+    cursor.execute(f"""
+        SELECT p.*, c.nombre AS categoria, m.nombre AS marca,
+               COALESCE(of.descuento_unitario, 0) AS descuento,
+               p.precio - COALESCE(of.descuento_unitario, 0) AS precio_final,
+               of.tipo AS oferta_tipo, of.valor AS oferta_valor
+          FROM producto p
+          LEFT JOIN categoria c ON p.id_categoria = c.id_categoria
+          LEFT JOIN marca m ON p.id_marca = m.id_marca
+          {SQL_PRECIO_VIGENTE.format(p="p.", a="of")}
+         WHERE p.activo = TRUE
+         ORDER BY p.id_producto
     """)
     lista = cursor.fetchall()
     conn.close()
@@ -986,18 +1006,31 @@ def nuevo_cliente():
         conn   = get_connection_auth()
         cursor = conn.cursor()
         try:
+            # El formulario envía nombre y apellidos CONCATENADOS en "nombre"
+            # (hidden nombreCompleto del cliente_form): se separan con el
+            # MISMO criterio del POS (registrar_pos): primera palabra =
+            # nombre, resto = apellido (el JS del form valida ambos).
+            partes = nombre.split()
+            nombre_db = partes[0] if partes else nombre
+            apellido_db = ' '.join(partes[1:])
+            # Sin documento: id_tipo_documento=1 (DNI) y nro_documento NULL,
+            # criterio del registro web (registro_cliente). OJO: nunca ''
+            # — la BD tiene UNIQUE (id_tipo_documento, nro_documento).
             cursor.execute(
                 # activo se fija de forma explicita: si se deja al DEFAULT de la
                 # columna (TRUE) el cliente queda "verificado" sin haberlo hecho y
                 # despues no puede registrarse por la web ("ya esta registrado").
-                "INSERT INTO cliente (nombre, email, telefono, direccion, contrasena, activo) "
-                "VALUES (%s,%s,%s,%s,%s,TRUE)",
-                (nombre, email, telefono, direccion, hash_pw)
+                "INSERT INTO cliente (nombre, apellido, email, telefono, direccion,"
+                " contrasena, activo, id_tipo_documento, nro_documento) "
+                "VALUES (%s,%s,%s,%s,%s,%s,TRUE,1,NULL)",
+                (nombre_db, apellido_db, email, telefono, direccion, hash_pw)
             )
             conn.commit()
             flash("Cliente registrado correctamente.", "success")
         except Exception as e:
             conn.rollback()
+            # El flash nunca oculta el bug: la excepción queda en el log.
+            app.logger.exception("Error al registrar cliente desde el panel admin")
             flash(f"Error al registrar cliente: {e}", "danger")
         finally:
             conn.close()
@@ -1100,7 +1133,8 @@ def editar_cliente(id):
                            tipos_doc=tipos_doc, doc_tipo_actual=doc_tipo_actual)
 
 
-@app.route('/clientes/eliminar/<int:id>')
+# C3d: borrado destructivo SOLO por POST con CSRF (antes GET sin protección).
+@app.route('/clientes/eliminar/<int:id>', methods=['POST'])
 @login_required
 @admin_required
 def eliminar_cliente(id):
@@ -1426,6 +1460,28 @@ def eliminar_proveedor(id):
     return redirect(url_for('proveedores'))
 
 
+# ── Paginación en servidor (P1..P4) ─────────────────────────────
+POR_PAGINA_ADMIN = 20   # listados admin (las páginas de cliente usarán 10)
+
+
+def _pagina_actual(total, por_pagina):
+    """?pagina= saneada: no numérica o <1 → 1; > última → última. Nunca 500."""
+    try:
+        p = int(request.args.get('pagina', 1))
+    except (TypeError, ValueError):
+        p = 1
+    ultima = max(1, -(-total // por_pagina))
+    return min(max(p, 1), ultima)
+
+
+def _filtros_sin_pagina():
+    """Query string de los filtros activos SIN 'pagina' (la macro de
+    paginación lo pega a cada enlace). Se calcula aquí en Python porque
+    en Jinja un {% set %} dentro de un {% for %} no sale del bucle."""
+    return urlencode([(k, v) for k, v in request.args.items(multi=True)
+                      if k != 'pagina'])
+
+
 # ── Pedidos ─────────────────────────────────────────────────
 @app.route('/pedidos')
 @login_required
@@ -1439,9 +1495,16 @@ def pedidos():
     """)
     lista_estados = [r['nombre'] for r in cursor.fetchall()]
     PASOS = [e for e in lista_estados if e != 'cancelado']
+    total, pagina = 0, 1
     try:
+        # P1: paginación en servidor — COUNT del conjunto COMPLETO y
+        # LIMIT/OFFSET parametrizados; ORDER BY estable con id de desempate
+        # (ventas del mismo instante no intercambian página entre recargas).
+        cursor.execute("SELECT COUNT(*) AS total FROM venta")
+        total = cursor.fetchone()['total']
+        pagina = _pagina_actual(total, POR_PAGINA_ADMIN)
         # Consulta 1 (Tienda): ventas + total, sin joins cross-BD
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT
                 v.id_venta      AS id_pedido,
                 v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima' AS fecha,
@@ -1449,16 +1512,16 @@ def pedidos():
                 ev.nombre    AS estado,
                 v.id_cliente,
                 v.id_usuario_vendedor,
-                COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS total
+                COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='d.')}), 0) AS total
             FROM venta v
             LEFT JOIN tipo_venta tv ON v.id_tipo_venta = tv.id_tipo_venta
             LEFT JOIN estado_venta ev ON v.id_estado_venta = ev.id_estado_venta
             LEFT JOIN detalle_venta d ON v.id_venta = d.id_venta
             GROUP BY v.id_venta, v.fecha, tv.nombre, ev.nombre,
                      v.id_cliente, v.id_usuario_vendedor
-            ORDER BY v.fecha DESC
-            LIMIT 200
-        """)
+            ORDER BY v.fecha DESC, v.id_venta DESC
+            LIMIT %s OFFSET %s
+        """, (POR_PAGINA_ADMIN, (pagina - 1) * POR_PAGINA_ADMIN))
         pedidos_raw = cursor.fetchall()
 
         # Consulta 2 (Auth): clientes y usuarios
@@ -1510,7 +1573,10 @@ def pedidos():
     finally:
         conn.close()
     return render_template('pedidos.html', pedidos=pedidos, estados=lista_estados,
-                           transiciones=TRANSICIONES_PEDIDO)
+                           transiciones=TRANSICIONES_PEDIDO,
+                           pagina=pagina, total=total,
+                           por_pagina=POR_PAGINA_ADMIN,
+                           filtros_qs=_filtros_sin_pagina())
 
 @app.route('/ventas/nueva', methods=['GET'])
 @login_required
@@ -1645,10 +1711,10 @@ def venta_nueva_guardar():
                 INSERT INTO pago (id_venta, id_tipo_pago, id_caja, estado)
                 VALUES (%s, (SELECT id_tipo_pago FROM tipo_pago WHERE nombre = %s), %s, 'confirmado')
             """, (id_venta, metodo_db, caja_activa['id_caja']))
-            cursor.execute("""
+            cursor.execute(f"""
                 INSERT INTO movimiento_caja (id_caja, tipo, monto, concepto, id_usuario)
                 SELECT %s, 'ingreso',
-                       COALESCE(SUM(cantidad * precio_unitario), 0), %s, %s
+                       COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='')}), 0), %s, %s
                 FROM detalle_venta WHERE id_venta = %s
             """, (caja_activa['id_caja'], f'Venta local #{id_venta}',
                   session.get('usuario_id'), id_venta))
@@ -1667,8 +1733,8 @@ def venta_nueva_guardar():
                 doc_cliente = None
             num_comp = _siguiente_numero_comprobante(cursor, tipo_comp_db)
             # Totales calculados a partir del detalle (precios con IGV 18% incluido)
-            cursor.execute("""
-                SELECT COALESCE(SUM(cantidad * precio_unitario), 0) AS total
+            cursor.execute(f"""
+                SELECT COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='')}), 0) AS total
                 FROM detalle_venta WHERE id_venta = %s
             """, (id_venta,))
             _total        = round(float(cursor.fetchone()['total'] or 0), 2)
@@ -1754,9 +1820,9 @@ def caja():
         caja_ids = ([caja_abierta['id_caja']] if caja_abierta else []) \
                  + [h['id_caja'] for h in historial]
         if caja_ids:
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT p.id_caja, tp.nombre AS metodo,
-                       COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS total
+                       COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='d.')}), 0) AS total
                 FROM pago p
                 JOIN venta v       ON v.id_venta = p.id_venta
                 JOIN tipo_venta tv ON v.id_tipo_venta = tv.id_tipo_venta
@@ -1946,8 +2012,8 @@ def caja_cerrar():
         fondo   = float(caja.get('monto_apertura') or 0)
 
         # Ventas LOCALES pagadas en EFECTIVO (el único dinero físico que entra)
-        cursor.execute("""
-            SELECT COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS total
+        cursor.execute(f"""
+            SELECT COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='d.')}), 0) AS total
             FROM pago p
             JOIN venta v       ON v.id_venta = p.id_venta
             JOIN tipo_venta tv ON v.id_tipo_venta = tv.id_tipo_venta
@@ -1969,8 +2035,8 @@ def caja_cerrar():
         diferencia = declarado - esperado
 
         # Pagos DIGITALES del turno (resumen informativo; NO afectan el efectivo)
-        cursor.execute("""
-            SELECT tp.nombre AS metodo, COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS total
+        cursor.execute(f"""
+            SELECT tp.nombre AS metodo, COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='d.')}), 0) AS total
             FROM pago p
             JOIN venta v       ON v.id_venta = p.id_venta
             JOIN tipo_venta tv ON v.id_tipo_venta = tv.id_tipo_venta
@@ -2029,12 +2095,12 @@ def pedido_detalle(id):
     comprobante = None
     try:
         # Consulta 1 (Tienda): venta + total
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT
                 v.*,
                 ev.nombre AS estado,
                 tv.nombre AS tipo_venta,
-                COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS total
+                COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='d.')}), 0) AS total
             FROM venta v
             LEFT JOIN estado_venta ev ON v.id_estado_venta = ev.id_estado_venta
             LEFT JOIN tipo_venta tv ON v.id_tipo_venta = tv.id_tipo_venta
@@ -2064,8 +2130,10 @@ def pedido_detalle(id):
                 usr = cursor_a.fetchone()
                 pedido['responsable'] = usr['nombres'] if usr else None
             conn_a.close()
-        cursor.execute("""
-            SELECT d.*, p.nombre AS producto_nombre
+        cursor.execute(f"""
+            SELECT d.*, p.nombre AS producto_nombre,
+                   (d.precio_unitario - d.descuento_unitario) AS precio_final,
+                   ROUND({SQL_IMPORTE_LINEA.format(p='d.')}, 2) AS importe
             FROM detalle_venta d
             LEFT JOIN producto p ON d.id_producto = p.id_producto
             WHERE d.id_venta = %s
@@ -2146,16 +2214,25 @@ def _datos_comprobante(id_venta):
         if not venta:
             return None
 
-        cursor.execute("""
+        # Ítems con el descuento congelado: importe NETO por línea con la
+        # fórmula única; precio_final es lo que pagó el cliente por unidad.
+        cursor.execute(f"""
             SELECT d.id_detalle, d.cantidad, d.precio_unitario,
+                   d.descuento_unitario,
+                   (d.precio_unitario - d.descuento_unitario) AS precio_final,
                    COALESCE(d.nombre_producto, p.nombre) AS descripcion,
-                   ROUND(d.cantidad * d.precio_unitario, 2) AS importe
+                   ROUND({SQL_IMPORTE_LINEA.format(p='d.')}, 2) AS importe
             FROM detalle_venta d
             LEFT JOIN producto p ON d.id_producto = p.id_producto
             WHERE d.id_venta = %s
             ORDER BY d.id_detalle
         """, (id_venta,))
         items = cursor.fetchall()
+        # Descuento total aplicado en la venta (fila informativa del
+        # comprobante: solo se muestra si es > 0)
+        total_descuento = round(sum(
+            float(i['descuento_unitario'] or 0) * int(i['cantidad'] or 1)
+            for i in items), 2)
 
         # Método de pago registrado (efectivo / tarjeta / yape_plin)
         cursor.execute("""
@@ -2228,6 +2305,7 @@ def _datos_comprobante(id_venta):
         'cliente_doc': cliente_doc, 'cliente_nombre': cliente_nombre,
         'vendedor': vendedor, 'metodo_pago': metodo_pago,
         'subtotal': subtotal, 'igv': igv, 'total': total,
+        'descuento': total_descuento,
         'total_letras': total_letras, 'serie_numero': serie_numero,
         'qr_data': qr_data, 'emisor': EMISOR,
     }
@@ -2285,8 +2363,8 @@ def mis_comprobantes():
 
 # Criterio del alcance (§6.9): solo cuentan como vendidas las ventas con pago
 # CONFIRMADO (uq_pago_venta garantiza un único pago por venta: JOIN directo).
-SQL_VENTAS_HOY_PAGADAS = """
-    SELECT COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS ventas_hoy
+SQL_VENTAS_HOY_PAGADAS = f"""
+    SELECT COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='d.')}), 0) AS ventas_hoy
     FROM venta v
     JOIN pago pg ON pg.id_venta = v.id_venta AND pg.estado = 'confirmado'
     JOIN detalle_venta d ON d.id_venta = v.id_venta
@@ -2441,6 +2519,289 @@ def alertas_resolver(id):
         conn.close()
     return redirect(url_for('alertas'))
 
+
+# ── Panel admin de ofertas (Fase 2.3) ───────────────────────────
+# Reglas: el precio final lo calcula SIEMPRE el servidor; la BD garantiza
+# una sola oferta ACTIVA por producto y rango (ex_oferta_vigencia) y un
+# precio_fijo menor al precio del producto (trigger trg_oferta_validar_precio).
+# No hay DELETE: solo activar/desactivar. Toda escritura queda en auditoria
+# con valor anterior y nuevo, y los POST validan CSRF (_CSRF_PROTEGIDAS).
+
+def _ts_lima(dt):
+    """Datetime naive (hora Lima) -> texto timestamptz con offset -05 explícito.
+
+    Perú no tiene horario de verano: el offset fijo evita depender del
+    TimeZone de la sesión de PostgreSQL al insertar la vigencia.
+    """
+    return dt.strftime('%Y-%m-%d %H:%M:00-05')
+
+
+def _validar_form_oferta():
+    """Lee y valida el form de alta/edición de una oferta.
+
+    Devuelve (datos, None) si todo cuadra o (None, mensaje) si hay error.
+    """
+    try:
+        id_producto = int(request.form.get('id_producto') or 0)
+    except ValueError:
+        return None, 'Producto inválido.'
+    tipo = (request.form.get('tipo') or '').strip()
+    try:
+        valor = Decimal((request.form.get('valor') or '').strip())
+    except InvalidOperation:
+        return None, 'El valor del descuento debe ser un número.'
+    try:
+        inicio = datetime.strptime((request.form.get('fecha_inicio') or '').strip(),
+                                   '%Y-%m-%dT%H:%M')
+        fin = datetime.strptime((request.form.get('fecha_fin') or '').strip(),
+                                '%Y-%m-%dT%H:%M')
+    except ValueError:
+        return None, 'Fechas de vigencia inválidas.'
+    if id_producto <= 0:
+        return None, 'Selecciona un producto.'
+    if tipo not in ('porcentaje', 'precio_fijo'):
+        return None, 'Tipo de descuento inválido.'
+    if valor <= 0:
+        return None, 'El valor debe ser mayor a cero.'
+    if tipo == 'porcentaje' and valor > 100:
+        return None, 'El porcentaje no puede superar 100.'
+    if fin <= inicio:
+        return None, 'La fecha fin debe ser posterior a la fecha inicio.'
+    return {'id_producto': id_producto, 'tipo': tipo, 'valor': valor,
+            'inicio': inicio, 'fin': fin}, None
+
+
+def _flash_error_oferta(e):
+    """Traduce los errores de integridad de la BD a mensajes claros."""
+    msg = str(e)
+    if isinstance(e, _pg_errores.ExclusionViolation) or 'ex_oferta_vigencia' in msg:
+        flash('Ya existe una oferta ACTIVA que solapa esas fechas para este '
+              'producto. Cambia la vigencia o desactiva la otra oferta primero.',
+              'danger')
+    elif 'oferta invalida' in msg:
+        flash('Oferta rechazada: el precio fijo debe ser MENOR al precio '
+              'actual del producto.', 'danger')
+    else:
+        app.logger.warning("Oferta rechazada por la BD: %s", e)
+        flash('No se pudo guardar la oferta. Revisa los datos e inténtalo de '
+              'nuevo.', 'danger')
+
+
+def _auditar_oferta(cursor, id_oferta, accion, anterior, nuevo):
+    """Auditoría de oferta con valor ANTERIOR y NUEVO (JSON neutro)."""
+    cursor.execute("""
+        INSERT INTO auditoria
+            (id_usuario, tabla_afectada, id_registro, accion,
+             valor_anterior, valor_nuevo)
+        VALUES (%s, 'oferta', %s, %s, %s, %s)
+    """, (session.get('usuario_id'), id_oferta, accion,
+          json.dumps(anterior, ensure_ascii=False, default=str)
+              if anterior is not None else None,
+          json.dumps(nuevo, ensure_ascii=False, default=str)
+              if nuevo is not None else None))
+
+
+def _producto_de_oferta(cursor, datos):
+    """Producto ACTIVO destino de la oferta, o None (con flash ya puesto)."""
+    cursor.execute("SELECT nombre, precio FROM producto"
+                   " WHERE id_producto = %s AND activo = TRUE",
+                   (datos['id_producto'],))
+    prod = cursor.fetchone()
+    if not prod:
+        flash('El producto ya no existe o está inactivo.', 'danger')
+    return prod
+
+
+def _precio_fijo_invalido(prod, datos):
+    """True (con flash) si el precio_fijo no es menor al precio del producto.
+
+    La BD lo vuelve a impedir con el trigger trg_oferta_validar_precio;
+    este chequeo es solo para dar un mensaje claro ANTES de fallar.
+    """
+    if datos['tipo'] == 'precio_fijo' and datos['valor'] >= prod['precio']:
+        flash(f'Oferta rechazada: el precio fijo (S/ {datos["valor"]:.2f}) debe '
+              f'ser menor al precio de "{prod["nombre"]}" '
+              f'(S/ {prod["precio"]:.2f}).', 'danger')
+        return True
+    return False
+
+
+@app.route('/admin/ofertas')
+@login_required
+@escritura_required
+def admin_ofertas():
+    """Listado de ofertas con estado: vigente / futura / vencida / inactiva."""
+    conn = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    ofertas, productos = [], []
+    try:
+        cursor.execute("""
+            SELECT o.id_oferta, o.id_producto, o.tipo, o.valor, o.activa,
+                   o.fecha_inicio AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima' AS fecha_inicio,
+                   o.fecha_fin   AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima' AS fecha_fin,
+                   p.nombre AS producto, p.precio,
+                   CASE
+                       WHEN NOT o.activa THEN 'inactiva'
+                       WHEN NOW() < o.fecha_inicio THEN 'futura'
+                       WHEN NOW() >= o.fecha_fin THEN 'vencida'
+                       ELSE 'vigente'
+                   END AS estado
+              FROM oferta o
+              JOIN producto p ON p.id_producto = o.id_producto
+             ORDER BY o.activa DESC, o.fecha_inicio DESC, o.id_oferta DESC
+        """)
+        ofertas = cursor.fetchall()
+        # El descuento lo calcula el servidor con la MISMA función del
+        # checkout (redondeo y clamp), nunca el navegador.
+        for o in ofertas:
+            o['descuento_unit'] = calcular_descuento_unitario(
+                o['precio'], o['tipo'], o['valor'])
+            o['precio_final'] = Decimal(o['precio']) - o['descuento_unit']
+        cursor.execute("SELECT id_producto, nombre, precio FROM producto"
+                       " WHERE activo = TRUE ORDER BY nombre")
+        productos = cursor.fetchall()
+    finally:
+        conn.close()
+    return render_template('admin_ofertas.html', ofertas=ofertas,
+                           productos=productos, seccion_activa='ofertas')
+
+
+@app.route('/admin/ofertas/nueva', methods=['POST'])
+@login_required
+@escritura_required
+def admin_ofertas_nueva():
+    datos, error = _validar_form_oferta()
+    if error:
+        flash(error, 'danger')
+        return redirect(url_for('admin_ofertas'))
+    conn = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        prod = _producto_de_oferta(cursor, datos)
+        if prod is None or _precio_fijo_invalido(prod, datos):
+            return redirect(url_for('admin_ofertas'))
+        cursor.execute("""
+            INSERT INTO oferta
+                (id_producto, tipo, valor, fecha_inicio, fecha_fin, activa, creado_por)
+            VALUES (%s, %s, %s, %s, %s, TRUE, %s)
+            RETURNING id_oferta
+        """, (datos['id_producto'], datos['tipo'], datos['valor'],
+              _ts_lima(datos['inicio']), _ts_lima(datos['fin']),
+              session.get('usuario_id')))
+        id_oferta = cursor.fetchone()['id_oferta']
+        _auditar_oferta(cursor, id_oferta, 'crear', None,
+                        {**datos, 'id_oferta': id_oferta})
+        conn.commit()
+        flash('Oferta creada correctamente.', 'success')
+    except Exception as e:
+        conn.rollback()
+        _flash_error_oferta(e)
+    finally:
+        conn.close()
+    return redirect(url_for('admin_ofertas'))
+
+
+@app.route('/admin/ofertas/editar/<int:id>', methods=['POST'])
+@login_required
+@escritura_required
+def admin_ofertas_editar(id):
+    datos, error = _validar_form_oferta()
+    if error:
+        flash(error, 'danger')
+        return redirect(url_for('admin_ofertas'))
+    conn = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT * FROM oferta WHERE id_oferta = %s FOR UPDATE",
+                       (id,))
+        anterior = cursor.fetchone()
+        if not anterior:
+            flash('La oferta no existe.', 'danger')
+            return redirect(url_for('admin_ofertas'))
+        prod = _producto_de_oferta(cursor, datos)
+        if prod is None or _precio_fijo_invalido(prod, datos):
+            return redirect(url_for('admin_ofertas'))
+        cursor.execute("""
+            UPDATE oferta
+               SET id_producto = %s, tipo = %s, valor = %s,
+                   fecha_inicio = %s, fecha_fin = %s
+             WHERE id_oferta = %s
+            RETURNING *
+        """, (datos['id_producto'], datos['tipo'], datos['valor'],
+              _ts_lima(datos['inicio']), _ts_lima(datos['fin']), id))
+        nuevo = cursor.fetchone()
+        _auditar_oferta(cursor, id, 'editar', dict(anterior), dict(nuevo))
+        cursor.execute("SELECT EXISTS (SELECT 1 FROM detalle_venta"
+                       " WHERE id_oferta = %s) AS usada", (id,))
+        usada = bool(cursor.fetchone()['usada'])
+        conn.commit()
+        flash('Oferta actualizada correctamente.', 'success')
+        if usada:
+            flash('Esta oferta ya se aplicó a ventas anteriores: esas ventas '
+                  'ya hechas no cambian (el descuento quedó congelado en cada '
+                  'venta).', 'info')
+    except Exception as e:
+        conn.rollback()
+        _flash_error_oferta(e)
+    finally:
+        conn.close()
+    return redirect(url_for('admin_ofertas'))
+
+
+def _toggle_oferta(id, activa):
+    conn = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT * FROM oferta WHERE id_oferta = %s FOR UPDATE",
+                       (id,))
+        anterior = cursor.fetchone()
+        if not anterior:
+            flash('La oferta no existe.', 'danger')
+            return redirect(url_for('admin_ofertas'))
+        if bool(anterior['activa']) == activa:
+            flash('La oferta ya estaba %s.'
+                  % ('activa' if activa else 'inactiva'), 'info')
+            return redirect(url_for('admin_ofertas'))
+        cursor.execute("UPDATE oferta SET activa = %s WHERE id_oferta = %s"
+                       " RETURNING *", (activa, id))
+        nuevo = cursor.fetchone()
+        _auditar_oferta(cursor, id,
+                        'activar' if activa else 'desactivar',
+                        dict(anterior), dict(nuevo))
+        usada = False
+        if not activa:
+            cursor.execute("SELECT EXISTS (SELECT 1 FROM detalle_venta"
+                           " WHERE id_oferta = %s) AS usada", (id,))
+            usada = bool(cursor.fetchone()['usada'])
+        conn.commit()
+        flash('Oferta %s correctamente.'
+              % ('activada' if activa else 'desactivada'), 'success')
+        if usada:
+            flash('Esta oferta ya se aplicó a ventas anteriores: esas ventas '
+                  'ya hechas no cambian (el descuento quedó congelado en cada '
+                  'venta).', 'info')
+    except Exception as e:
+        conn.rollback()
+        _flash_error_oferta(e)
+    finally:
+        conn.close()
+    return redirect(url_for('admin_ofertas'))
+
+
+@app.route('/admin/ofertas/activar/<int:id>', methods=['POST'])
+@login_required
+@escritura_required
+def admin_ofertas_activar(id):
+    return _toggle_oferta(id, True)
+
+
+@app.route('/admin/ofertas/desactivar/<int:id>', methods=['POST'])
+@login_required
+@escritura_required
+def admin_ofertas_desactivar(id):
+    return _toggle_oferta(id, False)
+
+
 # ── Carrito cliente ────────────────────────────────────────────
 @app.route('/carrito')
 @login_required
@@ -2458,7 +2819,9 @@ def carrito_agregar():
     Fuente única de verdad del carrito: localStorage del navegador.
     Este endpoint ya NO guarda nada en sesión; solo verifica que el
     producto exista, esté activo y con stock, y devuelve nombre/precio
-    oficiales de la BD para que el frontend corrija datos obsoletos.
+    OFICIALES de la BD — incluidos el descuento de la oferta vigente y
+    el precio final — para que el frontend corrija datos obsoletos.
+    El navegador nunca decide el precio: solo renderiza estos valores.
     """
     data        = request.get_json(silent=True) or {}
     id_producto = int(data.get('id_producto', 0))
@@ -2466,9 +2829,14 @@ def carrito_agregar():
 
     conn   = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
-    cursor.execute(
-        "SELECT nombre, precio, stock FROM producto WHERE id_producto=%s AND activo = TRUE",
-        (id_producto,))
+    cursor.execute(f"""
+        SELECT p.nombre, p.precio, p.stock,
+               COALESCE(of.descuento_unitario, 0) AS descuento,
+               p.precio - COALESCE(of.descuento_unitario, 0) AS precio_final
+          FROM producto p
+          {SQL_PRECIO_VIGENTE.format(p="p.", a="of")}
+         WHERE p.id_producto=%s AND p.activo = TRUE
+    """, (id_producto,))
     prod = cursor.fetchone()
     conn.close()
 
@@ -2485,8 +2853,43 @@ def carrito_agregar():
     return {'ok': True,
             'id_producto': id_producto,
             'nombre':  prod['nombre'],
-            'precio':  float(prod['precio']),
+            'precio':  float(prod['precio']),           # base (referencia)
+            'descuento': float(prod['descuento']),       # dcto unitario vigente
+            'precio_final': float(prod['precio_final']), # lo que se paga
             'stock':   int(prod['stock'])}
+
+
+@app.route('/carrito/precios', methods=['POST'])
+@login_required
+def carrito_precios():
+    """Precios vigentes por LOTE para refrescar el carrito al cargarlo.
+
+    Devuelve, por cada id pedido, precio base, descuento de la oferta
+    vigente y precio final — la MISMA fuente (SQL_PRECIO_VIGENTE) que
+    usa el checkout. Solo lectura: el navegador renderiza estos valores,
+    jamás los decide; el total oficial lo recalcula el servidor al
+    confirmar el pedido.
+    """
+    data = request.get_json(silent=True) or {}
+    try:
+        ids = [int(i) for i in (data.get('ids') or [])]
+    except (TypeError, ValueError):
+        return {'ok': False, 'error': 'ids inválidos'}, 400
+    if len(ids) > 100:
+        return {'ok': False,
+                'error': 'Demasiados productos en el carrito: el máximo por '
+                         'lote es 100.'}, 400
+    conn = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        lote = precios_vigentes(cursor, ids)
+    finally:
+        conn.close()
+    precios = {idp: {'precio': float(f['precio']),
+                     'descuento': float(f['descuento_unitario'] or 0),
+                     'precio_final': float(f['precio_final'])}
+               for idp, f in lote.items()}
+    return {'ok': True, 'precios': precios}
 
 
 # ── Cambiar clave ─────────────────────────────────────────────
@@ -3023,11 +3426,11 @@ def mis_pedidos():
         fases_orden = [r['nombre'] for r in cursor.fetchall()]
         fases_orden = [f for f in fases_orden if f != 'cancelado']
         PASOS = fases_orden
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT v.id_venta,
                    v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima' AS fecha,
                    ev.nombre AS estado,
-                   COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS total
+                   COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='d.')}), 0) AS total
             FROM venta v
             LEFT JOIN estado_venta ev ON v.id_estado_venta = ev.id_estado_venta
             LEFT JOIN detalle_venta d ON v.id_venta = d.id_venta
@@ -3041,8 +3444,11 @@ def mis_pedidos():
             estado = ped.get('estado') or 'pendiente'
             ped['idx_actual'] = PASOS.index(estado) if estado in PASOS else 0
             try:
-                cursor.execute("""
-                    SELECT d.cantidad, d.precio_unitario, p.nombre AS producto_nombre
+                cursor.execute(f"""
+                    SELECT d.cantidad, d.precio_unitario, d.descuento_unitario,
+                           (d.precio_unitario - d.descuento_unitario) AS precio_final,
+                           ROUND({SQL_IMPORTE_LINEA.format(p='d.')}, 2) AS importe,
+                           p.nombre AS producto_nombre
                     FROM detalle_venta d
                     LEFT JOIN producto p ON d.id_producto = p.id_producto
                     WHERE d.id_venta = %s
@@ -3308,13 +3714,18 @@ def carrito_confirmar_v2():
     # Validar el carrito contra la BD: existencia, estado activo, stock y
     # precio oficial. El carrito vive en localStorage (fuente única de verdad
     # en el frontend) y puede traer IDs/precios obsoletos; aquí se corrige.
+    # El descuento estimado (oferta vigente) sale del mismo SELECT; el
+    # AUTORITATIVO se relee dentro de la TXN que congela el detalle.
     conn_val   = get_connection_tienda()
     cursor_val = conn_val.cursor(dictionary=True)
     ids_items  = {int(it.get('id_producto') or it.get('id') or 0) for it in items}
-    cursor_val.execute(
-        "SELECT id_producto, nombre, precio, stock FROM producto "
-        "WHERE id_producto = ANY(%s) AND activo = TRUE",
-        (list(ids_items),))
+    cursor_val.execute(f"""
+        SELECT p.id_producto, p.nombre, p.precio, p.stock,
+               COALESCE(of.descuento_unitario, 0) AS descuento
+          FROM producto p
+          {SQL_PRECIO_VIGENTE.format(p="p.", a="of")}
+         WHERE p.id_producto = ANY(%s) AND p.activo = TRUE
+    """, (list(ids_items),))
     prod_db = {r['id_producto']: r for r in cursor_val.fetchall()}
     conn_val.close()
 
@@ -3340,11 +3751,14 @@ def carrito_confirmar_v2():
             excluidos.append({'id_producto': pid, 'nombre': prod['nombre'],
                               'motivo': f'Stock insuficiente (quedan {stock_db})'})
             continue
-        # Precio y nombre oficiales de la BD (ignora los enviados por el cliente)
+        # Precio y nombre oficiales de la BD (ignora los enviados por el
+        # cliente); el descuento estimado sirve para el umbral de boleta,
+        # el definitivo se congela en la TXN del INSERT.
         items_ok.append({'id_producto': pid,
                          'nombre':      prod['nombre'],
                          'cantidad':    cantidad,
-                         'precio':      float(prod['precio'])})
+                         'precio':      float(prod['precio']),
+                         'descuento':   float(prod['descuento'] or 0)})
 
     if not items_ok:
         return {'ok': False,
@@ -3359,8 +3773,10 @@ def carrito_confirmar_v2():
     cursor_check = conn_check.cursor(dictionary=True)
     try:
         # Buscar pedidos pendientes del mismo cliente en los últimos 5 minutos
-        cursor_check.execute("""
-            SELECT v.id_venta, v.fecha, COALESCE(SUM(d.cantidad * d.precio_unitario), 0) as total
+        # (total con la fórmula única: descuento congelado incluido)
+        cursor_check.execute(f"""
+            SELECT v.id_venta, v.fecha,
+                   COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='d.')}), 0) as total
             FROM venta v
             JOIN detalle_venta d ON v.id_venta = d.id_venta
             WHERE v.id_cliente = %s AND v.id_estado_venta = (SELECT id_estado_venta FROM estado_venta WHERE nombre = 'pendiente')
@@ -3425,7 +3841,10 @@ def carrito_confirmar_v2():
     # rechaza; debajo del umbral se emite a "CLIENTES VARIOS" sin exigir DNI.
     dni = (data.get('dni') or '').strip() or None
     if tipo_comp_db == 'boleta':
-        total_estimado = sum(it['cantidad'] * it['precio'] for it in items_ok)
+        # El umbral de la boleta se evalúa sobre el monto a pagar (con el
+        # descuento vigente estimado por el servidor).
+        total_estimado = sum(it['cantidad'] * (it['precio'] - it['descuento'])
+                             for it in items_ok)
         if boleta_necesita_documento(total_estimado, dni):
             return {'ok': False,
                     'error': f'Para compras sobre S/ {UMBRAL_BOLETA_SIN_DOC:.0f} necesitas '
@@ -3460,11 +3879,23 @@ def carrito_confirmar_v2():
         for it in items_ok:
             id_producto = it['id_producto']
             cantidad    = it['cantidad']
-            precio_unit = it['precio']  # precio oficial de la BD, no del cliente
+            # Precio y oferta AUTORITATIVOS releídos dentro de la TXN: el
+            # descuento (id_oferta + descuento_unitario) se CONGELA aquí
+            # y no cambia aunque la oferta venza o se edite después.
+            fila_of = oferta_vigente(cursor, id_producto)
+            if fila_of is None:
+                # El producto desapareció entre la validación y la TXN
+                raise ValueError(f"Producto #{id_producto} ya no está disponible.")
+            precio_unit = fila_of['precio']        # precio base oficial
+            id_oferta   = fila_of['id_oferta']     # None si no hay oferta
+            desc_unit   = fila_of['descuento_unitario']
             cursor.execute("""
-                INSERT INTO detalle_venta (id_venta, id_producto, cantidad, precio_unitario)
-                VALUES (%s, %s, %s, %s)
-            """, (id_venta, id_producto, cantidad, precio_unit))
+                INSERT INTO detalle_venta
+                    (id_venta, id_producto, cantidad, precio_unitario,
+                     id_oferta, descuento_unitario)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (id_venta, id_producto, cantidad, precio_unit,
+                  id_oferta, desc_unit))
             cursor.execute("""
                 UPDATE producto SET stock = GREATEST(stock - %s, 0) WHERE id_producto = %s
                 RETURNING stock
@@ -3479,9 +3910,10 @@ def carrito_confirmar_v2():
                   f'Venta online #{id_venta} (cliente #{session["usuario_id"]})',
                   nuevo_stock))
 
-        # Total oficial de la venta, recalculado dentro de la misma TXN.
-        cursor.execute("""
-            SELECT COALESCE(SUM(cantidad * precio_unitario), 0) AS total
+        # Total oficial de la venta, recalculado dentro de la misma TXN con
+        # la fórmula única (descuento congelado incluido).
+        cursor.execute(f"""
+            SELECT COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='')}), 0) AS total
               FROM detalle_venta WHERE id_venta = %s
         """, (id_venta,))
         total = cursor.fetchone()[0]
@@ -3587,8 +4019,9 @@ def pago_simulado(id_transaccion):
         pago = _pago_por_transaccion(cursor, id_transaccion)
         total = None
         if pago:
-            cursor.execute("""
-                SELECT COALESCE(SUM(cantidad * precio_unitario), 0) AS total
+            # Total a pagar con la fórmula única (descuento congelado)
+            cursor.execute(f"""
+                SELECT COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='')}), 0) AS total
                   FROM detalle_venta WHERE id_venta = %s
             """, (pago['id_venta'],))
             total = cursor.fetchone()['total']
@@ -3631,9 +4064,10 @@ def pago_simulado_procesar(id_transaccion):
             return {'ok': True, 'estado': 'ya_procesado',
                     'mensaje': f"El pago ya está {pago['estado']}."}, 200
 
-        # Monto del servidor, recalculado de detalle_venta (nunca del navegador)
-        cursor.execute("""
-            SELECT COALESCE(SUM(cantidad * precio_unitario), 0) AS total
+        # Monto del servidor, recalculado de detalle_venta (nunca del
+        # navegador) con la fórmula única (descuento congelado)
+        cursor.execute(f"""
+            SELECT COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='')}), 0) AS total
               FROM detalle_venta WHERE id_venta = %s
         """, (pago['id_venta'],))
         total = cursor.fetchone()['total']
@@ -3852,8 +4286,9 @@ def admin_pagos_disparar():
         if not pago:
             flash('El pago no existe o ya no está pendiente.', 'warning')
             return redirect(url_for('admin_pagos_simulados'))
-        cursor.execute("""
-            SELECT COALESCE(SUM(cantidad * precio_unitario), 0) AS total
+        # Total con la fórmula única para firmar el evento del gatillo demo
+        cursor.execute(f"""
+            SELECT COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='')}), 0) AS total
               FROM detalle_venta WHERE id_venta = %s
         """, (pago['id_venta'],))
         total = cursor.fetchone()['total']
@@ -4025,8 +4460,8 @@ def admin_dashboard():
     cursor = conn.cursor(dictionary=True)
     try:
         kpis = {}
-        cursor.execute("""
-            SELECT COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS ventas_hoy
+        cursor.execute(f"""
+            SELECT COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='d.')}), 0) AS ventas_hoy
               FROM venta v
               JOIN pago pg ON pg.id_venta = v.id_venta AND pg.estado = 'confirmado'
               JOIN detalle_venta d ON d.id_venta = v.id_venta
@@ -4059,9 +4494,9 @@ def admin_dashboard():
         """)
         kpis['stock_bajo'] = int(cursor.fetchone()['stock_bajo'])
 
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT COALESCE(
-                       SUM(d.cantidad * d.precio_unitario) / NULLIF(COUNT(DISTINCT v.id_venta), 0),
+                       SUM({SQL_IMPORTE_LINEA.format(p='d.')}) / NULLIF(COUNT(DISTINCT v.id_venta), 0),
                        0) AS ticket_promedio
               FROM venta v
               JOIN pago pg ON pg.id_venta = v.id_venta AND pg.estado = 'confirmado'
@@ -4080,7 +4515,7 @@ def admin_dashboard():
         kpis['comprobantes_emitidos'] = int(fila_comp['emitidos'])
         kpis['comprobantes_pendientes'] = int(fila_comp['pendientes'])
 
-        cursor.execute("""
+        cursor.execute(f"""
             WITH dias AS (
                 SELECT (d::date) AS dia
                   FROM generate_series(
@@ -4091,7 +4526,7 @@ def admin_dashboard():
             ),
             ventas_dia AS (
                 SELECT DATE(v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima') AS dia,
-                       COALESCE(SUM(det.cantidad * det.precio_unitario), 0) AS total
+                       COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='det.')}), 0) AS total
                   FROM venta v
                   JOIN pago pg ON pg.id_venta = v.id_venta AND pg.estado = 'confirmado'
                   JOIN detalle_venta det ON det.id_venta = v.id_venta
