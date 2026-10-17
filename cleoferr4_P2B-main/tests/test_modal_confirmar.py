@@ -259,8 +259,30 @@ def test_admin_ofertas_render_con_componente(fx_tienda):
 
 def test_alertas_resuelve_directo_con_toast(fx_tienda):
     # Confirm eliminado (decisión aprobada): resuelve directo y el
-    # resultado se informa con el toast propio (absorbido en C3e).
+    # resultado se informa con el toast del componente (absorbido en C3e).
     html = fx_tienda['admin'].get('/alertas').get_data(as_text=True)
     assert 'resolverAlertaAjax' in html
     assert '¿Marcar esta alerta como resuelta?' not in html
-    assert 'showToast(' in html
+    assert 'avisoAccion(' in html
+
+
+# ── C3e: toasts propios absorbidos por avisoAccion del componente ──
+
+def test_alertas_usa_avisoaccion(fx_tienda):
+    # El toast propio (showToast) desaparece; queda el del componente.
+    # El GET /alertas escribe la sincronización: proxy con rollback.
+    html = fx_tienda['admin'].get('/alertas').get_data(as_text=True)
+    assert 'function showToast' not in html
+    assert 'avisoAccion({' in html
+    assert 'resolverAlertaAjax' in html          # script de la página vivo
+    assert "avisoAccion({ mensaje: 'Alerta marcada como resuelta.', tipo: 'ok' })" in html
+
+
+def test_pedidos_usa_avisoaccion():
+    c = _sesion_admin()
+    html = c.get('/pedidos').get_data(as_text=True)
+    assert 'function mostrarToast' not in html   # toast propio eliminado
+    assert 'avisoAccion({' in html                # absorbido por el componente
+    assert 'form-select-estado' in html          # el script de estados sigue vivo
+    assert 'X-CSRFToken' in html                  # conserva el CSRF en cabecera
+    assert "avisoAccion({ mensaje: 'Tu sesión expiró" in html

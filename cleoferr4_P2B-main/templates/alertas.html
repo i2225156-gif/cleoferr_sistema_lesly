@@ -116,7 +116,8 @@
 
 <script>
 // Resolución directa, sin confirmación previa (decisión del propietario):
-// acción de baja gravedad; el resultado se informa con el toast de abajo.
+// acción de baja gravedad; el resultado se informa con el toast global
+// del componente (avisoAccion, C3e).
 async function resolverAlertaAjax(id) {
     try {
         const resp = await fetch(`/alertas/resolver/${id}`, {
@@ -137,30 +138,13 @@ async function resolverAlertaAjax(id) {
                     contador.textContent = actual - 1;
                 }
             }
-            showToast('Alerta marcada como resuelta.', 'success');
+            avisoAccion({ mensaje: 'Alerta marcada como resuelta.', tipo: 'ok' });
         } else {
-            showToast(data.error || 'Error al resolver la alerta.', 'danger');
+            avisoAccion({ mensaje: data.error || 'Error al resolver la alerta.', tipo: 'error' });
         }
     } catch (err) {
-        showToast('Error de conexión al resolver la alerta.', 'danger');
+        avisoAccion({ mensaje: 'Error de conexión al resolver la alerta.', tipo: 'error' });
     }
-}
-
-// Toast simple
-function showToast(msg, tipo = 'info') {
-    const toast = document.createElement('div');
-    toast.className = `toast align-items-center text-white bg-${tipo} border-0`;
-    toast.role = 'alert';
-    toast.ariaLive = 'polite';
-    toast.innerHTML = `
-        <div class="d-flex">
-            <div class="toast-body">${msg}</div>
-            <button type="button" class="btn-close btn-close-white me-2 m-2" data-bs-dismiss="toast"></button>
-        </div>
-    `;
-    document.body.appendChild(toast);
-    const bsToast = new bootstrap.Toast(toast);
-    bsToast.show();
 }
 </script>
 {% endblock %}
