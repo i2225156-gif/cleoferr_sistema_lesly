@@ -45,7 +45,8 @@ def test_ventas_hoy_cuenta_solo_pagos_confirmados():
             SELECT COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='d.')}), 0)
             FROM venta v
             JOIN detalle_venta d ON d.id_venta = v.id_venta
-            WHERE DATE(v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima') = CURRENT_DATE
+            WHERE (v.fecha AT TIME ZONE 'America/Lima')::date
+                      = (NOW() AT TIME ZONE 'America/Lima')::date
               AND EXISTS (SELECT 1 FROM pago p
                           WHERE p.id_venta = v.id_venta AND p.estado = 'confirmado')
         """)).scalar() or 0)
@@ -53,7 +54,8 @@ def test_ventas_hoy_cuenta_solo_pagos_confirmados():
             SELECT COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='d.')}), 0)
             FROM venta v
             JOIN detalle_venta d ON d.id_venta = v.id_venta
-            WHERE DATE(v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima') = CURRENT_DATE
+            WHERE (v.fecha AT TIME ZONE 'America/Lima')::date
+                      = (NOW() AT TIME ZONE 'America/Lima')::date
         """)).scalar() or 0)
     assert pagadas == esperado            # criterio correcto (validado con EXISTS)
     assert pagadas <= todas               # nunca supera el total sin filtro

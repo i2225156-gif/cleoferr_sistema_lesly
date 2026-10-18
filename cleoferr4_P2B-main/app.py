@@ -2368,7 +2368,7 @@ SQL_VENTAS_HOY_PAGADAS = f"""
     FROM venta v
     JOIN pago pg ON pg.id_venta = v.id_venta AND pg.estado = 'confirmado'
     JOIN detalle_venta d ON d.id_venta = v.id_venta
-    WHERE DATE(v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima') = CURRENT_DATE
+    WHERE (v.fecha AT TIME ZONE 'America/Lima')::date = (NOW() AT TIME ZONE 'America/Lima')::date
 """
 
 # Sintaxis PostgreSQL: DATE_SUB es MySQL y fallaba aquí, dejando la sección

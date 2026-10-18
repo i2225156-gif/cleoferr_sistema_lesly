@@ -7,6 +7,7 @@ lo mostrado/cobrado es el NETO. No toca SQL_MOVIMIENTOS_30DIAS (valora
 inventario, no ventas).
 """
 import uuid as _uuid
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import psycopg2
@@ -103,7 +104,8 @@ def _total_neto_hoy(fx):
           FROM venta v
           JOIN pago pg ON pg.id_venta = v.id_venta AND pg.estado = 'confirmado'
           JOIN detalle_venta d ON d.id_venta = v.id_venta
-         WHERE DATE(v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima') = CURRENT_DATE
+         WHERE (v.fecha AT TIME ZONE 'America/Lima')::date
+                   = (NOW() AT TIME ZONE 'America/Lima')::date
     """)
     return float(fx['cur'].fetchone()['total'] or 0)
 
@@ -242,10 +244,86 @@ def test_kpi_ventas_hoy_reportes_con_neto(fx):
           FROM venta v
           JOIN pago pg ON pg.id_venta = v.id_venta AND pg.estado = 'confirmado'
           JOIN detalle_venta d ON d.id_venta = v.id_venta
-         WHERE DATE(v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima') = CURRENT_DATE
+         WHERE (v.fecha AT TIME ZONE 'America/Lima')::date
+                   = (NOW() AT TIME ZONE 'America/Lima')::date
     """)
     dcto_hoy = float(fx['cur'].fetchone()['dcto'] or 0)
     assert dcto_hoy >= 4.50           # el dcto de mi venta (más el real si hay)
+
+
+def test_kpi_ventas_hoy_determinista_21h_y_23h59(fx):
+    """El 'hoy' del KPI es el día Lima a cualquier hora de ejecución.
+
+    El filtro legado DATE(v.fecha AT TIME ZONE 'UTC' AT TIME ZONE
+    'America/Lima') = CURRENT_DATE resolvía la fecha UTC sobre un
+    timestamptz y entre las 19:00 y 24:00 Lima excluía las ventas de
+    esa tarde-noche (rodaban al día siguiente). Aquí las fechas se
+    fijan: una venta a las 21:00 Lima de HOY cuenta y otra a las 23:59
+    Lima de AYER no, corra el test a la hora que corra.
+    """
+    lima = timezone(timedelta(hours=-5))
+    cur = fx['cur']
+    cur.execute("SELECT (NOW() AT TIME ZONE 'America/Lima')::date AS hoy")
+    hoy = cur.fetchone()['hoy']
+    ayer = hoy - timedelta(days=1)
+    # La venta del fixture pasa a estar HOY a las 21:00 Lima
+    cur.execute("UPDATE venta SET fecha = %s WHERE id_venta = %s",
+                (datetime(hoy.year, hoy.month, hoy.day, 21, 0, tzinfo=lima),
+                 fx['id_venta']))
+    # Segunda venta pagada AYER a las 23:59 Lima (neto 8.49): jamás hoy
+    cur.execute("""
+        INSERT INTO venta (id_tipo_venta, id_cliente, id_estado_venta,
+                           num_operacion, fecha)
+        VALUES ((SELECT id_tipo_venta FROM tipo_venta WHERE nombre='online'), 11,
+                (SELECT id_estado_venta FROM estado_venta WHERE nombre='confirmado'),
+                %s, %s)
+        RETURNING id_venta
+    """, (f"test23r-{_uuid.uuid4().hex[:12]}",
+          datetime(ayer.year, ayer.month, ayer.day, 23, 59, tzinfo=lima)))
+    id_ayer = cur.fetchone()['id_venta']
+    cur.execute("""
+        INSERT INTO detalle_venta
+            (id_venta, id_producto, cantidad, precio_unitario,
+             id_oferta, descuento_unitario)
+        VALUES (%s, %s, 1, 9.99,
+                (SELECT id_oferta FROM oferta WHERE id_producto = %s), 1.50)
+    """, (id_ayer, fx['id_producto'], fx['id_producto']))
+    cur.execute("""
+        INSERT INTO pago (id_venta, id_tipo_pago, id_caja, estado, monto,
+                          id_transaccion, pasarela)
+        VALUES (%s, (SELECT id_tipo_pago FROM tipo_pago WHERE nombre='efectivo'),
+                NULL, 'confirmado', 8.49, %s, 'simulada')
+    """, (id_ayer, f"sim_test_{_uuid.uuid4().hex[:8]}"))
+
+    # Con el WHERE corregido, la de HOY 21:00 Lima cuenta íntegra...
+    cur.execute(f"""
+        SELECT COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='d.')}), 0) AS total
+          FROM venta v
+          JOIN pago pg ON pg.id_venta = v.id_venta AND pg.estado = 'confirmado'
+          JOIN detalle_venta d ON d.id_venta = v.id_venta
+         WHERE (v.fecha AT TIME ZONE 'America/Lima')::date
+                   = (NOW() AT TIME ZONE 'America/Lima')::date
+           AND v.id_venta = %s
+    """, (fx['id_venta'],))
+    assert Decimal(str(cur.fetchone()['total'])) == Decimal('25.47')
+    # ...y la de AYER 23:59 Lima queda fuera
+    cur.execute(f"""
+        SELECT COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='d.')}), 0) AS total
+          FROM venta v
+          JOIN pago pg ON pg.id_venta = v.id_venta AND pg.estado = 'confirmado'
+          JOIN detalle_venta d ON d.id_venta = v.id_venta
+         WHERE (v.fecha AT TIME ZONE 'America/Lima')::date
+                   = (NOW() AT TIME ZONE 'America/Lima')::date
+           AND v.id_venta = %s
+    """, (id_ayer,))
+    assert Decimal(str(cur.fetchone()['total'])) == 0
+    # Extremo a extremo: /reportes renderiza el neto de hoy exacto y
+    # el de ayer no se cuela
+    esperado = _total_neto_hoy(fx)
+    assert esperado >= 25.47
+    html = fx['vendedor'].get('/reportes').get_data(as_text=True)
+    assert f'{esperado:.2f}' in html
+    assert f'{esperado + 8.49:.2f}' not in html
 
 
 def test_kpi_ventas_hoy_dashboard_con_neto(fx):
