@@ -426,22 +426,26 @@ def productos():
     conn      = get_connection_tienda()
     cursor    = conn.cursor(dictionary=True)
 
-    query = """
-        SELECT p.*, c.nombre AS categoria, m.nombre AS marca
-        FROM producto p
-        LEFT JOIN categoria c ON p.id_categoria = c.id_categoria
-        LEFT JOIN marca m ON p.id_marca = m.id_marca
-        WHERE 1=1
-    """
+    # P2: filtros por nombre de categoría/marca sobre el conjunto completo
+    filtros_sql = ""
     params = []
     if categoria:
-        query += " AND c.nombre = %s"
+        filtros_sql += " AND c.nombre = %s"
         params.append(categoria)
     if marca:
-        query += " AND m.nombre = %s"
+        filtros_sql += " AND m.nombre = %s"
         params.append(marca)
-    query += " ORDER BY p.id_producto"
-    cursor.execute(query, params)
+    from_sql = (" FROM producto p"
+                " LEFT JOIN categoria c ON p.id_categoria = c.id_categoria"
+                " LEFT JOIN marca m ON p.id_marca = m.id_marca"
+                " WHERE 1=1" + filtros_sql)
+    # COUNT del conjunto FILTRADO completo (no de la página)
+    cursor.execute("SELECT COUNT(*) AS total" + from_sql, params)
+    total = cursor.fetchone()['total']
+    pagina = _pagina_actual(total, POR_PAGINA_ADMIN)
+    cursor.execute("SELECT p.*, c.nombre AS categoria, m.nombre AS marca"
+                   + from_sql + " ORDER BY p.id_producto LIMIT %s OFFSET %s",
+                   params + [POR_PAGINA_ADMIN, (pagina - 1) * POR_PAGINA_ADMIN])
     lista = cursor.fetchall()
 
     cursor.execute("SELECT * FROM categoria")
@@ -485,7 +489,9 @@ def productos():
 
     return render_template('productos.html', productos=lista, categorias=categorias, marcas=marcas,
                            pedidos_count=pedidos_count, alertas_count=alertas_count,
-                           reportes_count=movimientos_count, bajo_stock=bajo_stock)
+                           reportes_count=movimientos_count, bajo_stock=bajo_stock,
+                           pagina=pagina, total=total, por_pagina=POR_PAGINA_ADMIN,
+                           filtros_qs=_filtros_sin_pagina())
 
 
 @app.route('/productos/detalle/<int:id>')
@@ -986,10 +992,17 @@ def clientes():
         ORDER BY ordinal_position
     """)
     columnas = [c['column_name'] for c in cursor.fetchall()]
-    cursor.execute("SELECT * FROM cliente ORDER BY id_cliente DESC")
+    # P2: COUNT del conjunto completo + página (ORDER BY id DESC estable)
+    cursor.execute("SELECT COUNT(*) AS total FROM cliente")
+    total = cursor.fetchone()['total']
+    pagina = _pagina_actual(total, POR_PAGINA_ADMIN)
+    cursor.execute("SELECT * FROM cliente ORDER BY id_cliente DESC LIMIT %s OFFSET %s",
+                   (POR_PAGINA_ADMIN, (pagina - 1) * POR_PAGINA_ADMIN))
     lista = cursor.fetchall()
     conn.close()
-    return render_template('clientes.html', clientes=lista, columnas=columnas)
+    return render_template('clientes.html', clientes=lista, columnas=columnas,
+                           pagina=pagina, total=total, por_pagina=POR_PAGINA_ADMIN,
+                           filtros_qs=_filtros_sin_pagina())
 
 
 @app.route('/clientes/nuevo', methods=['GET', 'POST'])
@@ -1260,14 +1273,19 @@ def inventario():
     # Consulta 1 (Tienda): movimientos + producto + proveedor
     conn   = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
+    # P2: COUNT del conjunto completo + página (ORDER BY estable con id
+    # de desempate; el historial ya no se recorta a 200 fijos)
+    cursor.execute("SELECT COUNT(*) AS total FROM inventario_movimiento")
+    total = cursor.fetchone()['total']
+    pagina = _pagina_actual(total, POR_PAGINA_ADMIN)
     cursor.execute("""
         SELECT i.*, p.nombre AS producto_nombre, pr.nombre AS proveedor_nombre
         FROM inventario_movimiento i
         LEFT JOIN producto p ON i.id_producto = p.id_producto
         LEFT JOIN proveedor pr ON i.id_proveedor = pr.id_proveedor
-        ORDER BY i.fecha DESC
-        LIMIT 200
-    """)
+        ORDER BY i.fecha DESC, i.id_movimiento DESC
+        LIMIT %s OFFSET %s
+    """, (POR_PAGINA_ADMIN, (pagina - 1) * POR_PAGINA_ADMIN))
     movimientos = cursor.fetchall()
 
     cursor.execute("SELECT * FROM producto WHERE activo = TRUE ORDER BY nombre")
@@ -1298,7 +1316,10 @@ def inventario():
                            movimientos=movimientos,
                            productos=productos,
                            proveedores=proveedores,
-                           vendedores=vendedores)
+                           vendedores=vendedores,
+                           pagina=pagina, total=total,
+                           por_pagina=POR_PAGINA_ADMIN,
+                           filtros_qs=_filtros_sin_pagina())
 
 
 @app.route('/inventario/registrar', methods=['POST'])
@@ -1378,10 +1399,18 @@ def registrar_movimiento():
 def proveedores():
     conn   = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
-    cursor.execute("SELECT * FROM proveedor ORDER BY nombre")
+    # P2: COUNT del conjunto completo + página (ORDER BY nombre, id)
+    cursor.execute("SELECT COUNT(*) AS total FROM proveedor")
+    total = cursor.fetchone()['total']
+    pagina = _pagina_actual(total, POR_PAGINA_ADMIN)
+    cursor.execute("SELECT * FROM proveedor ORDER BY nombre, id_proveedor"
+                   " LIMIT %s OFFSET %s",
+                   (POR_PAGINA_ADMIN, (pagina - 1) * POR_PAGINA_ADMIN))
     lista = cursor.fetchall()
     conn.close()
-    return render_template('proveedores.html', proveedores=lista)
+    return render_template('proveedores.html', proveedores=lista,
+                           pagina=pagina, total=total, por_pagina=POR_PAGINA_ADMIN,
+                           filtros_qs=_filtros_sin_pagina())
 
 
 @app.route('/proveedores/nuevo', methods=['GET', 'POST'])

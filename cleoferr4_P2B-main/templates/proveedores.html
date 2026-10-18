@@ -1,4 +1,5 @@
 {% extends 'admin_base.html' %}
+{% from 'components/paginacion.html' import paginacion %}
 {% set seccion_activa = 'proveedores' %}
 {% block titulito %}Proveedores – Cleoferr{% endblock %}
 {% block admin_contenido %}
@@ -6,7 +7,7 @@
 <div class="page-header">
     <div>
         <h2><i class="fa fa-truck me-2"></i>PROVEEDORES</h2>
-        <p>Gestión de proveedores: añadir, editar, eliminar y consultar datos de contacto. Total: {{ proveedores|length }}</p>
+        <p>Gestión de proveedores: añadir, editar, eliminar y consultar datos de contacto. Total: {{ total }}</p>
     </div>
     <div class="d-flex gap-2">
         <a href="/proveedores/nuevo" class="btn btn-naranja">
@@ -61,4 +62,7 @@
     </div>
     {% endfor %}
 </div>
+
+{{ paginacion(pagina, total, por_pagina, filtros_qs) }}
+
 {% endblock %}

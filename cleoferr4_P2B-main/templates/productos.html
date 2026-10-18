@@ -1,4 +1,5 @@
 {% extends 'admin_base.html' %}
+{% from 'components/paginacion.html' import paginacion %}
 {% set seccion_activa = 'productos' %}
 {% block titulito %}Productos – Cleoferr{% endblock %}
 {% block admin_contenido %}
@@ -247,10 +248,12 @@
                         </td>
                     </tr>
                     {% endfor %}
-                </tbody>
-            </table>
-        </div>
-    </div>
-</div>
+                 </tbody>
+             </table>
+         </div>
+     </div>
+ </div>
+
+{{ paginacion(pagina, total, por_pagina, filtros_qs) }}
 
 {% endblock %}

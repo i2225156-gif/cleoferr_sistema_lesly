@@ -1,4 +1,5 @@
 {% extends 'admin_base.html' %}
+{% from 'components/paginacion.html' import paginacion %}
 {% set seccion_activa = 'clientes' %}
 {% block titulito %}Clientes – Cleoferr{% endblock %}
 {% block admin_contenido %}
@@ -6,7 +7,7 @@
 <div class="page-header">
     <div>
         <h2><i class="fa fa-users me-2"></i>REGISTRO DE USUARIO</h2>
-        <p>Lista de usuarios del sistema (administradores, vendedores). Búsquedas rápidas y filtros por tipo/DNI/estado. Total: {{ clientes|length }}</p>
+        <p>Lista de usuarios del sistema (administradores, vendedores). Búsquedas rápidas y filtros por tipo/DNI/estado. Total: {{ total }}</p>
     </div>
     <div class="d-flex gap-2">
         <a href="/clientes/nuevo" class="btn btn-naranja">
@@ -84,4 +85,7 @@
         </div>
     </div>
 </div>
+
+{{ paginacion(pagina, total, por_pagina, filtros_qs) }}
+
 {% endblock %}
