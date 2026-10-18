@@ -36,6 +36,7 @@ from services.comprobantes import (EMISOR, UMBRAL_BOLETA_SIN_DOC,
                                     texto_qr)
 from services.documentos import (NOMBRES_TIPO, normalizar_numero,
                                  tipo_documento_de_cliente, validar_documento)
+from services.horario import SQL_DIA_LIMA, SQL_HOY_LIMA
 from services.inventario import devolver_stock_venta
 from services.ofertas import (SQL_IMPORTE_LINEA, SQL_PRECIO_VIGENTE,
                               calcular_descuento_unitario, oferta_vigente,
@@ -4465,7 +4466,7 @@ def admin_dashboard():
               FROM venta v
               JOIN pago pg ON pg.id_venta = v.id_venta AND pg.estado = 'confirmado'
               JOIN detalle_venta d ON d.id_venta = v.id_venta
-             WHERE DATE(v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima') = CURRENT_DATE
+             WHERE {SQL_DIA_LIMA.format(p='v.', col='fecha')} = {SQL_HOY_LIMA}
         """)
         kpis['ventas_hoy'] = float(cursor.fetchone()['ventas_hoy'] or 0)
 
@@ -4505,11 +4506,11 @@ def admin_dashboard():
         """)
         kpis['ticket_promedio'] = round(float(cursor.fetchone()['ticket_promedio'] or 0), 2)
 
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT COUNT(*) FILTER (WHERE estado_sunat = 'enviado') AS emitidos,
                    COUNT(*) FILTER (WHERE estado_sunat = 'pendiente') AS pendientes
               FROM comprobante
-             WHERE DATE(fecha_emision AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima') = CURRENT_DATE
+             WHERE {SQL_DIA_LIMA.format(p='', col='fecha_emision')} = {SQL_HOY_LIMA}
         """)
         fila_comp = cursor.fetchone()
         kpis['comprobantes_emitidos'] = int(fila_comp['emitidos'])
@@ -4519,13 +4520,13 @@ def admin_dashboard():
             WITH dias AS (
                 SELECT (d::date) AS dia
                   FROM generate_series(
-                      (NOW() AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima')::date - 6,
-                      (NOW() AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima')::date,
+                      {SQL_HOY_LIMA} - 6,
+                      {SQL_HOY_LIMA},
                       '1 day'::interval
                   ) d
             ),
             ventas_dia AS (
-                SELECT DATE(v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima') AS dia,
+                SELECT {SQL_DIA_LIMA.format(p='v.', col='fecha')} AS dia,
                        COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='det.')}), 0) AS total
                   FROM venta v
                   JOIN pago pg ON pg.id_venta = v.id_venta AND pg.estado = 'confirmado'

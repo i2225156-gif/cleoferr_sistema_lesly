@@ -6,6 +6,8 @@ Fixture central: venta sintética de 3 × S/ 9.99 con dcto congelado 1.50
 lo mostrado/cobrado es el NETO. No toca SQL_MOVIMIENTOS_30DIAS (valora
 inventario, no ventas).
 """
+import json
+import re
 import uuid as _uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -17,6 +19,7 @@ import pytest
 import db_supabase
 import app as modulo_app
 from app import app, SQL_VENTAS_HOY_PAGADAS
+from services.horario import SQL_DIA_LIMA, SQL_HOY_LIMA
 from services.ofertas import SQL_IMPORTE_LINEA
 
 
@@ -251,26 +254,21 @@ def test_kpi_ventas_hoy_reportes_con_neto(fx):
     assert dcto_hoy >= 4.50           # el dcto de mi venta (más el real si hay)
 
 
-def test_kpi_ventas_hoy_determinista_21h_y_23h59(fx):
-    """El 'hoy' del KPI es el día Lima a cualquier hora de ejecución.
+def _fijar_ventas_hoy_21h_y_ayer_2359(fx):
+    """Reasigna la venta del fixture a HOY 21:00 Lima y crea una segunda
+    venta pagada AYER 23:59 Lima (neto 8.49). Devuelve su id_venta.
 
-    El filtro legado DATE(v.fecha AT TIME ZONE 'UTC' AT TIME ZONE
-    'America/Lima') = CURRENT_DATE resolvía la fecha UTC sobre un
-    timestamptz y entre las 19:00 y 24:00 Lima excluía las ventas de
-    esa tarde-noche (rodaban al día siguiente). Aquí las fechas se
-    fijan: una venta a las 21:00 Lima de HOY cuenta y otra a las 23:59
-    Lima de AYER no, corra el test a la hora que corra.
-    """
+    Las fechas quedan fijas respecto al 'hoy Lima' de la BD: los tests
+    que usan esto son deterministas a cualquier hora de ejecución (la
+    de 21:00 siempre es de hoy; la de 23:59 siempre de ayer)."""
     lima = timezone(timedelta(hours=-5))
     cur = fx['cur']
-    cur.execute("SELECT (NOW() AT TIME ZONE 'America/Lima')::date AS hoy")
+    cur.execute(f"SELECT {SQL_HOY_LIMA} AS hoy")
     hoy = cur.fetchone()['hoy']
     ayer = hoy - timedelta(days=1)
-    # La venta del fixture pasa a estar HOY a las 21:00 Lima
     cur.execute("UPDATE venta SET fecha = %s WHERE id_venta = %s",
                 (datetime(hoy.year, hoy.month, hoy.day, 21, 0, tzinfo=lima),
                  fx['id_venta']))
-    # Segunda venta pagada AYER a las 23:59 Lima (neto 8.49): jamás hoy
     cur.execute("""
         INSERT INTO venta (id_tipo_venta, id_cliente, id_estado_venta,
                            num_operacion, fecha)
@@ -294,15 +292,28 @@ def test_kpi_ventas_hoy_determinista_21h_y_23h59(fx):
         VALUES (%s, (SELECT id_tipo_pago FROM tipo_pago WHERE nombre='efectivo'),
                 NULL, 'confirmado', 8.49, %s, 'simulada')
     """, (id_ayer, f"sim_test_{_uuid.uuid4().hex[:8]}"))
+    return id_ayer
 
+
+def test_kpi_ventas_hoy_determinista_21h_y_23h59(fx):
+    """El 'hoy' del KPI es el día Lima a cualquier hora de ejecución.
+
+    El filtro legado DATE(v.fecha AT TIME ZONE 'UTC' AT TIME ZONE
+    'America/Lima') = CURRENT_DATE resolvía la fecha UTC sobre un
+    timestamptz y entre las 19:00 y 24:00 Lima excluía las ventas de
+    esa tarde-noche (rodaban al día siguiente). Aquí las fechas se
+    fijan: una venta a las 21:00 Lima de HOY cuenta y otra a las 23:59
+    Lima de AYER no, corra el test a la hora que corra.
+    """
+    id_ayer = _fijar_ventas_hoy_21h_y_ayer_2359(fx)
+    cur = fx['cur']
     # Con el WHERE corregido, la de HOY 21:00 Lima cuenta íntegra...
     cur.execute(f"""
         SELECT COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='d.')}), 0) AS total
           FROM venta v
           JOIN pago pg ON pg.id_venta = v.id_venta AND pg.estado = 'confirmado'
           JOIN detalle_venta d ON d.id_venta = v.id_venta
-         WHERE (v.fecha AT TIME ZONE 'America/Lima')::date
-                   = (NOW() AT TIME ZONE 'America/Lima')::date
+         WHERE {SQL_DIA_LIMA.format(p='v.', col='fecha')} = {SQL_HOY_LIMA}
            AND v.id_venta = %s
     """, (fx['id_venta'],))
     assert Decimal(str(cur.fetchone()['total'])) == Decimal('25.47')
@@ -312,8 +323,7 @@ def test_kpi_ventas_hoy_determinista_21h_y_23h59(fx):
           FROM venta v
           JOIN pago pg ON pg.id_venta = v.id_venta AND pg.estado = 'confirmado'
           JOIN detalle_venta d ON d.id_venta = v.id_venta
-         WHERE (v.fecha AT TIME ZONE 'America/Lima')::date
-                   = (NOW() AT TIME ZONE 'America/Lima')::date
+         WHERE {SQL_DIA_LIMA.format(p='v.', col='fecha')} = {SQL_HOY_LIMA}
            AND v.id_venta = %s
     """, (id_ayer,))
     assert Decimal(str(cur.fetchone()['total'])) == 0
@@ -330,6 +340,18 @@ def test_kpi_ventas_hoy_dashboard_con_neto(fx):
     esperado = _total_neto_hoy(fx)
     html = fx['admin'].get('/admin/dashboard').get_data(as_text=True)
     assert f'S/ {esperado:.2f}' in html
+
+
+def test_kpi_ventas_hoy_dashboard_determinista_21h_y_23h59(fx):
+    """Espejo del determinista de /reportes contra /admin/dashboard: el
+    KPI muestra el neto de HOY Lima (venta de 21:00 dentro, la de AYER
+    23:59 fuera) a cualquier hora de ejecución."""
+    _fijar_ventas_hoy_21h_y_ayer_2359(fx)
+    esperado = _total_neto_hoy(fx)
+    assert esperado >= 25.47
+    html = fx['admin'].get('/admin/dashboard').get_data(as_text=True)
+    assert f'S/ {esperado:.2f}' in html
+    assert f'S/ {esperado + 8.49:.2f}' not in html
 
 
 def test_kpi_ticket_promedio_con_neto(fx):
@@ -351,18 +373,27 @@ def test_kpi_ticket_promedio_con_neto(fx):
 
 
 def test_grafico_7_dias_con_neto(fx):
-    """La barra de HOY del gráfico incluye el neto de la venta descontada:
-    la réplica con la fórmula neta de la ruta debe aparecer en el JSON."""
-    fx['cur'].execute(f"""
-        SELECT COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='det.')}), 0) AS total
-          FROM venta v
-          JOIN pago pg ON pg.id_venta = v.id_venta AND pg.estado = 'confirmado'
-          JOIN detalle_venta det ON det.id_venta = v.id_venta
-         WHERE DATE(v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima') = CURRENT_DATE
+    """La barra de HOY del gráfico (etiqueta y valor) lleva el neto de
+    las ventas de hoy Lima y la venta de AYER 23:59 cae en la barra de
+    ayer: se aserta sobre el par etiqueta-valor del JSON del gráfico,
+    nunca sobre un número suelto del HTML."""
+    _fijar_ventas_hoy_21h_y_ayer_2359(fx)
+    cur = fx['cur']
+    cur.execute(f"""
+        SELECT TO_CHAR({SQL_HOY_LIMA}, 'DD/MM') AS hoy,
+               TO_CHAR({SQL_HOY_LIMA} - 1, 'DD/MM') AS ayer
     """)
-    hoy = float(fx['cur'].fetchone()['total'] or 0)
+    etq = cur.fetchone()
+    esperado = _total_neto_hoy(fx)     # mismo criterio que la barra: día Lima + neto
+    assert esperado >= 25.47
     html = fx['admin'].get('/admin/dashboard').get_data(as_text=True)
-    assert f'{hoy:.2f}' in html        # la barra de hoy lleva el neto
+    m = re.search(r'const datosVentas = (\[.*?\]);', html, re.S)
+    assert m, 'el dashboard debe incrustar el JSON del gráfico'
+    barras = json.loads(m.group(1))
+    barra_hoy = next(b for b in barras if b['etiqueta'] == etq['hoy'])
+    barra_ayer = next(b for b in barras if b['etiqueta'] == etq['ayer'])
+    assert abs(float(Decimal(str(barra_hoy['total']))) - esperado) < 0.005
+    assert float(Decimal(str(barra_ayer['total']))) >= 8.49
 
 
 def test_constante_ventas_hoy_pagadas_usa_formula_unica():
