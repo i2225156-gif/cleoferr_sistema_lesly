@@ -36,7 +36,7 @@ from services.comprobantes import (EMISOR, UMBRAL_BOLETA_SIN_DOC,
                                     texto_qr)
 from services.documentos import (NOMBRES_TIPO, normalizar_numero,
                                  tipo_documento_de_cliente, validar_documento)
-from services.horario import SQL_DIA_LIMA, SQL_HOY_LIMA
+from services.horario import SQL_DIA_LIMA, SQL_HOY_LIMA, SQL_PARED_LIMA
 from services.inventario import devolver_stock_venta
 from services.ofertas import (SQL_IMPORTE_LINEA, SQL_PRECIO_VIGENTE,
                               calcular_descuento_unitario, oferta_vigente,
@@ -2636,10 +2636,10 @@ def admin_ofertas():
     cursor = conn.cursor(dictionary=True)
     ofertas, productos = [], []
     try:
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT o.id_oferta, o.id_producto, o.tipo, o.valor, o.activa,
-                   o.fecha_inicio AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima' AS fecha_inicio,
-                   o.fecha_fin   AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima' AS fecha_fin,
+                   {SQL_PARED_LIMA.format(p='o.', col='fecha_inicio')} AS fecha_inicio,
+                   {SQL_PARED_LIMA.format(p='o.', col='fecha_fin')} AS fecha_fin,
                    p.nombre AS producto, p.precio,
                    CASE
                        WHEN NOT o.activa THEN 'inactiva'

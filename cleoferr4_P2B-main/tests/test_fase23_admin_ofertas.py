@@ -8,6 +8,7 @@ edición con valor anterior y nuevo auditados, activar/desactivar, y el
 trigger de precio_fijo (a nivel BD).
 """
 import json
+import re
 import uuid as _uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -236,8 +237,50 @@ def test_editar_cambia_valor_y_audita_anterior_y_nuevo(fx):
     anterior = json.loads(aud['valor_anterior'])
     nuevo = json.loads(aud['valor_nuevo'])
     assert anterior['valor'] == '15.00'            # valor ANTERIOR auditado
-    assert nuevo['valor'] == '25.00'                # valor NUEVO auditado
+    assert nuevo['valor'] == '25.00'               # valor NUEVO auditado
     assert 'actualizada correctamente' in r.get_data(as_text=True)
+
+
+def test_editar_ida_y_vuelta_sin_deriva_de_hora(fx):
+    """El display de inicio/fin es hora Lima y el modal de edición
+    precarga exactamente lo guardado: editar sin tocar las fechas no
+    desplaza la vigencia. Con el display legado (+5h) cada ciclo
+    editar-guardar corría la vigencia 5 horas."""
+    base = datetime.now(_LIMA).replace(hour=8, minute=0, second=0,
+                                       microsecond=0)
+    fin = base + timedelta(days=1, hours=10)      # mañana 18:00 Lima
+    cur = fx['cur']
+    cur.execute("""
+        INSERT INTO oferta (id_producto, tipo, valor, fecha_inicio,
+                            fecha_fin, activa)
+        VALUES (%s, 'porcentaje', 15, %s, %s, TRUE)
+        RETURNING id_oferta
+    """, (fx['id_producto'], base, fin))
+    id_of = cur.fetchone()['id_oferta']
+
+    html = fx['client'].get('/admin/ofertas').get_data(as_text=True)
+    m = re.search(rf'data-id="{id_of}"[^>]*data-inicio="([^"]+)"'
+                  r'[^>]*data-fin="([^"]+)"', html)
+    assert m, 'el botón editar debe llevar data-inicio/data-fin'
+    assert m.group(1) == _f(base)                 # el modal precarga hora Lima
+    assert m.group(2) == _f(fin)
+    assert base.strftime('%d/%m/%Y %H:%M') in html   # la tabla muestra igual
+
+    # Ida y vuelta: POST de edición con lo que el modal precarga, tal
+    # cual lo haría el admin que solo cambia el valor del descuento
+    r = fx['client'].post(f'/admin/ofertas/editar/{id_of}',
+                          data={'id_producto': str(fx['id_producto']),
+                                'tipo': 'porcentaje', 'valor': '20',
+                                'csrf_token': 'token-test',
+                                'fecha_inicio': m.group(1),
+                                'fecha_fin': m.group(2)},
+                          follow_redirects=True)
+    assert r.status_code == 200
+    cur.execute("SELECT fecha_inicio, fecha_fin FROM oferta WHERE id_oferta = %s",
+                (id_of,))
+    fila = cur.fetchone()
+    assert fila['fecha_inicio'] == base           # SIN deriva: mismo instante
+    assert fila['fecha_fin'] == fin
 
 
 # ── Activar / desactivar ──────────────────────────────────────────
