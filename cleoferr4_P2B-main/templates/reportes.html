@@ -1,6 +1,7 @@
-{% extends 'base.html' %}
+{% extends 'admin_base.html' %}
+{% set seccion_activa = 'reportes' %}
 {% block titulito %}Reportes – Cleoferr{% endblock %}
-{% block contenido %}
+{% block admin_contenido %}
 
 <div class="page-header">
     <div>
@@ -18,7 +19,7 @@
             <div class="d-flex align-items-center gap-3">
                 <div class="stat-icon"><i class="fa fa-money-bill-wave"></i></div>
                 <div>
-                    <div class="stat-value">{{ resumen.ventas_hoy or '0' }}</div>
+                    <div class="stat-value">{{ '%.2f'|format(resumen.ventas_hoy or 0) }}</div>
                     <div class="stat-label">Ventas hoy</div>
                 </div>
             </div>

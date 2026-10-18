@@ -28,6 +28,7 @@ from psycopg2 import errors as _pg_errores
 
 from .comprobantes import emitir_comprobante_del_pago
 from .inventario import devolver_stock_venta
+from .ofertas import SQL_IMPORTE_LINEA
 from .pasarela.base import EstadoPago, PagoResultado
 
 _log = logging.getLogger(__name__)
@@ -300,8 +301,10 @@ def _validar(cur, pago, resultado):
         return "falta id de transaccion (proveedor o pago)"
     if str(resultado.id_pago_proveedor) != str(pago["id_transaccion"]):
         return "id de pago del proveedor no coincide con pago.id_transaccion"
-    cur.execute("""
-        SELECT COALESCE(SUM(cantidad * precio_unitario), 0) AS total
+    # Total recalculado de detalle_venta con la fórmula única (descuento
+    # congelado incluido): debe cuadrar con pago.monto y el proveedor.
+    cur.execute(f"""
+        SELECT COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='')}), 0) AS total
           FROM detalle_venta WHERE id_venta = %s
     """, (pago["id_venta"],))
     total = cur.fetchone()["total"]

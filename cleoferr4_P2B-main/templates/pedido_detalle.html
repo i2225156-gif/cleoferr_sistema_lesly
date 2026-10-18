@@ -1,6 +1,7 @@
-{% extends 'base.html' %}
+{% extends 'admin_base.html' %}
+{% set seccion_activa = 'pedidos' %}
 {% block titulito %}Detalle Pedido – Cleoferr{% endblock %}
-{% block contenido %}
+{% block admin_contenido %}
 
 <style>
 .detalle-header {
@@ -203,8 +204,16 @@
                     <tr>
                         <td>{{ it.producto_nombre or it.nombre or it.id_producto }}</td>
                         <td>{{ it.cantidad }}</td>
-                        <td>S/ {{ "%.2f"|format(it.precio_unitario|float) if it.precio_unitario else '0.00' }}</td>
-                        <td class="fw-semibold">S/ {{ "%.2f"|format((it.precio_unitario|float)*(it.cantidad|int)) }}</td>
+                        <td>
+                            {# Precio unit. FINAL (con dcto congelado); base tachada si lo hubo #}
+                            {% if it.descuento_unitario and it.descuento_unitario > 0 %}
+                            <s style="color:#999">S/ {{ "%.2f"|format(it.precio_unitario|float) }}</s>
+                            S/ {{ "%.2f"|format(it.precio_final|float) }}
+                            {% else %}
+                            S/ {{ "%.2f"|format(it.precio_unitario|float) if it.precio_unitario else '0.00' }}
+                            {% endif %}
+                        </td>
+                        <td class="fw-semibold">S/ {{ "%.2f"|format(it.importe|float) }}</td>
                     </tr>
                     {% else %}
                     <tr>

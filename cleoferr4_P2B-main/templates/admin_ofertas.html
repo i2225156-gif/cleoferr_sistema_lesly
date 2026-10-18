@@ -1,0 +1,191 @@
+{% extends 'admin_base.html' %}
+{% set seccion_activa = 'ofertas' %}
+{% block titulito %}Ofertas – Cleoferr{% endblock %}
+
+{% block admin_contenido %}
+    <div class="d-flex justify-content-between align-items-center mb-4">
+      <h4 class="fw-bold mb-0"><i class="fa fa-tags me-2"></i>Ofertas y descuentos</h4>
+      <button class="btn btn-naranja fw-bold" data-bs-toggle="modal"
+              data-bs-target="#modalOferta" onclick="prepararAlta()">
+        <i class="fa fa-plus me-1"></i>Nueva oferta
+      </button>
+    </div>
+
+    <div class="alert alert-light border" style="font-size:0.82rem">
+      <i class="fa fa-shield-alt me-1" style="color:var(--naranja)"></i>
+      El precio final y el descuento los calcula <strong>siempre el servidor</strong>.
+      La BD garantiza una sola oferta <strong>activa</strong> por producto y rango de
+      fechas, y que un precio fijo sea menor al precio del producto. Al comprar, el
+      descuento se <strong>congela</strong> en la venta y ya no cambia.
+    </div>
+
+    <div class="card shadow-sm" style="border-radius:12px">
+      <div class="card-body">
+        <h6 class="fw-bold mb-3"><i class="fa fa-list me-2"></i>Ofertas registradas</h6>
+        {% if ofertas %}
+        <div class="table-responsive">
+          <table class="table table-sm table-hover align-middle mb-0">
+            <thead>
+              <tr>
+                <th>Producto</th>
+                <th>Precio base</th>
+                <th>Descuento</th>
+                <th>Precio final</th>
+                <th>Vigencia (Lima)</th>
+                <th>Estado</th>
+                <th class="text-end">Acciones</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for o in ofertas %}
+              <tr>
+                <td>
+                  <div class="fw-semibold" style="color:var(--gris-oscuro)">{{ o.producto }}</div>
+                  <small class="text-muted">#{{ o.id_producto }}</small>
+                </td>
+                <td>S/ {{ '%.2f'|format(o.precio|float) }}</td>
+                <td class="fw-semibold" style="color:var(--naranja)">
+                  {%- if o.tipo == 'porcentaje' %}-{{ '%g'|format(o.valor|float) }}%
+                  {%- else %}precio fijo S/ {{ '%.2f'|format(o.valor|float) }}
+                  {%- endif %}
+                </td>
+                <td class="fw-bold">S/ {{ '%.2f'|format(o.precio_final|float) }}</td>
+                <td style="white-space:nowrap;font-size:0.8rem">
+                  {{ o.fecha_inicio.strftime('%d/%m/%Y %H:%M') }} –
+                  {{ o.fecha_fin.strftime('%d/%m/%Y %H:%M') }}
+                </td>
+                <td>
+                  {% set colores = {'vigente': 'bg-success', 'futura': 'bg-info',
+                                    'vencida': 'bg-secondary', 'inactiva': 'bg-warning text-dark'} %}
+                  <span class="badge {{ colores[o.estado] }}">{{ o.estado|capitalize }}</span>
+                </td>
+                <td class="text-end" style="white-space:nowrap">
+                  <button class="btn btn-sm btn-outline-primary me-1"
+                          data-bs-toggle="modal" data-bs-target="#modalOferta"
+                          onclick="editarOferta(this)"
+                          data-id="{{ o.id_oferta }}"
+                          data-id-producto="{{ o.id_producto }}"
+                          data-tipo="{{ o.tipo }}"
+                          data-valor="{{ '%g'|format(o.valor|float) }}"
+                          data-inicio="{{ o.fecha_inicio.strftime('%Y-%m-%dT%H:%M') }}"
+                          data-fin="{{ o.fecha_fin.strftime('%Y-%m-%dT%H:%M') }}">
+                    <i class="fa fa-pen"></i> Editar
+                  </button>
+                  {% if o.activa %}
+                  <form method="POST" action="/admin/ofertas/desactivar/{{ o.id_oferta }}"
+                        class="d-inline"
+                        data-confirm="¿Desactivar esta oferta? El descuento deja de aplicarse de inmediato."
+                        data-confirm-titulo="Desactivar oferta">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button class="btn btn-sm btn-outline-warning">Desactivar</button>
+                  </form>
+                  {% else %}
+                  <form method="POST" action="/admin/ofertas/activar/{{ o.id_oferta }}"
+                        class="d-inline"
+                        data-confirm="¿Activar esta oferta? Si solapa otra activa del mismo producto, la BD lo rechazará."
+                        data-confirm-titulo="Activar oferta">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button class="btn btn-sm btn-outline-success">Activar</button>
+                  </form>
+                  {% endif %}
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}
+        <p class="text-muted mb-0">Todavía no hay ofertas registradas. Crea la primera con «Nueva oferta».</p>
+        {% endif %}
+      </div>
+    </div>
+
+    <!-- ── Modal alta / edición (misma forma, action cambia por JS) ── -->
+    <div class="modal fade" id="modalOferta" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content border-0" style="border-radius:14px;overflow:hidden">
+          <div class="modal-header" style="background:var(--gris-oscuro);color:white;border:none">
+            <h5 class="modal-title fw-bold" id="modalOfertaTitulo">
+              <i class="fa fa-tags me-2"></i>Nueva oferta
+            </h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <form method="POST" id="formOferta" action="/admin/ofertas/nueva">
+            <div class="modal-body p-4">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <div class="mb-3">
+                <label class="form-label fw-semibold">Producto</label>
+                <select id="of_producto" name="id_producto" class="form-select" required>
+                  <option value="" disabled selected>Selecciona un producto…</option>
+                  {% for p in productos %}
+                  <option value="{{ p.id_producto }}">{{ p.nombre }} — S/ {{ '%.2f'|format(p.precio|float) }}</option>
+                  {% endfor %}
+                </select>
+              </div>
+              <div class="row g-2 mb-3">
+                <div class="col-7">
+                  <label class="form-label fw-semibold">Tipo de descuento</label>
+                  <select id="of_tipo" name="tipo" class="form-select" required>
+                    <option value="porcentaje" selected>Porcentaje (%)</option>
+                    <option value="precio_fijo">Precio fijo (S/)</option>
+                  </select>
+                </div>
+                <div class="col-5">
+                  <label class="form-label fw-semibold">Valor</label>
+                  <input id="of_valor" name="valor" type="number" class="form-control"
+                         step="0.01" min="0.01" required placeholder="15">
+                </div>
+              </div>
+              <div class="row g-2">
+                <div class="col-6">
+                  <label class="form-label fw-semibold">Inicio (hora Lima)</label>
+                  <input id="of_inicio" name="fecha_inicio" type="datetime-local"
+                         class="form-control" required>
+                </div>
+                <div class="col-6">
+                  <label class="form-label fw-semibold">Fin (hora Lima)</label>
+                  <input id="of_fin" name="fecha_fin" type="datetime-local"
+                         class="form-control" required>
+                </div>
+              </div>
+              <p class="text-muted mb-0 mt-3" style="font-size:0.78rem">
+                <i class="fa fa-info-circle me-1"></i>
+                No puede solapar la vigencia de otra oferta <strong>activa</strong> del
+                mismo producto, y un precio fijo debe ser menor al precio actual.
+              </p>
+            </div>
+            <div class="modal-footer border-0">
+              <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancelar</button>
+              <button type="submit" class="btn btn-naranja fw-bold">Guardar</button>
+            </div>
+          </form>
+      </div>
+    </div>
+  </div>
+
+<script>
+function _isoLocal(d) {
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+}
+function prepararAlta() {
+  document.getElementById('formOferta').action = '/admin/ofertas/nueva';
+  document.getElementById('modalOfertaTitulo').textContent = 'Nueva oferta';
+  document.getElementById('of_producto').value = '';
+  document.getElementById('of_tipo').value = 'porcentaje';
+  document.getElementById('of_valor').value = '';
+  const ahora = new Date();
+  document.getElementById('of_inicio').value = _isoLocal(ahora);
+  document.getElementById('of_fin').value = _isoLocal(new Date(ahora.getTime() + 24 * 3600 * 1000));
+}
+function editarOferta(btn) {
+  const d = btn.dataset;
+  document.getElementById('formOferta').action = '/admin/ofertas/editar/' + d.id;
+  document.getElementById('modalOfertaTitulo').textContent = 'Editar oferta #' + d.id;
+  document.getElementById('of_producto').value = d.idProducto;
+  document.getElementById('of_tipo').value = d.tipo;
+  document.getElementById('of_valor').value = d.valor;
+  document.getElementById('of_inicio').value = d.inicio;
+  document.getElementById('of_fin').value = d.fin;
+}
+</script>
+{% endblock %}

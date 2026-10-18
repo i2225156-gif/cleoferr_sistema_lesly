@@ -1,6 +1,7 @@
-{% extends 'base.html' %}
+{% extends 'admin_base.html' %}
+{% set seccion_activa = 'productos' %}
 {% block titulito %}{{ producto.nombre }} – Cleoferr{% endblock %}
-{% block contenido %}
+{% block admin_contenido %}
 
 <style>
 .detalle-img {

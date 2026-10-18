@@ -10,6 +10,8 @@ import pytest
 import db_supabase
 import app as modulo_app
 from app import app
+from services.horario import SQL_DIA_LIMA, SQL_HOY_LIMA
+from services.ofertas import SQL_IMPORTE_LINEA
 
 
 def _sesion(rol='administrador', uid=7):
@@ -68,12 +70,12 @@ def test_dashboard_get_sin_escritura(admin):
 
 def test_kpi_ventas_hoy(admin):
     with db_supabase.engine_tienda.connect() as c:
-        esperado = float(c.execute(__import__('sqlalchemy').text("""
-            SELECT COALESCE(SUM(d.cantidad * d.precio_unitario), 0) AS v
+        esperado = float(c.execute(__import__('sqlalchemy').text(f"""
+            SELECT COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='d.')}), 0) AS v
               FROM venta v
               JOIN pago pg ON pg.id_venta = v.id_venta AND pg.estado = 'confirmado'
               JOIN detalle_venta d ON d.id_venta = v.id_venta
-             WHERE DATE(v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima') = CURRENT_DATE
+             WHERE {SQL_DIA_LIMA.format(p='v.', col='fecha')} = {SQL_HOY_LIMA}
         """)).scalar() or 0)
     r = admin.get('/admin/dashboard')
     html = r.get_data(as_text=True)

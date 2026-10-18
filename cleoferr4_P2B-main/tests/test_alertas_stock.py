@@ -1,71 +1,142 @@
-import sys
-import os
-sys.path.insert(0, os.path.dirname(__file__))
+"""Invariante de alertas de stock bajo, sin depender de datos vivos.
 
-from app import app, get_connection_tienda
+La sincronizacion entre producto.stock y la tabla alerta SOLO la
+dispara GET /alertas (crear la alerta que falte por cada producto con
+stock < 15 y resolver las de productos ya repuestos). Los tests montan
+productos y alertas sinteticos dentro de una transaccion con rollback,
+disparan la sincronizacion con esa misma conexion inyectada (el commit
+de la ruta es no-op en el proxy, todo queda en la transaccion) y
+verifican la invariante global: los datos reales tambien quedan
+sincronizados dentro de la transaccion y se revierten al final.
+"""
+import uuid as _uuid
+
+import psycopg2
+import psycopg2.extras
+import pytest
+from sqlalchemy import text
+
+import db_supabase
+import app as modulo_app
+from app import app
 
 
-class TestAlertasStockConsistency:
-    """Tests to ensure alert count matches products with low stock."""
+class ConnProxy:
+    def __init__(self, raw):
+        self._raw = raw
 
-    def setup_method(self):
-        self.conn = get_connection_tienda()
-        self.cursor = self.conn.cursor(dictionary=True)
+    def cursor(self, dictionary=False, **kwargs):
+        if dictionary:
+            return self._raw.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        return self._raw.cursor()
 
-    def teardown_method(self):
-        self.conn.close()
+    def commit(self):
+        pass
 
-    def test_alertas_count_matches_bajo_stock_count(self):
-        """Test that the dashboard alertas count matches the productos con stock < 15 count."""
-        with app.test_client() as client:
-            # Get the alertas count from the dashboard route logic
-            cursor = self.conn.cursor(dictionary=True)
+    def rollback(self):
+        self._raw.rollback()
 
-            # Query used in productos() route (updated): count unresolved stock alerts
-            cursor.execute("""
-                SELECT COUNT(*) AS cnt FROM alerta
-                WHERE resuelta = FALSE AND id_tipo_alerta = 1
-                AND id_producto IN (SELECT id_producto FROM producto WHERE stock < 15)
-            """)
-            alertas_count = cursor.fetchone()['cnt']
+    def close(self):
+        pass
 
-            # Query for productos con stock < 15
-            cursor.execute("""
-                SELECT COUNT(*) AS cnt FROM producto WHERE stock < 15
-            """)
-            bajo_stock_count = cursor.fetchone()['cnt']
 
-            # Both counts should be equal
-            assert alertas_count == bajo_stock_count, (
-                f"Mismatch: alertas_count={alertas_count} vs bajo_stock_count={bajo_stock_count}"
-            )
+def _sesion(rol, uid):
+    c = app.test_client()
+    with c.session_transaction() as s:
+        s['usuario_id'] = uid
+        s['rol'] = rol
+    return c
 
-            # Verify expected values (with fixture data: 3 products with stock < 15)
-            assert alertas_count == 3, (
-                f"Expected 3 alerts/products with low stock, got {alertas_count}"
-            )
 
-    def test_no_stale_alerts_for_products_above_stock_threshold(self):
-        """Test that there are no unresolved alerts for products with stock >= 15."""
-        self.cursor.execute("""
-            SELECT COUNT(*) AS cnt FROM alerta
-            WHERE resuelta = FALSE AND id_tipo_alerta = 1
-            AND id_producto NOT IN (SELECT id_producto FROM producto WHERE stock < 15)
-        """)
-        stale_count = self.cursor.fetchone()['cnt']
+@pytest.fixture()
+def fx(monkeypatch):
+    """3 productos bajo el umbral (3, 7, 14) y 1 repuesto (stock 50).
 
-        assert stale_count == 0, (
-            f"Found {stale_count} stale alerts for products with stock >= 15"
-        )
+    Uno de los bajos ya tiene alerta sin resolver (la sync no debe
+    duplicarla) y el repuesto tambien (stale: el caso que rompe la
+    invariante si la sync no lo resuelve). Los otros dos bajos no
+    tienen alerta: la sync debe crearlas.
+    """
+    raw = db_supabase.engine_tienda.raw_connection()
+    proxy = ConnProxy(raw)
+    cur = proxy.cursor(dictionary=True)
+    ids_bajos = []
+    for stock in (3, 7, 14):
+        cur.execute(
+            "INSERT INTO producto (nombre, precio, stock) VALUES (%s, 9.99, %s)"
+            " RETURNING id_producto", (f"testal-{_uuid.uuid4().hex[:10]}", stock))
+        ids_bajos.append(cur.fetchone()['id_producto'])
+    cur.execute(
+        "INSERT INTO producto (nombre, precio, stock) VALUES (%s, 9.99, 50)"
+        " RETURNING id_producto", (f"testal-{_uuid.uuid4().hex[:10]}",))
+    id_repuesto = cur.fetchone()['id_producto']
+    for idp in (ids_bajos[0], id_repuesto):
+        cur.execute("""
+            INSERT INTO alerta (id_tipo_alerta, id_producto, descripcion,
+                               prioridad, fecha)
+            VALUES (1, %s, 'test alertas stock', 'media', NOW())
+        """, (idp,))
+    monkeypatch.setattr(modulo_app, 'get_connection_tienda', lambda: proxy)
+    yield {'cur': cur, 'proxy': proxy, 'ids_bajos': ids_bajos,
+           'id_repuesto': id_repuesto, 'vendedor': _sesion('vendedor', 8)}
+    proxy.rollback()
+    raw.close()
 
-    def test_all_unresolved_alerts_are_stock_bajo_type(self):
-        """Test that all unresolved alerts are of type stock_bajo (id_tipo_alerta = 1)."""
-        self.cursor.execute("""
-            SELECT COUNT(*) AS cnt FROM alerta
-            WHERE resuelta = FALSE AND id_tipo_alerta != 1
-        """)
-        non_stock_alerts = self.cursor.fetchone()['cnt']
 
-        assert non_stock_alerts == 0, (
-            f"Found {non_stock_alerts} non-stock alerts in unresolved"
-        )
+def test_alertas_count_coincide_con_productos_bajo_umbral(fx):
+    """Tras la sincronizacion de GET /alertas, el contador de alertas
+    coincide con los productos con stock bajo el umbral: una alerta sin
+    resolver por producto (sin duplicar la preexistente) y la misma
+    cifra global que la consulta del contador de /productos."""
+    r = fx['vendedor'].get('/alertas')
+    assert r.status_code == 200
+    cur = fx['cur']
+    # La sync creo las que faltaban: una por producto sintetico bajo
+    cur.execute("""
+        SELECT COUNT(*) AS cnt FROM alerta
+         WHERE resuelta = FALSE AND id_tipo_alerta = 1
+           AND id_producto = ANY(%s)
+    """, (fx['ids_bajos'],))
+    assert cur.fetchone()['cnt'] == len(fx['ids_bajos'])
+    # Invariante global (los datos reales tambien sincronizados en la tx)
+    cur.execute("SELECT COUNT(*) AS cnt FROM producto WHERE stock < 15")
+    bajos = cur.fetchone()['cnt']
+    cur.execute("""
+        SELECT COUNT(*) AS cnt FROM alerta
+         WHERE resuelta = FALSE AND id_tipo_alerta = 1
+           AND id_producto IN (SELECT id_producto FROM producto
+                                WHERE stock < 15)
+    """)
+    assert cur.fetchone()['cnt'] == bajos
+
+
+def test_tras_sync_ninguna_alerta_activa_de_producto_repuesto(fx):
+    """La sincronizacion de GET /alertas resuelve la alerta del producto
+    repuesto (stock >= umbral): tras ella ninguna alerta sin resolver
+    corresponde a un producto con stock >= 15."""
+    r = fx['vendedor'].get('/alertas')
+    assert r.status_code == 200
+    cur = fx['cur']
+    cur.execute("""
+        SELECT COUNT(*) AS cnt FROM alerta
+         WHERE resuelta = FALSE AND id_tipo_alerta = 1
+           AND id_producto NOT IN (SELECT id_producto FROM producto
+                                    WHERE stock < 15)
+    """)
+    assert cur.fetchone()['cnt'] == 0
+    # La alerta stale del repuesto sintetico quedo resuelta
+    cur.execute("""
+        SELECT COUNT(*) AS cnt FROM alerta
+         WHERE resuelta = TRUE AND id_tipo_alerta = 1
+           AND id_producto = %s
+    """, (fx['id_repuesto'],))
+    assert cur.fetchone()['cnt'] == 1
+
+
+def test_todas_las_alertas_sin_resolver_son_de_stock_bajo():
+    """Invariante global de solo lectura: sin resolver solo hay alertas
+    de stock bajo (id_tipo_alerta = 1)."""
+    with db_supabase.engine_tienda.connect() as c:
+        n = c.execute(text("SELECT COUNT(*) FROM alerta"
+                           " WHERE resuelta = FALSE AND id_tipo_alerta != 1")).scalar()
+    assert n == 0

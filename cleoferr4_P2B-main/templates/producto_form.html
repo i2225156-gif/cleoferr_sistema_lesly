@@ -1,6 +1,7 @@
-{% extends 'base.html' %}
+{% extends 'admin_base.html' %}
+{% set seccion_activa = 'productos' %}
 {% block titulito %}{% if producto %}Editar{% else %}Nuevo{% endif %} Producto – Cleoferr{% endblock %}
-{% block contenido %}
+{% block admin_contenido %}
 
 <div class="page-header">
     <div>
@@ -129,8 +130,8 @@ inputImagen.addEventListener('change', function () {
     const archivo = this.files[0];
     if (!archivo) return;
     if (archivo.size > 5 * 1024 * 1024) {
-        alert('⚠️ La imagen supera los 5 MB.');
-        this.value = '';
+        avisoAccion({ mensaje: 'La imagen supera los 5 MB.', tipo: 'error' });
+        this.value = '';   // igual que hoy: el campo se limpia y el archivo nunca se envía
         return;
     }
     const reader = new FileReader();

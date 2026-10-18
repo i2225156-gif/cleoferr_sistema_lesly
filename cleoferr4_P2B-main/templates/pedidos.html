@@ -1,6 +1,8 @@
-{% extends 'base.html' %}
+{% extends 'admin_base.html' %}
+{% set seccion_activa = 'pedidos' %}
 {% block titulito %}Pedidos – Cleoferr{% endblock %}
-{% block contenido %}
+{% from 'components/paginacion.html' import paginacion %}
+{% block admin_contenido %}
 
 <div class="page-header">
     <div>
@@ -148,24 +150,14 @@
     </div>
 </div>
 
+{{ paginacion(pagina, total, por_pagina, filtros_qs) }}
+
 <script>
 // Cambio de estado vía AJAX. Contrato JSON {ok, mensaje, estado_nuevo?}:
 // el token CSRF viaja en CABECERA (el body solo lleva el estado), la
 // respuesta se valida por Content-Type antes de .json() y los errores
 // se muestran legibles (nunca el error de parseo del navegador).
 const CSRF_TOKEN = {{ csrf_token|tojson }};
-
-function mostrarToast(mensaje, tipo) {
-    var previo = document.getElementById('toast-estado');
-    if (previo) previo.remove();
-    var el = document.createElement('div');
-    el.id = 'toast-estado';
-    el.style.cssText = 'position:fixed;top:20px;right:20px;z-index:9999;padding:12px 18px;border-radius:8px;color:#fff;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,0.3);font-size:0.9rem;max-width:320px';
-    el.style.background = tipo === 'error' ? '#d9534f' : '#28a745';
-    el.textContent = mensaje;
-    document.body.appendChild(el);
-    setTimeout(function () { el.remove(); }, 4000);
-}
 
 function leerJSON(resp) {
     // Jamás confiar en que el cuerpo sea JSON: si no lo es (sesión caída,
@@ -196,7 +188,7 @@ document.querySelectorAll('.form-select-estado').forEach(function (sel) {
         })
         .then(function (resp) {
             if (resp.status === 401) {
-                mostrarToast('Tu sesión expiró. Te llevamos al login…', 'error');
+                avisoAccion({ mensaje: 'Tu sesión expiró. Te llevamos al login…', tipo: 'error' });
                 setTimeout(function () { window.location.href = '/login'; }, 1200);
                 throw new Error('sesion-expirada');
             }
@@ -209,7 +201,7 @@ document.querySelectorAll('.form-select-estado').forEach(function (sel) {
         })
         .then(function (data) {
             this.setAttribute('data-estado-actual', nuevo);
-            mostrarToast(data.mensaje || 'Estado actualizado.', 'ok');
+            avisoAccion({ mensaje: data.mensaje || 'Estado actualizado.', tipo: 'ok' });
             var fila = form.closest('tr');
             if (fila) {
                 var badges = fila.querySelectorAll('.badge-estado-mini, [data-estado]');
@@ -224,7 +216,7 @@ document.querySelectorAll('.form-select-estado').forEach(function (sel) {
         .catch(function (err) {
             if (err && err.message === 'sesion-expirada') return;
             this.value = anterior;
-            mostrarToast(err.message || 'Ocurrió un error al actualizar el estado.', 'error');
+            avisoAccion({ mensaje: err.message || 'Ocurrió un error al actualizar el estado.', tipo: 'error' });
         }.bind(this))
         .finally(function () {
             this.disabled = false;

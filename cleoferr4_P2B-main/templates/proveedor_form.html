@@ -1,6 +1,7 @@
-{% extends 'base.html' %}
+{% extends 'admin_base.html' %}
+{% set seccion_activa = 'proveedores' %}
 {% block titulito %}{% if proveedor %}Editar{% else %}Nuevo{% endif %} Proveedor – Cleoferr{% endblock %}
-{% block contenido %}
+{% block admin_contenido %}
 
 <div class="page-header">
     <div>

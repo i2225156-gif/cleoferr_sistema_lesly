@@ -147,9 +147,14 @@
                     <span>Recojo en tienda</span>
                     <span class="text-success fw-semibold">Gratis</span>
                 </div>
+                <div class="resumen-linea" id="avisoPrecios"
+                     style="display:none;color:#b45309;font-size:0.78rem;align-items:center">
+                    <i class="fa fa-hourglass-half me-1"></i>
+                    <span>Precios por confirmar…</span>
+                </div>
                 <div class="resumen-total">
                     <span>TOTAL</span>
-                    <span>S/ <span id="totalVal">0.00</span></span>
+                    <span>S/ <span id="totalVal">—</span></span>
                 </div>
                 <button class="btn-pedir" onclick="abrirModalPago()">
                     <i class="fa fa-shopping-bag me-2"></i>Realizar pedido
@@ -391,7 +396,14 @@
 </div>
 
 <script>
+// Token CSRF para los fetch del carrito
+const CSRF_TOKEN = {{ csrf_token|tojson }};
+
 // ===== Carrito =====
+// Los importes visibles SOLO se calculan con precios confirmados por el
+// servidor (/carrito/precios): nunca con los guardados en localStorage.
+let preciosConfirmados = false;
+
 function getCarrito() {
     return JSON.parse(localStorage.getItem('carrito_cleoferr') || '[]');
 }
@@ -419,13 +431,21 @@ function renderCarrito() {
         const sub = item.precio * item.cantidad;
         subtotal   += sub;
         totalItems += item.cantidad;
+        // Precio unit.: final del servidor; base tachada solo si hay dcto.
+        // Sin confirmación del servidor, los importes no se muestran.
+        const precioCell = !preciosConfirmados ? '—'
+            : (item.descuento && item.descuento > 0)
+              ? '<s style="color:#999;font-size:0.75rem">S/ ' + (item.precio_base || item.precio).toFixed(2) + '</s>'
+                + ' S/ ' + item.precio.toFixed(2)
+              : 'S/ ' + item.precio.toFixed(2);
+        const subCell = preciosConfirmados ? 'S/ ' + sub.toFixed(2) : '—';
         const tr = document.createElement('tr');
         tr.innerHTML = `
             <td>
                 <div class="fw-semibold" style="color:var(--gris-oscuro)">${item.nombre}</div>
                 <small class="text-muted">#${item.id}</small>
             </td>
-            <td class="fw-bold" style="color:var(--naranja)">S/ ${item.precio.toFixed(2)}</td>
+            <td class="fw-bold" style="color:var(--naranja)">${precioCell}</td>
             <td>
                 <div class="qty-control">
                     <button class="qty-btn" onclick="cambiarCantidad(${idx}, -1)">−</button>
@@ -433,7 +453,7 @@ function renderCarrito() {
                     <button class="qty-btn" onclick="cambiarCantidad(${idx}, +1)">+</button>
                 </div>
             </td>
-            <td class="fw-bold">S/ ${sub.toFixed(2)}</td>
+            <td class="fw-bold">${subCell}</td>
             <td>
                 <button class="btn-eliminar" onclick="eliminarItem(${idx})">
                     <i class="fa fa-trash"></i>
@@ -442,11 +462,53 @@ function renderCarrito() {
         tbody.appendChild(tr);
     });
 
-    document.getElementById('totalItems').textContent  = totalItems;
-    document.getElementById('subtotalVal').textContent = subtotal.toFixed(2);
-    document.getElementById('totalVal').textContent    = subtotal.toFixed(2);
-    if (document.getElementById('montoYape'))
-        document.getElementById('montoYape').textContent = 'S/ ' + subtotal.toFixed(2);
+    document.getElementById('totalItems').textContent = totalItems;
+    // Aviso discreto mientras los precios no estén confirmados por el
+    // servidor (incluido el caso en que /carrito/precios falle).
+    document.getElementById('avisoPrecios').style.display =
+        preciosConfirmados ? 'none' : 'flex';
+    if (preciosConfirmados) {
+        document.getElementById('subtotalVal').textContent = subtotal.toFixed(2);
+        document.getElementById('totalVal').textContent    = subtotal.toFixed(2);
+        if (document.getElementById('montoYape'))
+            document.getElementById('montoYape').textContent = 'S/ ' + subtotal.toFixed(2);
+    } else {
+        document.getElementById('subtotalVal').textContent = '—';
+        document.getElementById('totalVal').textContent    = '—';
+        if (document.getElementById('montoYape'))
+            document.getElementById('montoYape').textContent = 'S/ —';
+    }
+}
+
+// Refresca los precios del carrito con los OFICIALES del servidor
+// (/carrito/precios, misma fuente que el checkout). El navegador solo
+// renderiza: si el fetch falla, los importes quedan "por confirmar"
+// (aviso discreto) y el total definitivo lo recalcula el servidor al
+// confirmar el pedido.
+function refrescarPrecios() {
+    const ids = getCarrito().map(i => i.id);
+    if (ids.length === 0) { renderCarrito(); return; }
+    fetch('/carrito/precios', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRFToken': CSRF_TOKEN },
+        body: JSON.stringify({ ids: ids })
+    })
+    .then(r => r.json())
+    .then(d => {
+        if (!d.ok || !d.precios) { renderCarrito(); return; }  // aviso visible
+        const carrito = getCarrito();
+        carrito.forEach(it => {
+            const pv = d.precios[it.id];
+            if (pv) {
+                it.precio      = pv.precio_final;   // el servidor decide
+                it.precio_base = pv.precio;
+                it.descuento   = pv.descuento;
+            }
+        });
+        preciosConfirmados = true;   // recién ahora se muestran importes
+        saveCarrito(carrito);   // re-renderiza con los precios vigentes
+    })
+    .catch(() => renderCarrito());  // sin confirmación: "precios por confirmar"
 }
 
 function cambiarCantidad(idx, delta) {
@@ -460,8 +522,14 @@ function eliminarItem(idx) {
     carrito.splice(idx, 1);
     saveCarrito(carrito);
 }
-function vaciarCarrito() {
-    if (!confirm('¿Vaciar el carrito?')) return;
+async function vaciarCarrito() {
+    const ok = await confirmarAccion({
+        titulo: 'Vaciar carrito',
+        mensaje: '¿Vaciar el carrito?',
+        tipo: 'peligro',
+        textoAceptar: 'Vaciar'
+    });
+    if (!ok) return;
     localStorage.removeItem('carrito_cleoferr');
     window.location.href = '/catalogo';
 }
@@ -469,12 +537,17 @@ function vaciarCarrito() {
 // ===== Wizard Pago =====
 let metodoPago = null, tipoComprobante = null, razonSocialActual = '', nombreCompletoDni = '';
 
-function abrirModalPago() {
+async function abrirModalPago() {
     const carrito = getCarrito();
     if (carrito.length === 0) return;
     // Verificar si está logueado; si no, redirigir al login
     {% if not session.usuario_id or session.rol != 'cliente' %}
-    if (confirm('Para realizar tu pedido debes iniciar sesión o crear una cuenta. ¿Deseas ir al login?')) {
+    const irLogin = await confirmarAccion({
+        titulo: 'Inicia sesión',
+        mensaje: 'Para realizar tu pedido debes iniciar sesión o crear una cuenta. ¿Deseas ir al login?',
+        textoAceptar: 'Ir al login'
+    });
+    if (irLogin) {
         window.location.href = '/login_cliente';
     }
     return;
@@ -523,7 +596,8 @@ function irPaso2() {
         const venc = document.getElementById('vencTarjeta').value;
         const cvv = document.getElementById('cvvTarjeta').value;
         if (num.length < 16 || !nom || venc.length < 5 || cvv.length < 3) {
-            alert('Por favor completa todos los datos de la tarjeta.'); return;
+            avisoAccion({ mensaje: 'Por favor completa todos los datos de la tarjeta.', tipo: 'error' });
+            return;
         }
     }
     irPaso(2);
@@ -657,6 +731,16 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 });
 
+// Validación compartida del RUC de factura (unifica el aviso que estaba
+// duplicado en irPaso3 y confirmarPedidoFinal; toast breve, no bloquea)
+function validarRucFactura(ruc) {
+    if (tipoComprobante === 'factura' && ruc.length !== 11) {
+        avisoAccion({ mensaje: 'Para factura debes ingresar el RUC de 11 dígitos.', tipo: 'error' });
+        return false;
+    }
+    return true;
+}
+
 function irPaso3() {
     if (!tipoComprobante) return;
     // Construir resumen
@@ -667,9 +751,7 @@ function irPaso3() {
     const metodoLabel = metodoPago === 'tarjeta' ? 'Tarjeta de débito/crédito' : 'Yape / Plin';
     const compLabel = tipoComprobante === 'boleta_electronica' ? 'Boleta Electrónica' : 'Factura';
     // Validar RUC obligatorio para factura
-    if (tipoComprobante === 'factura' && ruc.length !== 11) {
-        alert('Para factura debes ingresar el RUC de 11 dígitos.'); return;
-    }
+    if (!validarRucFactura(ruc)) return;
     let html = `
         <div class="mb-2"><strong>Método de pago:</strong> ${metodoLabel}</div>
         <div class="mb-2"><strong>Comprobante:</strong> ${compLabel}`;
@@ -691,14 +773,11 @@ function irPaso3() {
 function confirmarPedidoFinal() {
     const carrito = getCarrito();
     if (carrito.length === 0) return;
-    const CSRF_TOKEN = {{ csrf_token|tojson }};
     const ruc = document.getElementById('inputRuc') ? document.getElementById('inputRuc').value.trim() : '';
     const dni = document.getElementById('inputDni') ? document.getElementById('inputDni').value.trim() : '';
     const numOp = document.getElementById('numOperacion') ? document.getElementById('numOperacion').value.trim() : '';
     // Validar RUC si es factura
-    if (tipoComprobante === 'factura' && ruc.length !== 11) {
-        alert('Para factura debes ingresar el RUC de 11 dígitos.'); return;
-    }
+    if (!validarRucFactura(ruc)) return;
     fetch('/carrito/confirmar_v2', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -713,20 +792,25 @@ function confirmarPedidoFinal() {
         })
     })
     .then(r => r.json())
-    .then(d => {
+    .then(async d => {
         // Ítems que la BD ya no reconoce como válidos: retirarlos del carrito
         const excluidos = d.excluidos || [];
+        let avisoExcluidos = null;
         if (excluidos.length > 0) {
             const idsExcl = new Set(excluidos.map(e => e.id_producto));
             saveCarrito(getCarrito().filter(i => !idsExcl.has(i.id)));
             const detalle = excluidos.map(e => `• ${e.nombre}: ${e.motivo}`).join('\n');
-            if (d.ok) {
-                alert('Pedido registrado, pero estos productos fueron excluidos:\n' + detalle);
-            } else {
-                alert(d.error + '\n\nProductos excluidos del carrito:\n' + detalle);
-            }
+            avisoExcluidos = d.ok
+                ? 'Pedido registrado, pero estos productos fueron excluidos:\n' + detalle
+                : d.error + '\n\nProductos excluidos del carrito:\n' + detalle;
         }
         if (d.ok) {
+            // El aviso persistente NO bloquea por sí solo: la redirección
+            // ocurre DESPUÉS de que el cliente pulse "Entiendo" (antes
+            // bloqueaba el alert nativo; el await reproduce ese orden).
+            if (avisoExcluidos) {
+                await avisoAccion({ mensaje: avisoExcluidos, tipo: 'info', persistente: true });
+            }
             localStorage.removeItem('carrito_cleoferr');
             const idPedido = d.id_pedido || '';
             bootstrap.Modal.getInstance(document.getElementById('modalPago')).hide();
@@ -734,11 +818,19 @@ function confirmarPedidoFinal() {
             // de pago simulado); si no, al resumen del pedido.
             window.location.href = d.checkout_url
                 || ('/pedido_aceptado' + (idPedido ? '?id=' + idPedido : ''));
-        } else if (excluidos.length === 0) {
-            alert('Error al procesar el pedido: ' + (d.error || 'intenta de nuevo'));
+        } else {
+            // Sin pedido registrado: el aviso persiste hasta "Entiendo" y
+            // el modal de pago queda como estaba para reintentar.
+            if (avisoExcluidos) {
+                await avisoAccion({ mensaje: avisoExcluidos, tipo: 'error', persistente: true });
+            } else {
+                await avisoAccion({ mensaje: 'Error al procesar el pedido: ' + (d.error || 'intenta de nuevo'), tipo: 'error', persistente: true });
+            }
         }
     })
-    .catch(() => alert('Error de conexión. Intenta de nuevo.'));
+    .catch(async () => {
+        await avisoAccion({ mensaje: 'Error de conexión. Intenta de nuevo.', tipo: 'error', persistente: true });
+    });
 }
 
 // Formateo tarjeta
@@ -760,6 +852,7 @@ function formatExpiry(input) {
     if (prev) prev.textContent = v || 'MM/AA';
 }
 
-renderCarrito();
+// Al cargar la página, los precios se refrescan SIEMPRE desde el servidor
+refrescarPrecios();
 </script>
 {% endblock %}

@@ -1,6 +1,8 @@
-{% extends 'base.html' %}
+{% extends 'admin_base.html' %}
+{% from 'components/paginacion.html' import paginacion %}
+{% set seccion_activa = 'productos' %}
 {% block titulito %}Productos – Cleoferr{% endblock %}
-{% block contenido %}
+{% block admin_contenido %}
 
 <div class="page-header">
     <div>
@@ -220,10 +222,16 @@
                                     <i class="fa fa-edit"></i>
                                 </a>
                                 {% if session.rol == 'administrador' %}
-                                <a href="/productos/eliminar/{{ p.id_producto }}" class="btn btn-sm btn-outline-danger"
-                                   onclick="return confirm('¿Eliminar este producto?')" title="Eliminar">
-                                    <i class="fa fa-trash"></i>
-                                </a>
+                                <form method="POST" action="/productos/eliminar/{{ p.id_producto }}" style="display:inline"
+                                      data-confirm="¿Eliminar este producto?"
+                                      data-confirm-titulo="Eliminar producto"
+                                      data-confirm-tipo="peligro"
+                                      data-confirm-aceptar="Eliminar">
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                    <button type="submit" class="btn btn-sm btn-outline-danger" title="Eliminar">
+                                        <i class="fa fa-trash"></i>
+                                    </button>
+                                </form>
                                 <a href="/productos/detalle/{{ p.id_producto }}" class="btn btn-sm btn-outline-info" title="Ver detalles">
                                     <i class="fa fa-eye"></i>
                                 </a>
@@ -240,10 +248,12 @@
                         </td>
                     </tr>
                     {% endfor %}
-                </tbody>
-            </table>
-        </div>
-    </div>
-</div>
+                 </tbody>
+             </table>
+         </div>
+     </div>
+ </div>
+
+{{ paginacion(pagina, total, por_pagina, filtros_qs) }}
 
 {% endblock %}

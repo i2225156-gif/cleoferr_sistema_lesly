@@ -1,0 +1,26 @@
+{% extends 'base.html' %}
+{# Layout admin único (módulo admin unificado).
+
+   - SIN el menú superior viejo: se anula el block navbar de base.html.
+   - Con el sidebar oscuro (_sidebar_admin.html): navegación completa,
+     badges, chip de usuario, clave/tema/salir restaurados y off-canvas
+     responsive (la hamburguesa y el overlay los aporta el propio
+     sidebar, incluido aquí).
+   - Las páginas admin solo definen {% block admin_contenido %} y, para
+     resaltar su ítem, {% set seccion_activa = '...' %} a nivel superior
+     de la plantilla (fuera de todo bloque: se evalúa ANTES de que el
+     admin_base renderice el sidebar).
+   - Una página puede pedir pantalla completa con {% set sidebar_colapsado
+     = True %} (solo el POS hoy): el sidebar arranca oculto (off-canvas
+     también en escritorio) y el contenido usa todo el ancho.
+   - La lógica de cada página (rutas, consultas, permisos) NO cambia. #}
+
+{% block navbar %}{% endblock %}
+
+{% block contenido %}
+{% include '_sidebar_admin.html' %}
+
+<div class="admin-contenido p-4{% if sidebar_colapsado %} admin-contenido-off{% endif %}">
+  {% block admin_contenido %}{% endblock %}
+</div>
+{% endblock %}
