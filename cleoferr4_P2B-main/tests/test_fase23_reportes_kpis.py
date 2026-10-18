@@ -156,6 +156,71 @@ def test_excel_ventas_dia_exporta(fx):
     assert fx['cur'].fetchone()['n'] == 1    # sigue en el día (rollback al final)
 
 
+def test_excel_ventas_dia_determinista_21h_y_23h59(fx):
+    """La exportación del día usa días Lima: la venta de HOY 21:00 va en
+    el Excel con su neto y la de AYER 23:59 no, a cualquier hora de
+    ejecución (el filtro legado perdía la tarde-noche entre las 19:00
+    y 24:00 Lima)."""
+    id_ayer = _fijar_ventas_hoy_21h_y_ayer_2359(fx)
+    r = fx['vendedor'].get('/reportes/dia/exportar')
+    assert r.status_code == 200
+    sql_dia = f"""
+        SELECT COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='d.')}), 0) AS total
+          FROM venta v
+          LEFT JOIN detalle_venta d ON v.id_venta = d.id_venta
+         WHERE {SQL_DIA_LIMA.format(p='v.', col='fecha')} = {SQL_HOY_LIMA}
+           AND v.id_venta = %s
+    """
+    cur = fx['cur']
+    cur.execute(sql_dia, (fx['id_venta'],))
+    assert Decimal(str(cur.fetchone()['total'])) == Decimal('25.47')
+    cur.execute(sql_dia, (id_ayer,))
+    assert Decimal(str(cur.fetchone()['total'])) == 0   # la de ayer 23:59 fuera
+
+
+def test_productos_contador_movimientos_hoy_determinista(fx):
+    """El contador de movimientos del día de /productos cuenta en días
+    Lima: el movimiento de HOY 21:00 sí y el de AYER 23:59 no, a
+    cualquier hora de ejecución."""
+    lima = timezone(timedelta(hours=-5))
+    cur = fx['cur']
+    cur.execute(f"SELECT {SQL_HOY_LIMA} AS hoy")
+    hoy = cur.fetchone()['hoy']
+    ayer = hoy - timedelta(days=1)
+    sql_mov = """
+        INSERT INTO inventario_movimiento
+            (tipo, id_producto, cantidad, precio_unitario, observacion,
+             id_usuario, stock_resultante, fecha)
+        VALUES ('entrada', %s, 1, 9.99, 'test23r', 8, 50, %s)
+        RETURNING id_movimiento
+    """
+    cur.execute(sql_mov, (fx['id_producto'],
+                          datetime(hoy.year, hoy.month, hoy.day, 21, 0, tzinfo=lima)))
+    id_mov_hoy = cur.fetchone()['id_movimiento']
+    cur.execute(sql_mov, (fx['id_producto'],
+                          datetime(ayer.year, ayer.month, ayer.day, 23, 59, tzinfo=lima)))
+    id_mov_ayer = cur.fetchone()['id_movimiento']
+
+    sql_cnt = (f"SELECT COUNT(*) AS cnt FROM inventario_movimiento"
+               f" WHERE {SQL_DIA_LIMA.format(p='', col='fecha')} = {SQL_HOY_LIMA}"
+               f" AND id_movimiento = %s")
+    cur.execute(sql_cnt, (id_mov_hoy,))
+    assert cur.fetchone()['cnt'] == 1    # el de hoy 21:00 Lima cuenta
+    cur.execute(sql_cnt, (id_mov_ayer,))
+    assert cur.fetchone()['cnt'] == 0    # el de ayer 23:59 Lima no
+
+    # Extremo a extremo: la tarjeta de /productos renderiza el número
+    # exacto de movimientos de hoy Lima (reales + el sintético)
+    cur.execute(f"SELECT COUNT(*) AS cnt FROM inventario_movimiento"
+                f" WHERE {SQL_DIA_LIMA.format(p='', col='fecha')} = {SQL_HOY_LIMA}")
+    esperado = int(cur.fetchone()['cnt'])
+    assert esperado >= 1
+    html = fx['admin'].get('/productos').get_data(as_text=True)
+    m = re.search(r'stat-value">(\d+)</div>\s*<div class="stat-label">Reportes', html)
+    assert m, 'la tarjeta del contador de movimientos debe estar en /productos'
+    assert int(m.group(1)) == esperado
+
+
 # ── Caja (resumen y cierre con venta LOCAL descontada) ─────────────
 
 @pytest.fixture()

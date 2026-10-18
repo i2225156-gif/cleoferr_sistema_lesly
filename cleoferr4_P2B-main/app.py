@@ -468,7 +468,7 @@ def productos():
     except Exception:
         app.logger.exception("Error contando alertas en dashboard de productos")
     try:
-        cursor.execute("SELECT COUNT(*) AS cnt FROM inventario_movimiento WHERE DATE(fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima') = CURRENT_DATE")
+        cursor.execute(f"SELECT COUNT(*) AS cnt FROM inventario_movimiento WHERE {SQL_DIA_LIMA.format(p='', col='fecha')} = {SQL_HOY_LIMA}")
         movimientos_count = cursor.fetchone()['cnt']
     except Exception:
         app.logger.exception("Error contando movimientos de inventario del día en dashboard de productos")
@@ -811,7 +811,7 @@ def exportar_ventas_dia_excel():
             LEFT JOIN estado_venta ev ON v.id_estado_venta = ev.id_estado_venta
             LEFT JOIN tipo_venta tv ON v.id_tipo_venta = tv.id_tipo_venta
             LEFT JOIN detalle_venta d ON v.id_venta = d.id_venta
-            WHERE DATE(v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima') = CURRENT_DATE
+            WHERE {SQL_DIA_LIMA.format(p='v.', col='fecha')} = {SQL_HOY_LIMA}
             GROUP BY v.id_venta, v.fecha, v.id_cliente, ev.nombre, tv.nombre
             ORDER BY v.fecha DESC
         """)
