@@ -536,7 +536,7 @@ def exportar_pedidos_excel():
         cursor = conn.cursor(dictionary=True)
         cursor.execute(f"""
             SELECT v.id_venta,
-                   v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima' AS fecha,
+                   {SQL_PARED_LIMA.format(p='v.', col='fecha')} AS fecha,
                    v.id_cliente,
                    ev.nombre AS estado,
                    tv.nombre AS tipo_venta,
@@ -750,9 +750,9 @@ def exportar_inventario_excel():
     conn = get_connection_tienda(); cursor = conn.cursor(dictionary=True)
     try:
         # Consulta 1 (Tienda): movimientos + producto
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT im.id_movimiento AS id,
-                   im.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima' AS fecha,
+                   {SQL_PARED_LIMA.format(p='im.', col='fecha')} AS fecha,
                    p.nombre AS producto,
                    im.tipo,
                    im.cantidad,
@@ -802,7 +802,7 @@ def exportar_ventas_dia_excel():
         # Consulta 1 (Tienda): ventas del día (hora Perú) sin join a cliente
         cursor.execute(f"""
             SELECT v.id_venta,
-                   v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima' AS fecha,
+                   {SQL_PARED_LIMA.format(p='v.', col='fecha')} AS fecha,
                    v.id_cliente,
                    ev.nombre AS estado,
                    tv.nombre AS tipo_venta,
@@ -1508,7 +1508,7 @@ def pedidos():
         cursor.execute(f"""
             SELECT
                 v.id_venta      AS id_pedido,
-                v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima' AS fecha,
+                {SQL_PARED_LIMA.format(p='v.', col='fecha')} AS fecha,
                 tv.nombre    AS tipo_venta,
                 ev.nombre    AS estado,
                 v.id_cliente,
@@ -2345,10 +2345,10 @@ def mis_comprobantes():
     conn   = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
     try:
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT c.serie, c.numero, c.total, c.fecha_emision, c.estado_sunat,
                    tc.nombre AS tipo, v.id_venta,
-                   v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima' AS fecha_venta
+                   {SQL_PARED_LIMA.format(p='v.', col='fecha')} AS fecha_venta
               FROM venta v
               JOIN comprobante c ON c.id_venta = v.id_venta
               LEFT JOIN tipo_comprobante tc ON tc.id_tipo_comprobante = c.id_tipo_comprobante
@@ -3429,7 +3429,7 @@ def mis_pedidos():
         PASOS = fases_orden
         cursor.execute(f"""
             SELECT v.id_venta,
-                   v.fecha AT TIME ZONE 'UTC' AT TIME ZONE 'America/Lima' AS fecha,
+                   {SQL_PARED_LIMA.format(p='v.', col='fecha')} AS fecha,
                    ev.nombre AS estado,
                    COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='d.')}), 0) AS total
             FROM venta v

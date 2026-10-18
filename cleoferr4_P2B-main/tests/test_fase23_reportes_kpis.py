@@ -19,7 +19,7 @@ import pytest
 import db_supabase
 import app as modulo_app
 from app import app, SQL_VENTAS_HOY_PAGADAS
-from services.horario import SQL_DIA_LIMA, SQL_HOY_LIMA
+from services.horario import SQL_DIA_LIMA, SQL_HOY_LIMA, SQL_PARED_LIMA
 from services.ofertas import SQL_IMPORTE_LINEA
 
 
@@ -219,6 +219,111 @@ def test_productos_contador_movimientos_hoy_determinista(fx):
     m = re.search(r'stat-value">(\d+)</div>\s*<div class="stat-label">Reportes', html)
     assert m, 'la tarjeta del contador de movimientos debe estar en /productos'
     assert int(m.group(1)) == esperado
+
+
+# ── Displays en hora Lima (sin la pared UTC del modismo legado) ────
+
+def _venta_y_movimiento_a_las_2300_lima(fx):
+    """Fija la venta del fixture a HOY 23:00 Lima y crea un movimiento de
+    inventario a la misma hora: con el display legado (+5h) esa hora
+    rodaba al día siguiente (04:00 de mañana), cambiando hasta la fecha."""
+    lima = timezone(timedelta(hours=-5))
+    cur = fx['cur']
+    cur.execute(f"SELECT {SQL_HOY_LIMA} AS hoy")
+    hoy = cur.fetchone()['hoy']
+    fecha = datetime(hoy.year, hoy.month, hoy.day, 23, 0, tzinfo=lima)
+    cur.execute("UPDATE venta SET fecha = %s WHERE id_venta = %s",
+                (fecha, fx['id_venta']))
+    cur.execute("""
+        INSERT INTO inventario_movimiento
+            (tipo, id_producto, cantidad, precio_unitario, observacion,
+             id_usuario, stock_resultante, fecha)
+        VALUES ('entrada', %s, 1, 9.99, 'test23r', 8, 50, %s)
+        RETURNING id_movimiento
+    """, (fx['id_producto'], fecha))
+    fx['id_movimiento'] = cur.fetchone()['id_movimiento']
+    return hoy, fecha
+
+
+def test_listados_display_hora_lima(fx):
+    """/pedidos y /mis_pedidos muestran la pared Lima: la venta de HOY
+    23:00 se ve como 23:00 del día correcto (el display legado mostraba
+    04:00 del día siguiente)."""
+    _hoy, fecha = _venta_y_movimiento_a_las_2300_lima(fx)
+    sello = fecha.strftime('%d/%m/%Y %H:%M')
+    viejo = (fecha + timedelta(hours=5)).strftime('%d/%m/%Y %H:%M')
+    html = fx['vendedor'].get('/pedidos').get_data(as_text=True)
+    assert sello in html
+    assert viejo not in html
+    html = fx['cliente'].get('/mis_pedidos').get_data(as_text=True)
+    assert sello in html
+    assert viejo not in html
+
+
+def test_excels_display_hora_lima(fx):
+    """Los Excel llevan 'Fecha (Perú)' y 'Fecha/Hora (Perú)' en pared
+    Lima: la venta y el movimiento de HOY 23:00 salen como 23:00 (con el
+    display legado salían 04:00 del día siguiente). _excel_response
+    escribe str(valor), así que la celda se lee con openpyxl y se
+    compara el texto exacto."""
+    import io
+
+    from openpyxl import load_workbook
+
+    hoy, _fecha = _venta_y_movimiento_a_las_2300_lima(fx)
+    esperado = str(datetime(hoy.year, hoy.month, hoy.day, 23, 0))
+
+    def celda(resp, col_id, col_fecha, id_buscado):
+        wb = load_workbook(io.BytesIO(resp.get_data()))
+        ws = wb.active
+        headers = [c.value for c in ws[1]]
+        i_id, i_f = headers.index(col_id), headers.index(col_fecha)
+        for fila in ws.iter_rows(min_row=2, values_only=True):
+            if fila[i_id] in (id_buscado, str(id_buscado)):
+                return fila[i_f]
+        return None
+
+    r = fx['vendedor'].get('/reportes/pedidos/exportar')
+    assert r.status_code == 200
+    assert celda(r, 'N° Pedido', 'Fecha (Perú)', fx['id_venta']) == esperado
+    r = fx['vendedor'].get('/reportes/dia/exportar')
+    assert r.status_code == 200
+    assert celda(r, 'N° Pedido', 'Fecha/Hora (Perú)', fx['id_venta']) == esperado
+    r = fx['vendedor'].get('/reportes/inventario/exportar')
+    assert r.status_code == 200
+    assert celda(r, 'ID', 'Fecha (Perú)', fx['id_movimiento']) == esperado
+
+
+def test_mis_comprobantes_fecha_venta_pared_lima(fx):
+    """La fecha_venta que calcula la ruta de /mis_comprobantes es pared
+    Lima (el display legado era la pared UTC +5h). La plantilla solo la
+    usa si comprobante.fecha_emision es NULL — imposible hoy, es NOT
+    NULL — así que se verifica la fila que produce la consulta exacta
+    de la ruta con un comprobante sintético."""
+    hoy, _fecha = _venta_y_movimiento_a_las_2300_lima(fx)
+    cur = fx['cur']
+    cur.execute("SELECT id_tipo_comprobante FROM tipo_comprobante LIMIT 1")
+    id_tc = cur.fetchone()['id_tipo_comprobante']
+    cur.execute("""
+        INSERT INTO comprobante (id_venta, id_tipo_comprobante, serie,
+                                 numero, estado_sunat)
+        VALUES (%s, %s, 'T23', %s, 'no_aplica')
+    """, (fx['id_venta'], id_tc, f"test23r-{_uuid.uuid4().hex[:8]}"))
+    cur.execute(f"""
+        SELECT c.serie, c.numero, c.total, c.fecha_emision, c.estado_sunat,
+               tc.nombre AS tipo, v.id_venta,
+               {SQL_PARED_LIMA.format(p='v.', col='fecha')} AS fecha_venta
+          FROM venta v
+          JOIN comprobante c ON c.id_venta = v.id_venta
+          LEFT JOIN tipo_comprobante tc ON tc.id_tipo_comprobante = c.id_tipo_comprobante
+         WHERE v.id_cliente = %s
+         ORDER BY c.fecha_emision DESC
+         LIMIT 100
+    """, (11,))
+    fila = next(f for f in cur.fetchall() if f['id_venta'] == fx['id_venta'])
+    assert fila['fecha_venta'] == datetime(hoy.year, hoy.month, hoy.day, 23, 0)
+    r = fx['cliente'].get('/mis_comprobantes')
+    assert r.status_code == 200
 
 
 # ── Caja (resumen y cierre con venta LOCAL descontada) ─────────────
