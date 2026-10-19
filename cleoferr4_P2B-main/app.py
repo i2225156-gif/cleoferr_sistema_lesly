@@ -3409,11 +3409,30 @@ def registro_cliente():
     """
     import random
 
-    nombre     = request.form.get('nombre', '').strip()
-    apellido   = request.form.get('apellido', '').strip()
-    correo     = _normalizar_correo(request.form.get('correo'))
+    # FASE 2: nombres de PERSONA sin dígitos (tildes y ñ sí), con las
+    # longitudes reales de las columnas (100) y correo con formato.
+    nombre, error = nombre_persona('nombre', request.form.get('nombre'), 100)
+    if error:
+        return render_template('login_cliente.html',
+                               error=error, registro_activo=True)
+    apellido, error = nombre_persona('apellido', request.form.get('apellido'), 100)
+    if error:
+        return render_template('login_cliente.html',
+                               error=error, registro_activo=True)
+    correo, error = _correo_valido(request.form.get('correo'), 120)
+    if error:
+        return render_template('login_cliente.html',
+                               error=error, registro_activo=True)
     telefono   = request.form.get('telefono', '').strip()
+    if len(telefono) > 20:
+        return render_template('login_cliente.html',
+                               error='El teléfono no puede superar 20 caracteres.',
+                               registro_activo=True)
     direccion  = request.form.get('direccion', '').strip()
+    if len(direccion) > 200:
+        return render_template('login_cliente.html',
+                               error='La dirección no puede superar 200 caracteres.',
+                               registro_activo=True)
     contrasena = request.form.get('contrasena', '')
     confirmar  = request.form.get('confirmar', '')
 
@@ -3439,7 +3458,7 @@ def registro_cliente():
 
     if not nombre or not correo or not contrasena:
         return render_template('login_cliente.html',
-                               error='Nombre, correo y contrasena son obligatorios.',
+                               error='Nombre, correo y contraseña son obligatorios.',
                                registro_activo=True)
     if len(direccion) < 5:
         return render_template('login_cliente.html',
@@ -3447,11 +3466,11 @@ def registro_cliente():
                                registro_activo=True)
     if contrasena != confirmar:
         return render_template('login_cliente.html',
-                               error='Las contrasenas no coinciden.',
+                               error='Las contraseñas no coinciden.',
                                registro_activo=True)
     if len(contrasena) < 6:
         return render_template('login_cliente.html',
-                               error='La contrasena debe tener al menos 6 caracteres.',
+                               error='La contraseña debe tener al menos 6 caracteres.',
                                registro_activo=True)
 
     codigo      = f"{random.randint(0, 999999):06d}"
@@ -3461,6 +3480,16 @@ def registro_cliente():
     conn   = get_connection_auth()
     cursor = conn.cursor(dictionary=True)
     try:
+        # FASE 2 (bug latente corregido): el id del tipo de documento se
+        # resuelve AQUÍ — el INSERT/UPDATE de abajo usaba _id_tipo_doc sin
+        # definirlo (NameError que el except engullía: el registro fallaba
+        # siempre con "No se pudo iniciar el registro"; los tests viejos solo
+        # asertaban status 200, que el render de error también da).
+        cursor.execute("SELECT id_tipo_documento FROM tipo_documento"
+                       " WHERE LOWER(TRIM(nombre)) = %s",
+                       (tipo_doc_nombre or 'dni',))
+        fila_td = cursor.fetchone()
+        _id_tipo_doc = fila_td['id_tipo_documento'] if fila_td else 1
         # Comparacion insensible a mayusculas y espacios: asi no se crean
         # duplicados ni se bloquea por diferencias de formato.
         cursor.execute("""
