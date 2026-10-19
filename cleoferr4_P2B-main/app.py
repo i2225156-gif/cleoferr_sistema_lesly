@@ -2484,6 +2484,38 @@ def reportes():
     cursor = conn.cursor(dictionary=True)
     resumen = {}
     reportes_data = None
+    top_unidades = top_monto = None
+
+    # RF12: productos más vendidos por rango de fechas — SOLO pagos
+    # confirmados (criterio §6.9), días calendario Lima, parametrizado.
+    # Rango vacío = todo el historial; top 10 por unidades y por monto.
+    rango_sql, rango_params = "", []
+    for campo in ('desde', 'hasta'):
+        valor = (request.args.get(campo) or '').strip()
+        if not valor:
+            continue
+        try:
+            fecha = datetime.strptime(valor, '%Y-%m-%d').date()
+        except ValueError:
+            flash('Fecha inválida, rango ignorado.', 'warning')
+            continue
+        operador = '>=' if campo == 'desde' else '<='
+        rango_sql += f" AND {SQL_DIA_LIMA.format(p='v.', col='fecha')} {operador} %s"
+        rango_params.append(fecha)
+    if len(rango_params) == 2 and rango_params[0] > rango_params[1]:
+        flash('Rango inválido: «desde» es posterior a «hasta».', 'warning')
+        rango_sql, rango_params = "", []
+    sql_top = f"""
+        SELECT p.id_producto, p.nombre,
+               SUM(d.cantidad) AS unidades,
+               SUM({SQL_IMPORTE_LINEA.format(p='d.')}) AS monto
+          FROM detalle_venta d
+          JOIN venta v ON v.id_venta = d.id_venta
+          JOIN pago pg ON pg.id_venta = v.id_venta AND pg.estado = 'confirmado'
+          JOIN producto p ON p.id_producto = d.id_producto
+         WHERE 1=1{rango_sql}
+         GROUP BY p.id_producto, p.nombre
+    """
 
     try:
         # Ventas de hoy SOLO con pago confirmado (criterio del alcance §6.9).
@@ -2539,10 +2571,19 @@ def reportes():
         except Exception:
             reportes_data = None
 
+        # RF12: los dos rankings (mismo WHERE, órdenes distintos, id desempate)
+        cursor.execute(sql_top + " ORDER BY unidades DESC, p.id_producto ASC LIMIT 10",
+                       rango_params)
+        top_unidades = cursor.fetchall()
+        cursor.execute(sql_top + " ORDER BY monto DESC, p.id_producto ASC LIMIT 10",
+                       rango_params)
+        top_monto = cursor.fetchall()
+
     finally:
         conn.close()
 
-    return render_template('reportes.html', resumen=resumen, reportes=reportes_data)
+    return render_template('reportes.html', resumen=resumen, reportes=reportes_data,
+                           top_unidades=top_unidades, top_monto=top_monto)
 
 
 # ── Alertas ─────────────────────────────────────────────────
