@@ -2967,6 +2967,55 @@ def alertas():
             UPDATE alerta SET resuelta = TRUE
             WHERE id_tipo_alerta = 1 AND resuelta = FALSE AND id_producto NOT IN (SELECT id_producto FROM producto WHERE stock < 15)
         """)
+        # RF17: sincronizar alertas de VENCIMIENTO (tipo 3
+        # 'vencimiento_proximo', ya existente en tipo_alerta): vencidos
+        # (fecha < hoy, prioridad alta) y por vencer (dentro del umbral
+        # VENCIMIENTO_UMBRAL_DIAS, prioridad media). Una alerta sin
+        # resolver por producto; si el estado empeora (por vencer ->
+        # vencido) la existente se ACTUALIZA; las stale se resuelven.
+        from services.kpis import umbral_vencimiento_dias
+        umbral = umbral_vencimiento_dias()
+        cursor.execute("""
+            SELECT id_producto, nombre, stock, fecha_vencimiento,
+                   (fecha_vencimiento < CURRENT_DATE) AS vencido
+              FROM producto
+             WHERE activo = TRUE
+               AND fecha_vencimiento IS NOT NULL
+               AND fecha_vencimiento <= CURRENT_DATE + make_interval(days => %s)
+        """, (umbral,))
+        for p in cursor.fetchall():
+            fecha_txt = p['fecha_vencimiento'].strftime('%d/%m/%Y')
+            if p['vencido']:
+                descripcion = f"Vencido el {fecha_txt}: {p['nombre']} (stock {p['stock']})"
+                prioridad = 'alta'
+            else:
+                descripcion = f"Vence el {fecha_txt}: {p['nombre']} (stock {p['stock']})"
+                prioridad = 'media'
+            cursor.execute("""
+                SELECT id_alerta FROM alerta
+                 WHERE id_tipo_alerta = 3 AND id_producto = %s AND resuelta = FALSE
+                 LIMIT 1
+            """, (p['id_producto'],))
+            existente = cursor.fetchone()
+            if existente:
+                cursor.execute("""
+                    UPDATE alerta SET descripcion = %s, prioridad = %s
+                     WHERE id_alerta = %s
+                """, (descripcion, prioridad, existente['id_alerta']))
+            else:
+                cursor.execute("""
+                    INSERT INTO alerta (id_tipo_alerta, id_producto, descripcion, prioridad, fecha)
+                    VALUES (3, %s, %s, %s, NOW())
+                """, (p['id_producto'], descripcion, prioridad))
+        # Limpiar stale de vencimiento: sin fecha, inactivo o fuera del umbral
+        cursor.execute("""
+            UPDATE alerta SET resuelta = TRUE
+             WHERE id_tipo_alerta = 3 AND resuelta = FALSE
+               AND id_producto NOT IN (
+                   SELECT id_producto FROM producto
+                    WHERE activo = TRUE AND fecha_vencimiento IS NOT NULL
+                      AND fecha_vencimiento <= CURRENT_DATE + make_interval(days => %s))
+        """, (umbral,))
         conn.commit()
         cursor.execute("SELECT * FROM alerta ORDER BY fecha DESC LIMIT 200")
         alertas = cursor.fetchall()

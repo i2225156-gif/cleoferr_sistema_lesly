@@ -4,7 +4,7 @@ Cada KPI devuelve un dict con:
     valor     — número (float/int) o None si no hay datos
     texto     — cadena lista para renderizar ('42 d', '8.5%', '—')
     semaforo  — 'verde' | 'ambar' | 'rojo' | 'sin_datos'
-    formula   — texto del tooltip (fórmula del cálculo)
+    formula    — texto del tooltip (fórmula del cálculo)
     meta      — texto del tooltip (meta del semáforo)
     detalle   — línea adicional visible en la tarjeta (opcional)
 
@@ -14,8 +14,23 @@ tiempo son relativas a NOW() y las ventas cuentan SOLO con pago
 confirmado (criterio §6.9), excepto las canceladas/vencidas del KPI 4
 que son estados de la venta.
 """
+import os
+
 from services.ofertas import SQL_IMPORTE_LINEA
 from services.reservas import _plazo_segundos, _ventas_vencidas_sql
+
+
+def umbral_vencimiento_dias():
+    """Umbral de «próximo a vencer» en días.
+
+    Variable de entorno VENCIMIENTO_UMBRAL_DIAS (default 30). La usan
+    las alertas de vencimiento y el KPI de stock en riesgo: un solo
+    lugar de configuración.
+    """
+    try:
+        return max(1, int(os.environ.get('VENCIMIENTO_UMBRAL_DIAS', '30')))
+    except ValueError:
+        return 30
 
 # ── Umbrales de semáforo (UN solo lugar) ─────────────────────────
 # KPI 3 — días de cobertura de stock (ventas pagadas últimos 30 días)
