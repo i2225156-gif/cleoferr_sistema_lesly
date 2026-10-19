@@ -233,6 +233,17 @@
                                 <a href="/productos/editar/{{ p.id_producto }}" class="btn btn-sm btn-outline-warning" title="Editar">
                                     <i class="fa fa-edit"></i>
                                 </a>
+                                {% if p.activo %}
+                                <form method="POST" action="/productos/desactivar/{{ p.id_producto }}" style="display:inline"
+                                      data-confirm="¿Desactivar este producto? Saldrá del catálogo y conservará su historial."
+                                      data-confirm-titulo="Desactivar producto"
+                                      data-confirm-aceptar="Desactivar">
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                    <button type="submit" class="btn btn-sm btn-outline-secondary" title="Desactivar (obsoleto)">
+                                        <i class="fa fa-toggle-off"></i>
+                                    </button>
+                                </form>
+                                {% endif %}
                                 {% if session.rol == 'administrador' %}
                                 <form method="POST" action="/productos/eliminar/{{ p.id_producto }}" style="display:inline"
                                       data-confirm="¿Eliminar este producto?"

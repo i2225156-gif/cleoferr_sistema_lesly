@@ -226,6 +226,8 @@ _CSRF_PROTEGIDAS = {
     'perfil_actualizar_documento',
     # C3d: borrados destructivos convertidos de GET a POST con CSRF
     'eliminar_producto', 'eliminar_cliente',
+    # TAREA 3.4 (RF4 «obsoleto»): baja reversible, también por POST+CSRF
+    'desactivar_producto',
     # Commit A: alta admin de clientes (form HTML con token en cliente_form)
     'nuevo_cliente',
 }
@@ -1152,6 +1154,38 @@ def actualizar_producto(id):
         conn.rollback()
         app.logger.exception("Error al actualizar el producto %s", id)
         flash('No se pudo actualizar el producto. Revisa los datos e inténtalo de nuevo.', 'danger')
+    finally:
+        conn.close()
+    return redirect(url_for('productos'))
+
+
+# TAREA 3.4 (RF4 «obsoleto»): desactivar producto — SOLO POST con CSRF.
+# La baja es reversible desde Editar (estado) y conserva todo el
+# historial; la eliminación física sigue bloqueada por historial.
+@app.route('/productos/desactivar/<int:id>', methods=['POST'])
+@login_required
+@escritura_required
+def desactivar_producto(id):
+    conn = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT activo FROM producto WHERE id_producto = %s", (id,))
+    fila = cursor.fetchone()
+    if not fila:
+        conn.close()
+        abort(404)
+    try:
+        if not fila['activo']:
+            flash('El producto ya estaba inactivo.', 'info')
+            return redirect(url_for('productos'))
+        cursor.execute("UPDATE producto SET activo = FALSE WHERE id_producto = %s",
+                       (id,))
+        conn.commit()
+        flash('Producto desactivado: sale del catálogo pero conserva su '
+              'historial. Reactívalo desde Editar si lo necesitas.', 'success')
+    except Exception:
+        conn.rollback()
+        app.logger.exception("Error al desactivar el producto %s", id)
+        flash('No se pudo desactivar el producto. Inténtalo de nuevo.', 'danger')
     finally:
         conn.close()
     return redirect(url_for('productos'))
