@@ -502,8 +502,13 @@ def test_kpi_ventas_hoy_determinista_21h_y_23h59(fx):
     esperado = _total_neto_hoy(fx)
     assert esperado >= 25.47
     html = fx['vendedor'].get('/reportes').get_data(as_text=True)
-    assert f'{esperado:.2f}' in html
-    assert f'{esperado + 8.49:.2f}' not in html
+    # El anti-legado (+5h) se verifica sobre los KPI (stat-value): desde
+    # RF12 /reportes también muestra el top de productos con el MONTO
+    # HISTÓRICO (hoy 25.47 + ayer 8.49 del mismo producto = 33.96 es
+    # legítimo ahí, pero jamás en el KPI de hoy).
+    valores_kpi = re.findall(r'<div class="stat-value">([^<]*)</div>', html)
+    assert f'{esperado:.2f}' in valores_kpi
+    assert f'{esperado + 8.49:.2f}' not in valores_kpi
 
 
 def test_kpi_ventas_hoy_dashboard_con_neto(fx):
