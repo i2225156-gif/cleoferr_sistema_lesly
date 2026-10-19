@@ -118,10 +118,11 @@ def test_precio_negativo_rechazado(fx):
     assert 'El campo «precio» no puede ser negativo' in html
 
 
-def test_precio_cero_aceptado(fx):
-    """La BD permite precio >= 0: el cero es válido."""
+def test_precio_cero_rechazado(fx):
+    """Decisión del propietario: el precio debe ser mayor que cero."""
     html = _guardar(fx, precio='0')
-    assert 'Producto creado correctamente' in html
+    assert 'El campo «precio» debe ser mayor que cero' in html
+    assert _persistido(fx, 'Testf2 Producto') is None
 
 
 def test_stock_no_entero_rechazado(fx):

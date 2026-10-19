@@ -172,6 +172,7 @@
                         <th>Marca</th>
                         <th>Precio</th>
                         <th>Stock</th>
+                        <th>Vence</th>
                         <th>Estado</th>
                         {% if session.rol in ['administrador','vendedor'] %}<th>Acciones</th>{% endif %}
                     </tr>
@@ -211,8 +212,19 @@
                             {% endif %}
                         </td>
                         <td>
-                            <span class="badge {% if p.estado == 'activo' %}badge-activo{% else %}badge-inactivo{% endif %}">
-                                {{ p.estado }}
+                            {% if p.vence_dias is none %}
+                                <span class="text-muted">—</span>
+                            {% elif p.vence_dias < 0 %}
+                                <span class="badge bg-danger">Vencido</span>
+                            {% elif p.vence_dias <= vence_umbral %}
+                                <span class="badge bg-warning text-dark">En {{ p.vence_dias }} d</span>
+                            {% else %}
+                                <span class="text-muted" style="font-size:0.8rem">en {{ p.vence_dias }} d</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            <span class="badge {% if p.activo %}badge-activo{% else %}badge-inactivo{% endif %}">
+                                {{ 'activo' if p.activo else 'inactivo' }}
                             </span>
                         </td>
                         {% if session.rol in ['administrador','vendedor'] %}
@@ -221,6 +233,17 @@
                                 <a href="/productos/editar/{{ p.id_producto }}" class="btn btn-sm btn-outline-warning" title="Editar">
                                     <i class="fa fa-edit"></i>
                                 </a>
+                                {% if p.activo %}
+                                <form method="POST" action="/productos/desactivar/{{ p.id_producto }}" style="display:inline"
+                                      data-confirm="¿Desactivar este producto? Saldrá del catálogo y conservará su historial."
+                                      data-confirm-titulo="Desactivar producto"
+                                      data-confirm-aceptar="Desactivar">
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                    <button type="submit" class="btn btn-sm btn-outline-secondary" title="Desactivar (obsoleto)">
+                                        <i class="fa fa-toggle-off"></i>
+                                    </button>
+                                </form>
+                                {% endif %}
                                 {% if session.rol == 'administrador' %}
                                 <form method="POST" action="/productos/eliminar/{{ p.id_producto }}" style="display:inline"
                                       data-confirm="¿Eliminar este producto?"
@@ -242,7 +265,7 @@
                     </tr>
                     {% else %}
                     <tr>
-                        <td colspan="9" class="text-center py-5 text-muted">
+                        <td colspan="10" class="text-center py-5 text-muted">
                             <i class="fa fa-box-open fa-2x mb-2 d-block"></i>
                             No se encontraron productos
                         </td>

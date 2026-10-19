@@ -76,6 +76,106 @@
       </div>
     </div>
 
+    {# ══════ KPIs empresariales (3, 4, 5, 6) con fórmula y meta ══════ #}
+    <div class="row g-3 mb-4">
+      <div class="col-md-6 col-lg-3">
+        <div class="card kpi-card border-0 shadow-sm h-100" style="border-radius:12px"
+             title="{{ kpis.rotacion.formula }} · Meta: {{ kpis.rotacion.meta }}">
+          <div class="card-body text-center py-3">
+            <i class="fa fa-sync-alt mb-1" style="font-size:1.3rem;color:#17a2b8"></i>
+            <div class="kpi-valor" style="font-size:1.35rem;font-weight:800;color:#17a2b8">
+              {{ kpis.rotacion.texto }}
+            </div>
+            <div class="kpi-label text-muted" style="font-size:0.72rem">Cobertura de stock (rotación 30d)</div>
+            <div class="text-muted" style="font-size:0.66rem">{{ kpis.rotacion.detalle or '' }}</div>
+            <span class="badge bg-{{ 'success' if kpis.rotacion.semaforo == 'verde' else ('warning text-dark' if kpis.rotacion.semaforo == 'ambar' else ('danger' if kpis.rotacion.semaforo == 'rojo' else 'secondary')) }}">
+              Meta: 30–60 d
+            </span>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-6 col-lg-3">
+        <div class="card kpi-card border-0 shadow-sm h-100" style="border-radius:12px"
+             title="{{ kpis.cancelados_online.formula }} · Meta: {{ kpis.cancelados_online.meta }}">
+          <div class="card-body text-center py-3">
+            <i class="fa fa-ban mb-1" style="font-size:1.3rem;color:#dc3545"></i>
+            <div class="kpi-valor" style="font-size:1.35rem;font-weight:800;color:#dc3545">
+              {{ kpis.cancelados_online.texto }}
+            </div>
+            <div class="kpi-label text-muted" style="font-size:0.72rem">Pedidos online cancelados / vencidos (30d)</div>
+            <div class="text-muted" style="font-size:0.66rem">{{ kpis.cancelados_online.detalle or '' }}</div>
+            <span class="badge bg-{{ 'success' if kpis.cancelados_online.semaforo == 'verde' else ('warning text-dark' if kpis.cancelados_online.semaforo == 'ambar' else ('danger' if kpis.cancelados_online.semaforo == 'rojo' else 'secondary')) }}">
+              Meta: ≤ 10%
+            </span>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-6 col-lg-3">
+        <div class="card kpi-card border-0 shadow-sm h-100" style="border-radius:12px"
+             title="{{ kpis.tiempo_entrega.formula }} · Meta: {{ kpis.tiempo_entrega.meta }}">
+          <div class="card-body text-center py-3">
+            <i class="fa fa-shipping-fast mb-1" style="font-size:1.3rem;color:#28a745"></i>
+            <div class="kpi-valor" style="font-size:1.35rem;font-weight:800;color:#28a745">
+              {{ kpis.tiempo_entrega.texto }}
+            </div>
+            <div class="kpi-label text-muted" style="font-size:0.72rem">Tiempo medio de entrega (30d)</div>
+            <div class="text-muted" style="font-size:0.66rem">pendiente → entregado, online</div>
+            <span class="badge bg-{{ 'success' if kpis.tiempo_entrega.semaforo == 'verde' else ('warning text-dark' if kpis.tiempo_entrega.semaforo == 'ambar' else ('danger' if kpis.tiempo_entrega.semaforo == 'rojo' else 'secondary')) }}">
+              Meta: ≤ 2 d
+            </span>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-6 col-lg-3">
+        <div class="card kpi-card border-0 shadow-sm h-100" style="border-radius:12px"
+             title="{{ kpis.mezcla.formula }} · Meta: {{ kpis.mezcla.meta }}">
+          <div class="card-body text-center py-3">
+            <i class="fa fa-wallet mb-1" style="font-size:1.3rem;color:#6f42c1"></i>
+            <div class="kpi-valor" style="font-size:1.2rem;font-weight:800;color:#6f42c1">
+              {{ kpis.mezcla.texto }}
+            </div>
+            <div class="kpi-label text-muted" style="font-size:0.72rem">Mezcla de medios de pago (30d)</div>
+            <div class="text-muted" style="font-size:0.66rem">{{ kpis.mezcla.detalle or '' }}</div>
+            <span class="badge bg-{{ 'success' if kpis.mezcla.semaforo == 'verde' else ('warning text-dark' if kpis.mezcla.semaforo == 'ambar' else ('danger' if kpis.mezcla.semaforo == 'rojo' else 'secondary')) }}">
+              Meta: efectivo ≤ 60%
+            </span>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-6 col-lg-3">
+        <div class="card kpi-card border-0 shadow-sm h-100" style="border-radius:12px"
+             title="{{ kpis.margen.formula }} · Meta: {{ kpis.margen.meta }}">
+          <div class="card-body text-center py-3">
+            <i class="fa fa-chart-pie mb-1" style="font-size:1.3rem;color:#20c997"></i>
+            <div class="kpi-valor" style="font-size:1.35rem;font-weight:800;color:#20c997">
+              {{ kpis.margen.texto }}
+            </div>
+            <div class="kpi-label text-muted" style="font-size:0.72rem">Margen bruto (hoy, hora Perú)</div>
+            <div class="text-muted" style="font-size:0.66rem">{{ kpis.margen.detalle or '' }}</div>
+            <span class="badge bg-{{ 'success' if kpis.margen.semaforo == 'verde' else ('warning text-dark' if kpis.margen.semaforo == 'ambar' else ('danger' if kpis.margen.semaforo == 'rojo' else 'secondary')) }}">
+              Meta: ≥ 25%
+            </span>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-6 col-lg-3">
+        <div class="card kpi-card border-0 shadow-sm h-100" style="border-radius:12px"
+             title="{{ kpis.stock_riesgo.formula }} · Meta: {{ kpis.stock_riesgo.meta }}">
+          <div class="card-body text-center py-3">
+            <i class="fa fa-calendar-times mb-1" style="font-size:1.3rem;color:#e83e8c"></i>
+            <div class="kpi-valor" style="font-size:1.1rem;font-weight:800;color:#e83e8c">
+              {{ kpis.stock_riesgo.texto }}
+            </div>
+            <div class="kpi-label text-muted" style="font-size:0.72rem">Stock en riesgo por vencimiento</div>
+            <div class="text-muted" style="font-size:0.66rem">{{ kpis.stock_riesgo.detalle or '' }}</div>
+            <span class="badge bg-{{ 'success' if kpis.stock_riesgo.semaforo == 'verde' else ('warning text-dark' if kpis.stock_riesgo.semaforo == 'ambar' else ('danger' if kpis.stock_riesgo.semaforo == 'rojo' else 'secondary')) }}">
+              Meta: ≤ 2%
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+
     {# ══════ Gráficos (2) ══════ #}
     <div class="row g-3">
       <div class="col-lg-7">

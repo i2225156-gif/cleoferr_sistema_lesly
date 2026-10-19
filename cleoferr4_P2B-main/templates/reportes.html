@@ -160,6 +160,52 @@
     </div>
 </div>
 
+<div class="card card-custom mt-3">
+    <div class="card-header">
+        <i class="fa fa-calendar-times me-2"></i>Vencimiento de stock ({{ vence_umbral }} días)
+    </div>
+    <div class="card-body">
+        {% if vencimiento %}
+        <p class="text-muted mb-2" style="font-size:0.85rem">
+            Productos activos vencidos o que vencen en los próximos {{ vence_umbral }} días.
+            Valor a costo cuando existe; a precio si no.
+        </p>
+        <div class="table-responsive">
+            <table class="table table-sm table-hover mb-0">
+                <thead>
+                    <tr>
+                        <th>Producto</th><th>Vence</th><th>Estado</th>
+                        <th class="text-end">Stock</th><th class="text-end">Valor en riesgo (S/)</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for v in vencimiento %}
+                    <tr>
+                        <td>{{ v.nombre }}</td>
+                        <td>{{ v.fecha_vencimiento.strftime('%d/%m/%Y') }}</td>
+                        <td>
+                            {% if v.vencido %}
+                            <span class="badge bg-danger">Vencido</span>
+                            {% else %}
+                            <span class="badge bg-warning text-dark">Por vencer</span>
+                            {% endif %}
+                        </td>
+                        <td class="text-end">{{ v.stock }}</td>
+                        <td class="text-end">{{ '%.2f'|format(v.valor|float) }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <p class="text-muted mb-0">
+            Ningún producto activo vence en los próximos {{ vence_umbral }} días
+            (o no tienen fecha de vencimiento registrada).
+        </p>
+        {% endif %}
+    </div>
+</div>
+
 {% if reportes %}
 <div class="card card-custom mt-3">
     <div class="card-header"><i class="fa fa-table me-2"></i>Resultados</div>

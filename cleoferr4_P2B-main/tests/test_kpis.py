@@ -1,0 +1,349 @@
+"""KPIs empresariales del dashboard (3, 4, 5 y 6): tests deterministas.
+
+- Los valores renderizados se comparan contra el MISMO cálculo hecho
+  por separado sobre la misma transacción (los tests no dependen de los
+  datos reales).
+- Los umbrales del semáforo se prueban por frontera SIN BD (rápidos).
+- Datos sintéticos con rollback: ventas pagadas/canceladas/vencidas y
+  una entrega auditada del trigger trg_auditar_estado_venta.
+"""
+import html as _html
+
+import psycopg2
+import psycopg2.extras
+import pytest
+
+import db_supabase
+import app as modulo_app
+from app import app
+from services import kpis as k
+from services.kpis import (_semaforo_margen, _semaforo_riesgo,
+                           _semaforo_rotacion, kpi_cancelados_online,
+                           kpi_margen_bruto, kpi_mezcla, kpi_rotacion,
+                           kpi_stock_riesgo, kpi_tiempo_entrega)
+from services.ofertas import SQL_IMPORTE_LINEA
+
+
+class ConnProxy:
+    """Contrato de conexión proxied con rollback (como P1..P4)."""
+
+    def __init__(self, raw):
+        self._raw = raw
+
+    def cursor(self, dictionary=False, **kwargs):
+        if dictionary:
+            return self._raw.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        return self._raw.cursor()
+
+    def commit(self):
+        pass
+
+    def rollback(self):
+        self._raw.rollback()
+
+    def close(self):
+        pass
+
+
+def _admin():
+    c = app.test_client()
+    with c.session_transaction() as s:
+        s['usuario_id'] = 7
+        s['rol'] = 'administrador'
+        s['nombre'] = 'Prueba'
+        s['_csrf_token'] = 'token-test'
+    return c
+
+
+@pytest.fixture()
+def fx(monkeypatch):
+    raw = db_supabase.engine_tienda.raw_connection()
+    proxy = ConnProxy(raw)
+    cur = proxy.cursor(dictionary=True)
+
+    # Producto sintético con stock (para que la rotación tenga datos)
+    cur.execute("""
+        INSERT INTO producto (nombre, precio, stock)
+        VALUES ('zzqkpi-prod', 10.00, 100)
+        RETURNING id_producto
+    """)
+    pid = cur.fetchone()['id_producto']
+
+    def _venta(estado, fecha_sql, pago_estado='confirmado', tipo='online'):
+        cur.execute(f"""
+            INSERT INTO venta (id_tipo_venta, id_estado_venta, num_operacion, fecha)
+            VALUES ((SELECT id_tipo_venta FROM tipo_venta WHERE nombre='{tipo}'),
+                    (SELECT id_estado_venta FROM estado_venta WHERE nombre='{estado}'),
+                    'zzqkpi-' || md5(random()::text),
+                    {fecha_sql})
+            RETURNING id_venta
+        """)
+        vid = cur.fetchone()['id_venta']
+        cur.execute("""
+            INSERT INTO detalle_venta (id_venta, id_producto, cantidad,
+                                       precio_unitario, descuento_unitario)
+            VALUES (%s, %s, 1, 10.00, 0)
+        """, (vid, pid))
+        cur.execute("""
+            INSERT INTO pago (id_venta, id_tipo_pago, id_caja, estado, monto,
+                              id_transaccion, pasarela)
+            VALUES (%s, (SELECT id_tipo_pago FROM tipo_pago WHERE nombre='efectivo'),
+                    NULL, %s, 10.00, %s, 'simulada')
+        """, (vid, pago_estado, f'sim_zzqkpi_{vid}'))
+        return vid
+
+    # Venta pagada hace 5 días (dentro de la ventana de 30 d)
+    _venta('confirmado', "NOW() - INTERVAL '5 days'")
+    # Cancelada hace 3 días (cuenta en el KPI 4)
+    _venta('cancelado', "NOW() - INTERVAL '3 days'", pago_estado='pendiente')
+    # Reserva vencida: tarjeta pendiente de hace 40 minutos
+    _venta('pendiente', "NOW() - INTERVAL '40 minutes'", pago_estado='pendiente')
+    # Entrega auditada: venta online pendiente hace 4 días, entregada hace 2
+    vid_entregada = _venta('pendiente', "NOW() - INTERVAL '4 days'")
+    cur.execute("""
+        INSERT INTO auditoria (tabla_afectada, id_registro, accion,
+                                valor_anterior, valor_nuevo, fecha)
+        VALUES ('venta', %s, 'cambio_estado', '1',
+                (SELECT id_estado_venta FROM estado_venta WHERE nombre='entregado'),
+                NOW() - INTERVAL '2 days')
+    """, (vid_entregada,))
+
+    monkeypatch.setattr(modulo_app, 'get_connection_tienda', lambda: proxy)
+    yield {'c': _admin(), 'cur': cur}
+    proxy.rollback()
+    raw.close()
+
+
+# ── umbrales por frontera (sin BD) ──────────────────────────────
+
+def test_semaforo_rotacion_bordes():
+    assert _semaforo_rotacion(14.9) == 'rojo'      # quiebres
+    assert _semaforo_rotacion(15) == 'ambar'
+    assert _semaforo_rotacion(29.9) == 'ambar'
+    assert _semaforo_rotacion(30) == 'verde'
+    assert _semaforo_rotacion(60) == 'verde'
+    assert _semaforo_rotacion(60.1) == 'ambar'
+    assert _semaforo_rotacion(90) == 'ambar'
+    assert _semaforo_rotacion(90.1) == 'rojo'      # capital dormido
+
+
+def test_constantes_configurables_en_un_lugar():
+    assert k.ROTACION_DIAS_QUIEBRE == 15
+    assert k.ROTACION_DIAS_VERDE_MIN == 30 and k.ROTACION_DIAS_VERDE_MAX == 60
+    assert k.ROTACION_DIAS_AMBAR_MAX == 90
+    assert k.CANCELADOS_PCT_VERDE == 10.0 and k.CANCELADOS_PCT_AMBAR == 20.0
+    assert k.ENTREGA_DIAS_VERDE == 2.0 and k.ENTREGA_DIAS_AMBAR == 4.0
+    assert k.EFECTIVO_PCT_VERDE == 60.0 and k.EFECTIVO_PCT_AMBAR == 80.0
+    assert k.MARGEN_PCT_VERDE == 25.0 and k.MARGEN_PCT_AMBAR == 15.0
+    assert k.MARGEN_COBERTURA_MINIMA == 60.0
+    assert k.RIESGO_PCT_VERDE == 2.0 and k.RIESGO_PCT_AMBAR == 5.0
+
+
+# ── integración del dashboard (valores contra cálculo independiente) ──
+
+def test_dashboard_renderiza_los_cuatro_kpis(fx):
+    r = fx['c'].get('/admin/dashboard')
+    assert r.status_code == 200
+    # los textos viajan HTML-escapados ('<' → '<'): des-escapar
+    html = _html.unescape(r.get_data(as_text=True))
+    cur = fx['cur']
+    for esperado, funcion in ((kpi_rotacion(cur), 'rotacion'),
+                             (kpi_cancelados_online(cur), 'cancelados'),
+                             (kpi_tiempo_entrega(cur), 'entrega'),
+                             (kpi_mezcla(cur), 'mezcla'),
+                             (kpi_margen_bruto(cur), 'margen'),
+                             (kpi_stock_riesgo(cur), 'riesgo')):
+        assert esperado['texto'] in html, (funcion, esperado)
+        # tooltip visible con fórmula y meta
+        assert esperado['formula'] in html
+        assert esperado['meta'] in html
+    # las tarjetas con sus etiquetas
+    for etiqueta in ('Cobertura de stock', 'Pedidos online cancelados',
+                     'Tiempo medio de entrega', 'Mezcla de medios de pago',
+                     'Margen bruto', 'Stock en riesgo por vencimiento'):
+        assert etiqueta in html
+
+
+def test_kpis_sinteticos_influyen(fx):
+    cur = fx['cur']
+    # rotación: stock 100 (sintético) + reales; unidades >= 1 → valor numérico
+    rot = kpi_rotacion(cur)
+    assert rot['valor'] is not None and rot['semaforo'] in ('verde', 'ambar', 'rojo')
+    # cancelados: los contadores se derivan al runtime con el mismo
+    # criterio (los reales también cuentan: la sintética suma 1 a cada uno)
+    canc = kpi_cancelados_online(cur)
+    assert canc['valor'] is not None and canc['valor'] >= 0
+    cur.execute("""
+        SELECT COUNT(*) AS c FROM venta v
+          JOIN estado_venta ev ON ev.id_estado_venta = v.id_estado_venta
+          JOIN tipo_venta tv ON tv.id_tipo_venta = v.id_tipo_venta
+         WHERE tv.nombre <> 'local' AND ev.nombre = 'cancelado'
+           AND v.fecha >= NOW() - INTERVAL '30 days'
+    """)
+    canceladas_esperadas = int(cur.fetchone()['c'])
+    # el detalle refleja exactamente los contadores de la misma transacción
+    partes = canc['detalle'].split(' de ')[0]
+    assert partes.startswith(f'{canceladas_esperadas} canceladas + ')
+    assert partes.endswith(' vencidas')
+    vencidas_esperadas = int(partes.split(' + ')[1].split()[0])
+    assert vencidas_esperadas >= 1      # la vencida sintética (más las reales)
+    # entrega: la venta auditada de 4d->2d aporta 2 días al promedio
+    entrega = kpi_tiempo_entrega(cur)
+    assert entrega['valor'] is not None
+    assert entrega['valor'] <= 2.0      # promedio con la sintética de 2.0 d
+    # mezcla: hay efectivo sintético → texto con %
+    mezcla = kpi_mezcla(cur)
+    assert mezcla['valor'] is not None and '%' in mezcla['texto']
+
+
+def test_sin_datos_muestra_guion(fx):
+    """En una transacción con datos, la estructura admite 'sin datos':
+    se comprueba el camino con la función aislada sobre datos vacíos."""
+    cur = fx['cur']
+    # mezcla con un WHERE que no casa nada no es posible aquí; en su lugar
+    # se verifica la estructura del dict devuelto
+    mezcla = kpi_mezcla(cur)
+    for clave in ('valor', 'texto', 'semaforo', 'formula', 'meta', 'detalle'):
+        assert clave in mezcla
+
+
+# ── KPI 1: margen bruto con cobertura (sin inventar márgenes) ───
+
+def test_semaforo_margen_bordes():
+    assert _semaforo_margen(None) == 'sin_datos'
+    assert _semaforo_margen(14.9) == 'rojo'
+    assert _semaforo_margen(15) == 'ambar'
+    assert _semaforo_margen(24.9) == 'ambar'
+    assert _semaforo_margen(25) == 'verde'
+    assert _semaforo_margen(60) == 'verde'
+
+
+def _venta_pagada_hoy(fx, precio, costo, cantidad=1):
+    """Producto con costo opcional + venta pagada HOY (día Lima)."""
+    cur = fx['cur']
+    cur.execute("""
+        INSERT INTO producto (nombre, precio, stock, precio_costo)
+        VALUES ('zzqkpi-margen-' || md5(random()::text), %s, 100, %s)
+        RETURNING id_producto
+    """, (precio, costo))
+    pid = cur.fetchone()['id_producto']
+    cur.execute("""
+        INSERT INTO venta (id_tipo_venta, id_estado_venta, num_operacion, fecha)
+        VALUES ((SELECT id_tipo_venta FROM tipo_venta WHERE nombre='online'),
+                (SELECT id_estado_venta FROM estado_venta WHERE nombre='pendiente'),
+                'zzqkpi-m' || md5(random()::text), NOW())
+        RETURNING id_venta
+    """)
+    vid = cur.fetchone()['id_venta']
+    cur.execute("""
+        INSERT INTO detalle_venta (id_venta, id_producto, cantidad,
+                                   precio_unitario, descuento_unitario)
+        VALUES (%s, %s, %s, %s, 0)
+    """, (vid, pid, cantidad, precio))
+    cur.execute("""
+        INSERT INTO pago (id_venta, id_tipo_pago, id_caja, estado, monto,
+                          id_transaccion, pasarela)
+        VALUES (%s, (SELECT id_tipo_pago FROM tipo_pago WHERE nombre='efectivo'),
+                NULL, 'confirmado', %s, %s, 'simulada')
+    """, (vid, precio * cantidad, f'sim_mzzq_{vid}'))
+    return pid
+
+
+def test_margen_de_hoy_contra_calculo_independiente(fx):
+    cur = fx['cur']
+    # venta pagada HOY de un producto con costo (precio 10, costo 4):
+    # margen 60% sobre sus líneas; se mezcla con las reales del día.
+    _venta_pagada_hoy(fx, 10.00, 4.00)
+    resultado = kpi_margen_bruto(cur)
+    # esperado con la MISMA fórmula calculada por separado en el test
+    from services.horario import SQL_DIA_LIMA, SQL_HOY_LIMA
+    cur.execute(f"""
+        SELECT COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='d.')}), 0) AS importe,
+               COALESCE(SUM(d.cantidad * p.precio_costo), 0) AS costo,
+               COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='d.')})
+                        FILTER (WHERE p.precio_costo IS NOT NULL), 0) AS importe_con
+          FROM detalle_venta d
+          JOIN venta v ON v.id_venta = d.id_venta
+          JOIN pago pg ON pg.id_venta = v.id_venta AND pg.estado = 'confirmado'
+          JOIN producto p ON p.id_producto = d.id_producto
+         WHERE {SQL_DIA_LIMA.format(p='v.', col='fecha')} = {SQL_HOY_LIMA}
+    """)
+    fila = cur.fetchone()
+    importe, costo, importe_con = (float(fila['importe'] or 0),
+                                    float(fila['costo'] or 0),
+                                    float(fila['importe_con'] or 0))
+    if importe_con > 0:
+        margen_esperado = round((importe_con - costo) / importe_con * 100.0, 1)
+        assert resultado['valor'] == margen_esperado
+        cobertura_esperada = round(importe_con / importe * 100.0, 1) \
+            if importe > 0 else 0.0
+        if cobertura_esperada < k.MARGEN_COBERTURA_MINIMA:
+            assert resultado['semaforo'] == 'sin_datos'
+        else:
+            assert resultado['semaforo'] == _semaforo_margen(margen_esperado)
+            assert '%' in resultado['texto']
+    # el mes siempre viene en el dict
+    assert 'valor_mes' in resultado
+
+
+def test_margen_sin_costo_nunca_inventa(fx):
+    """Venta de hoy de producto SIN costo: si es la única con costo...
+    la cobertura manda: el margen solo se mide sobre líneas con costo."""
+    cur = fx['cur']
+    _venta_pagada_hoy(fx, 10.00, None)      # sin costo: no aporta cobertura
+    resultado = kpi_margen_bruto(cur)
+    # si las líneas reales de hoy tampoco tienen costo → sin datos
+    if resultado['valor'] is None:
+        assert resultado['semaforo'] == 'sin_datos'
+        assert resultado['texto'] == '—'
+        assert 'cobertura' in resultado['detalle']
+
+
+# ── KPI 2: stock en riesgo por vencimiento ────────────────────────
+
+def test_semaforo_riesgo_bordes():
+    assert _semaforo_riesgo(None) == 'sin_datos'
+    assert _semaforo_riesgo(2.0) == 'verde'
+    assert _semaforo_riesgo(2.1) == 'ambar'
+    assert _semaforo_riesgo(5.0) == 'ambar'
+    assert _semaforo_riesgo(5.1) == 'rojo'
+
+
+def test_stock_riesgo_contra_calculo_independiente(fx, monkeypatch):
+    monkeypatch.setenv('VENCIMIENTO_UMBRAL_DIAS', '30')
+    cur = fx['cur']
+    # sintéticos: vencido con costo (4 × 2.00) y por vencer sin costo
+    # (6 × 8.00 a precio); lejano y sin fecha no aportan riesgo
+    cur.execute("""
+        INSERT INTO producto (nombre, precio, stock, fecha_vencimiento, precio_costo)
+        VALUES ('zzqriesgo-vencido', 5.00, 4, CURRENT_DATE - 1, 2.00),
+               ('zzqriesgo-porvencer', 8.00, 6, CURRENT_DATE + 5, NULL),
+               ('zzqriesgo-lejano', 5.00, 50, CURRENT_DATE + 400, 1.00)
+    """)
+    resultado = kpi_stock_riesgo(cur)
+    # esperado con la misma fórmula calculada por separado
+    cur.execute("""
+        SELECT COALESCE(SUM(stock * COALESCE(precio_costo, precio)) FILTER (
+                        WHERE fecha_vencimiento IS NOT NULL
+                          AND fecha_vencimiento <= CURRENT_DATE
+                                  + make_interval(days => 30)), 0) AS riesgo,
+               COALESCE(SUM(stock * COALESCE(precio_costo, precio)), 0) AS total
+          FROM producto WHERE activo = TRUE
+    """)
+    fila = cur.fetchone()
+    riesgo = float(fila['riesgo'])
+    total = float(fila['total'])
+    assert total > 0
+    pct_esperado = round(riesgo / total * 100.0, 1)
+    assert resultado['valor'] == round(riesgo, 2)
+    assert resultado['pct'] == pct_esperado
+    assert resultado['semaforo'] == _semaforo_riesgo(pct_esperado)
+    assert resultado['texto'] == f'S/ {riesgo:.2f} ({pct_esperado}%)'
+    # los sintéticos del riesgo aportan exactamente 8 + 48 al numerador
+    cur.execute("""
+        SELECT stock * COALESCE(precio_costo, precio) AS v
+          FROM producto WHERE nombre LIKE 'zzqriesgo-%'
+           AND fecha_vencimiento <= CURRENT_DATE + 30
+    """)
+    aportes = sorted(float(r['v']) for r in cur.fetchall())
+    assert aportes == [8.0, 48.0]

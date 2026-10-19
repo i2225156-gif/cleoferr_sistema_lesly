@@ -42,6 +42,21 @@
                     <input type="number" name="stock" min="0" class="form-control"
                            value="{{ producto.stock if producto else 0 }}" required>
                 </div>
+                <div class="col-md-4">
+                    <label class="form-label fw-semibold">Precio de costo (S/)
+                        <span class="text-muted fw-normal" style="font-size:0.75rem">(opcional: KPI de margen)</span>
+                    </label>
+                    <input type="number" name="precio_costo" step="0.01" min="0"
+                           class="form-control"
+                           value="{{ producto.precio_costo if producto and producto.precio_costo is not none else '' }}">
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label fw-semibold">Fecha de vencimiento
+                        <span class="text-muted fw-normal" style="font-size:0.75rem">(opcional)</span>
+                    </label>
+                    <input type="date" name="fecha_vencimiento" class="form-control"
+                           value="{{ producto.fecha_vencimiento.isoformat() if producto and producto.fecha_vencimiento else '' }}">
+                </div>
                 <div class="col-12">
     <label class="form-label fw-semibold">
         <i class="fa fa-image me-1" style="color:var(--naranja)"></i>

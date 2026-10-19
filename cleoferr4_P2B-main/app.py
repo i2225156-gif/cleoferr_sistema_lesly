@@ -41,7 +41,8 @@ from services.inventario import devolver_stock_venta
 from services.ofertas import (SQL_IMPORTE_LINEA, SQL_PRECIO_VIGENTE,
                               calcular_descuento_unitario, oferta_vigente,
                               precios_vigentes)
-from services.validacion import entero, numero, requerido, texto
+from services.validacion import (correo as _correo_valido, entero, nombre_persona,
+                                 numero, requerido, texto)
 from services.reservas import (liberar_reservas_vencidas, preview_reservas_vencidas,
                                total_reservas_vencidas)
 from services.pagos import (cancelar_pedido_con_pago_inicial, confirmar_pago,
@@ -198,6 +199,8 @@ class Producto(db.Model):
     id_marca     = db.Column(db.Integer)
     activo       = db.Column(db.Boolean, default=True)
     imagen       = db.Column(db.String(255))
+    fecha_vencimiento = db.Column(db.Date)
+    precio_costo = db.Column(db.Numeric(10, 2))
 
     def __repr__(self):
         return f"<Producto {self.nombre}>"
@@ -223,6 +226,8 @@ _CSRF_PROTEGIDAS = {
     'perfil_actualizar_documento',
     # C3d: borrados destructivos convertidos de GET a POST con CSRF
     'eliminar_producto', 'eliminar_cliente',
+    # TAREA 3.4 (RF4 «obsoleto»): baja reversible, también por POST+CSRF
+    'desactivar_producto',
     # Commit A: alta admin de clientes (form HTML con token en cliente_form)
     'nuevo_cliente',
 }
@@ -600,10 +605,20 @@ def productos():
 
     conn.close()
 
+    # RF17: días hasta vencer por fila (para la columna y su semáforo);
+    # hoy como fecha local (la columna es DATE naive).
+    from datetime import date as _date
+    from services.kpis import umbral_vencimiento_dias
+    _hoy = _date.today()
+    for p in lista:
+        p['vence_dias'] = ((p['fecha_vencimiento'] - _hoy).days
+                           if p.get('fecha_vencimiento') else None)
+
     return render_template('productos.html', productos=lista, categorias=categorias, marcas=marcas,
                            pedidos_count=pedidos_count, alertas_count=alertas_count,
                            reportes_count=movimientos_count, bajo_stock=bajo_stock,
                            pagina=pagina, total=total, por_pagina=POR_PAGINA_ADMIN,
+                           vence_umbral=umbral_vencimiento_dias(),
                            filtros_qs=_filtros_sin_pagina())
 
 
@@ -1007,6 +1022,8 @@ def _validar_producto(cursor):
     precio, error = numero('precio', request.form.get('precio'))
     if error:
         return None, error
+    if precio <= 0:
+        return None, 'El campo «precio» debe ser mayor que cero.'
     stock, error = entero('stock', request.form.get('stock'))
     if error:
         return None, error
@@ -1016,6 +1033,22 @@ def _validar_producto(cursor):
     estado = (request.form.get('estado') or '').strip()
     if estado not in ('activo', 'inactivo'):
         estado = 'activo'
+
+    # RF17 / margen: fecha de vencimiento y precio de costo, ambos
+    # OPCIONALES (nullable en la BD). Sin fecha = sin control de
+    # vencimiento; sin costo = el KPI de margen muestra la cobertura.
+    fecha_vencimiento = texto(request.form.get('fecha_vencimiento'))
+    if fecha_vencimiento is not None:
+        try:
+            fecha_vencimiento = datetime.strptime(fecha_vencimiento,
+                                                  '%Y-%m-%d').date()
+        except ValueError:
+            return None, 'La fecha de vencimiento no es válida.'
+    precio_costo = texto(request.form.get('precio_costo'))
+    if precio_costo is not None:
+        precio_costo, error = numero('precio de costo', precio_costo)
+        if error:
+            return None, error
 
     id_categoria, error = _id_foranea(cursor, 'id_categoria', 'categoria',
                                       'id_categoria', 'categoría')
@@ -1027,7 +1060,8 @@ def _validar_producto(cursor):
         return None, error
     return {'nombre': nombre, 'descripcion': descripcion, 'precio': precio,
             'stock': stock, 'id_categoria': id_categoria, 'id_marca': id_marca,
-            'activo': estado == 'activo'}, None
+            'activo': estado == 'activo', 'fecha_vencimiento': fecha_vencimiento,
+            'precio_costo': precio_costo}, None
 
 
 @app.route('/productos/guardar', methods=['POST'])
@@ -1046,11 +1080,13 @@ def guardar_producto():
         nombre_imagen = guardar_imagen('imagen')
         cursor.execute("""
             INSERT INTO producto (nombre, descripcion, precio, stock,
-                                  id_categoria, id_marca, activo, imagen)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                                  id_categoria, id_marca, activo, imagen,
+                                  fecha_vencimiento, precio_costo)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (datos['nombre'], datos['descripcion'], datos['precio'],
               datos['stock'], datos['id_categoria'], datos['id_marca'],
-              datos['activo'], nombre_imagen))
+              datos['activo'], nombre_imagen, datos['fecha_vencimiento'],
+              datos['precio_costo']))
         conn.commit()
         flash("Producto creado correctamente.", "success")
     except Exception:
@@ -1102,11 +1138,13 @@ def actualizar_producto(id):
         cursor.execute("""
             UPDATE producto
                SET nombre = %s, descripcion = %s, precio = %s, stock = %s,
-                   id_categoria = %s, id_marca = %s, activo = %s
+                   id_categoria = %s, id_marca = %s, activo = %s,
+                   fecha_vencimiento = %s, precio_costo = %s
              WHERE id_producto = %s
         """, (datos['nombre'], datos['descripcion'], datos['precio'],
               datos['stock'], datos['id_categoria'], datos['id_marca'],
-              datos['activo'], id))
+              datos['activo'], datos['fecha_vencimiento'],
+              datos['precio_costo'], id))
         if nombre_imagen:
             cursor.execute("UPDATE producto SET imagen = %s WHERE id_producto = %s",
                            (nombre_imagen, id))
@@ -1116,6 +1154,38 @@ def actualizar_producto(id):
         conn.rollback()
         app.logger.exception("Error al actualizar el producto %s", id)
         flash('No se pudo actualizar el producto. Revisa los datos e inténtalo de nuevo.', 'danger')
+    finally:
+        conn.close()
+    return redirect(url_for('productos'))
+
+
+# TAREA 3.4 (RF4 «obsoleto»): desactivar producto — SOLO POST con CSRF.
+# La baja es reversible desde Editar (estado) y conserva todo el
+# historial; la eliminación física sigue bloqueada por historial.
+@app.route('/productos/desactivar/<int:id>', methods=['POST'])
+@login_required
+@escritura_required
+def desactivar_producto(id):
+    conn = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT activo FROM producto WHERE id_producto = %s", (id,))
+    fila = cursor.fetchone()
+    if not fila:
+        conn.close()
+        abort(404)
+    try:
+        if not fila['activo']:
+            flash('El producto ya estaba inactivo.', 'info')
+            return redirect(url_for('productos'))
+        cursor.execute("UPDATE producto SET activo = FALSE WHERE id_producto = %s",
+                       (id,))
+        conn.commit()
+        flash('Producto desactivado: sale del catálogo pero conserva su '
+              'historial. Reactívalo desde Editar si lo necesitas.', 'success')
+    except Exception:
+        conn.rollback()
+        app.logger.exception("Error al desactivar el producto %s", id)
+        flash('No se pudo desactivar el producto. Inténtalo de nuevo.', 'danger')
     finally:
         conn.close()
     return redirect(url_for('productos'))
@@ -1205,30 +1275,55 @@ def clientes():
 @escritura_required
 def nuevo_cliente():
     if request.method == 'POST':
-        nombre    = request.form['nombre']
-        email     = _normalizar_correo(request.form['email'])
-        telefono  = request.form.get('telefono', '')
-        direccion = request.form.get('direccion', '')
-        contrasena = request.form.get('contrasena', '123456')
-        hash_pw   = bcrypt.generate_password_hash(contrasena).decode('utf-8')
+        # FASE 2: validación de servidor con el módulo común — nombre de
+        # PERSONA (sin dígitos), correo con formato y no duplicado con
+        # mensaje amigable, teléfono/dirección opcionales con longitud, y
+        # contraseña OBLIGATORIA con la MISMA regla del registro web
+        # (el default '123456' queda eliminado).
+        nombre, error = nombre_persona('nombre', request.form.get('nombre'), 100)
+        if error:
+            flash(error, 'danger')
+            return redirect(url_for('nuevo_cliente'))
+        email, error = _correo_valido(request.form.get('email'), 120)
+        if error:
+            flash(error, 'danger')
+            return redirect(url_for('nuevo_cliente'))
+        telefono = texto(request.form.get('telefono'))
+        if telefono and len(telefono) > 20:
+            flash('El teléfono no puede superar 20 caracteres.', 'danger')
+            return redirect(url_for('nuevo_cliente'))
+        direccion = texto(request.form.get('direccion'))
+        if direccion and len(direccion) > 200:
+            flash('La dirección no puede superar 200 caracteres.', 'danger')
+            return redirect(url_for('nuevo_cliente'))
+        contrasena = request.form.get('contrasena') or ''
+        if len(contrasena) < 6:
+            flash('La contraseña es obligatoria y debe tener al menos 6 caracteres.', 'danger')
+            return redirect(url_for('nuevo_cliente'))
+        hash_pw = bcrypt.generate_password_hash(contrasena).decode('utf-8')
 
         conn   = get_connection_auth()
         cursor = conn.cursor()
         try:
+            # Duplicado con mensaje amigable (sin esperar al error de la BD)
+            cursor.execute("SELECT 1 FROM cliente WHERE LOWER(TRIM(email)) = %s",
+                           (email,))
+            if cursor.fetchone():
+                flash('Ese correo ya está registrado por otro cliente.', 'danger')
+                return redirect(url_for('nuevo_cliente'))
             # El formulario envía nombre y apellidos CONCATENADOS en "nombre"
             # (hidden nombreCompleto del cliente_form): se separan con el
             # MISMO criterio del POS (registrar_pos): primera palabra =
-            # nombre, resto = apellido (el JS del form valida ambos).
+            # nombre, resto = apellido.
             partes = nombre.split()
-            nombre_db = partes[0] if partes else nombre
+            nombre_db = partes[0]
             apellido_db = ' '.join(partes[1:])
             # Sin documento: id_tipo_documento=1 (DNI) y nro_documento NULL,
-            # criterio del registro web (registro_cliente). OJO: nunca ''
-            # — la BD tiene UNIQUE (id_tipo_documento, nro_documento).
+            # criterio del registro web. OJO: nunca '' — la BD tiene UNIQUE
+            # (id_tipo_documento, nro_documento).
+            # activo se fija de forma explicita: si se deja al DEFAULT de la
+            # columna (TRUE) el cliente queda "verificado" sin haberlo hecho.
             cursor.execute(
-                # activo se fija de forma explicita: si se deja al DEFAULT de la
-                # columna (TRUE) el cliente queda "verificado" sin haberlo hecho y
-                # despues no puede registrarse por la web ("ya esta registrado").
                 "INSERT INTO cliente (nombre, apellido, email, telefono, direccion,"
                 " contrasena, activo, id_tipo_documento, nro_documento) "
                 "VALUES (%s,%s,%s,%s,%s,%s,TRUE,1,NULL)",
@@ -1236,11 +1331,11 @@ def nuevo_cliente():
             )
             conn.commit()
             flash("Cliente registrado correctamente.", "success")
-        except Exception as e:
+        except Exception:
             conn.rollback()
             # El flash nunca oculta el bug: la excepción queda en el log.
             app.logger.exception("Error al registrar cliente desde el panel admin")
-            flash(f"Error al registrar cliente: {e}", "danger")
+            flash('No se pudo registrar el cliente. Revisa los datos e inténtalo de nuevo.', 'danger')
         finally:
             conn.close()
         return redirect(url_for('clientes'))
@@ -1254,10 +1349,23 @@ def editar_cliente(id):
     conn   = get_connection_auth()
     cursor = conn.cursor(dictionary=True)
     if request.method == 'POST':
-        nombre    = request.form['nombre']
-        email     = _normalizar_correo(request.form['email'])
-        telefono  = request.form.get('telefono', '')
-        direccion = request.form.get('direccion', '')
+        # FASE 2: validación de servidor con el módulo común
+        nombre, error = nombre_persona('nombre', request.form.get('nombre'), 100)
+        if error:
+            flash(error, 'danger')
+            return redirect(url_for('editar_cliente', id=id))
+        email, error = _correo_valido(request.form.get('email'), 120)
+        if error:
+            flash(error, 'danger')
+            return redirect(url_for('editar_cliente', id=id))
+        telefono = texto(request.form.get('telefono'))
+        if telefono and len(telefono) > 20:
+            flash('El teléfono no puede superar 20 caracteres.', 'danger')
+            return redirect(url_for('editar_cliente', id=id))
+        direccion = texto(request.form.get('direccion'))
+        if direccion and len(direccion) > 200:
+            flash('La dirección no puede superar 200 caracteres.', 'danger')
+            return redirect(url_for('editar_cliente', id=id))
         # Documento de identidad (admin puede corregirlo)
         tipo_doc_nombre = (request.form.get('tipo_documento') or '').strip().lower()
         nro_documento  = normalizar_numero(request.form.get('nro_documento', ''))
@@ -1270,6 +1378,12 @@ def editar_cliente(id):
             tipo_doc_nombre = None
             nro_documento = None
         try:
+            # Duplicado con mensaje amigable, excluyendo al propio cliente
+            cursor.execute("SELECT 1 FROM cliente WHERE LOWER(TRIM(email)) = %s"
+                           " AND id_cliente <> %s", (email, id))
+            if cursor.fetchone():
+                flash('Ese correo ya está registrado por otro cliente.', 'danger')
+                return redirect(url_for('editar_cliente', id=id))
             if tipo_doc_nombre:
                 cursor.execute(
                     "SELECT id_tipo_documento FROM tipo_documento WHERE LOWER(TRIM(nombre)) = %s",
@@ -1317,9 +1431,10 @@ def editar_cliente(id):
                 )
             conn.commit()
             flash("Cliente actualizado correctamente.", "success")
-        except Exception as e:
+        except Exception:
             conn.rollback()
-            flash(f"Error: {e}", "danger")
+            app.logger.exception("Error al actualizar el cliente %s", id)
+            flash('No se pudo actualizar el cliente. Revisa los datos e inténtalo de nuevo.', 'danger')
         finally:
             conn.close()
         return redirect(url_for('clientes'))
@@ -1521,55 +1636,88 @@ def inventario():
 @login_required
 @escritura_required
 def registrar_movimiento():
-    tipo         = request.form['tipo']           # 'entrada' | 'salida'
-    id_producto  = request.form['id_producto']
+    # FASE 2: validación de servidor con el módulo común — nada de 500
+    # por entradas malformadas ni flashes con texto crudo de la BD.
+    tipo = (request.form.get('tipo') or '').strip()
+    if tipo not in ('entrada', 'salida'):
+        flash('El tipo de movimiento debe ser entrada o salida.', 'danger')
+        return redirect(url_for('inventario'))
+    id_producto, error = entero('producto', request.form.get('id_producto'))
+    if error:
+        flash(error, 'danger')
+        return redirect(url_for('inventario'))
+    cantidad, error = entero('cantidad', request.form.get('cantidad'))
+    if error:
+        flash(error, 'danger')
+        return redirect(url_for('inventario'))
+    if cantidad <= 0:
+        flash('El campo «cantidad» debe ser mayor que cero.', 'danger')
+        return redirect(url_for('inventario'))
+    # Precio unitario OPCIONAL: si viene, debe ser número >= 0
+    precio_unit = texto(request.form.get('precio_unitario'))
+    if precio_unit is not None:
+        precio_unit, error = numero('precio unitario', precio_unit)
+        if error:
+            flash(error, 'danger')
+            return redirect(url_for('inventario'))
+    observacion = texto(request.form.get('observacion'))
     # Para compatibilidad: recibimos ambos campos, uno estará vacío según tipo
-    id_proveedor = request.form.get('id_proveedor') or None
-    id_vendedor  = request.form.get('id_vendedor') or None
-    cantidad     = int(request.form['cantidad'])
-    precio_unit  = request.form.get('precio_unitario') or 0
-    observacion  = request.form.get('observacion', '')
-    id_usuario   = session['usuario_id']
+    id_proveedor = None
+    id_vendedor = None
+    if tipo == 'entrada' and texto(request.form.get('id_proveedor')):
+        id_proveedor, error = entero('proveedor', request.form.get('id_proveedor'))
+        if error:
+            flash(error, 'danger')
+            return redirect(url_for('inventario'))
+    if tipo == 'salida' and texto(request.form.get('id_vendedor')):
+        id_vendedor, error = entero('vendedor', request.form.get('id_vendedor'))
+        if error:
+            flash(error, 'danger')
+            return redirect(url_for('inventario'))
+    id_usuario = session['usuario_id']
 
     conn   = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
-
-    # Obtener stock actual
-    cursor.execute("SELECT stock FROM producto WHERE id_producto=%s", (id_producto,))
-    prod = cursor.fetchone()
-    if not prod:
-        flash("Producto no encontrado.", "danger")
-        conn.close()
-        return redirect(url_for('inventario'))
-
-    stock_actual = prod['stock']
-    if tipo == 'salida' and cantidad > stock_actual:
-        flash(f"Stock insuficiente. Disponible: {stock_actual}", "danger")
-        conn.close()
-        return redirect(url_for('inventario'))
-
-    nuevo_stock = stock_actual + cantidad if tipo == 'entrada' else stock_actual - cantidad
-
-    # Si es salida y se seleccionó un vendedor, obtener su nombre y añadir a observación
-    # (la tabla usuario vive en la BD Auth, por eso se consulta por separado)
-    if tipo == 'salida' and id_vendedor:
-        try:
-            conn_a   = get_connection_auth()
-            cursor_a = conn_a.cursor(dictionary=True)
-            cursor_a.execute("SELECT nombres FROM usuario WHERE id_usuario=%s", (id_vendedor,))
-            row = cursor_a.fetchone()
-            conn_a.close()
-            nombre_vendedor = row['nombres'] if row else None
-            if nombre_vendedor:
-                observacion = f"Vendedor: {nombre_vendedor}" + (f" - {observacion}" if observacion else "")
-        except Exception:
-            # no crítico, continuar con la observación sin nombre
-            app.logger.exception("Error consultando nombre del vendedor id=%s para observación", id_vendedor)
-
-    # Para compatibilidad con la estructura actual, solo llenamos id_proveedor para entradas.
-    proveedor_db_value = id_proveedor if tipo == 'entrada' and id_proveedor else None
-
     try:
+        cursor.execute("SELECT stock FROM producto WHERE id_producto=%s", (id_producto,))
+        prod = cursor.fetchone()
+        if not prod:
+            flash("Producto no encontrado.", "danger")
+            return redirect(url_for('inventario'))
+
+        if id_proveedor:
+            cursor.execute("SELECT 1 FROM proveedor WHERE id_proveedor=%s",
+                           (id_proveedor,))
+            if not cursor.fetchone():
+                flash("El proveedor seleccionado no existe.", "danger")
+                return redirect(url_for('inventario'))
+
+        stock_actual = prod['stock']
+        if tipo == 'salida' and cantidad > stock_actual:
+            flash(f"Stock insuficiente. Disponible: {stock_actual}", "danger")
+            return redirect(url_for('inventario'))
+
+        nuevo_stock = stock_actual + cantidad if tipo == 'entrada' else stock_actual - cantidad
+
+        # Si es salida y se seleccionó un vendedor, obtener su nombre y añadir a observación
+        # (la tabla usuario vive en la BD Auth, por eso se consulta por separado)
+        if tipo == 'salida' and id_vendedor:
+            try:
+                conn_a   = get_connection_auth()
+                cursor_a = conn_a.cursor(dictionary=True)
+                cursor_a.execute("SELECT nombres FROM usuario WHERE id_usuario=%s", (id_vendedor,))
+                row = cursor_a.fetchone()
+                conn_a.close()
+                nombre_vendedor = row['nombres'] if row else None
+                if nombre_vendedor:
+                    observacion = f"Vendedor: {nombre_vendedor}" + (f" - {observacion}" if observacion else "")
+            except Exception:
+                # no crítico, continuar con la observación sin nombre
+                app.logger.exception("Error consultando nombre del vendedor id=%s para observación", id_vendedor)
+
+        # Para compatibilidad con la estructura actual, solo llenamos id_proveedor para entradas.
+        proveedor_db_value = id_proveedor if tipo == 'entrada' and id_proveedor else None
+
         cursor.execute("""
             INSERT INTO inventario_movimiento
                 (tipo, id_producto, id_proveedor, cantidad, precio_unitario, observacion, id_usuario, stock_resultante)
@@ -1579,9 +1727,10 @@ def registrar_movimiento():
         cursor.execute("UPDATE producto SET stock=%s WHERE id_producto=%s", (nuevo_stock, id_producto))
         conn.commit()
         flash(f"Movimiento de {'entrada' if tipo=='entrada' else 'salida'} registrado. Nuevo stock: {nuevo_stock}", "success")
-    except Exception as e:
+    except Exception:
         conn.rollback()
-        flash(f"Error al registrar movimiento: {e}", "danger")
+        app.logger.exception("Error al registrar el movimiento de inventario")
+        flash('No se pudo registrar el movimiento. Revisa los datos e inténtalo de nuevo.', 'danger')
     finally:
         conn.close()
     return redirect(url_for('inventario'))
@@ -1613,11 +1762,33 @@ def proveedores():
 @escritura_required
 def nuevo_proveedor():
     if request.method == 'POST':
-        nombre    = request.form['nombre']
-        contacto  = request.form.get('contacto', '')
-        telefono  = request.form.get('telefono', '')
-        email     = request.form.get('email', '')
-        direccion = request.form.get('direccion', '')
+        # FASE 2: razón social (admite dígitos: 'Ferretería Los 2 Amigos'),
+        # contacto opcional como nombre de persona, correo opcional con
+        # formato, longitudes reales de las columnas.
+        nombre, error = requerido('razón social', request.form.get('nombre'), 100)
+        if error:
+            flash(error, 'danger')
+            return redirect(url_for('nuevo_proveedor'))
+        contacto = texto(request.form.get('contacto'))
+        if contacto:
+            contacto, error = nombre_persona('contacto', contacto, 50)
+            if error:
+                flash(error, 'danger')
+                return redirect(url_for('nuevo_proveedor'))
+        telefono = texto(request.form.get('telefono'))
+        if telefono and len(telefono) > 20:
+            flash('El teléfono no puede superar 20 caracteres.', 'danger')
+            return redirect(url_for('nuevo_proveedor'))
+        direccion = texto(request.form.get('direccion'))
+        if direccion and len(direccion) > 100:
+            flash('La dirección no puede superar 100 caracteres.', 'danger')
+            return redirect(url_for('nuevo_proveedor'))
+        email = texto(request.form.get('email'))
+        if email:
+            email, error = _correo_valido(email, 50)
+            if error:
+                flash('El correo electrónico no tiene un formato válido.', 'danger')
+                return redirect(url_for('nuevo_proveedor'))
         conn      = get_connection_tienda()
         cursor    = conn.cursor()
         try:
@@ -1627,9 +1798,10 @@ def nuevo_proveedor():
             )
             conn.commit()
             flash("Proveedor registrado.", "success")
-        except Exception as e:
+        except Exception:
             conn.rollback()
-            flash(f"Error: {e}", "danger")
+            app.logger.exception("Error al registrar proveedor")
+            flash('No se pudo registrar el proveedor. Revisa los datos e inténtalo de nuevo.', 'danger')
         finally:
             conn.close()
         return redirect(url_for('proveedores'))
@@ -1643,11 +1815,31 @@ def editar_proveedor(id):
     conn   = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
     if request.method == 'POST':
-        nombre    = request.form['nombre']
-        contacto  = request.form.get('contacto', '')
-        telefono  = request.form.get('telefono', '')
-        email     = request.form.get('email', '')
-        direccion = request.form.get('direccion', '')
+        # FASE 2: mismas reglas que el alta
+        nombre, error = requerido('razón social', request.form.get('nombre'), 100)
+        if error:
+            flash(error, 'danger')
+            return redirect(url_for('editar_proveedor', id=id))
+        contacto = texto(request.form.get('contacto'))
+        if contacto:
+            contacto, error = nombre_persona('contacto', contacto, 50)
+            if error:
+                flash(error, 'danger')
+                return redirect(url_for('editar_proveedor', id=id))
+        telefono = texto(request.form.get('telefono'))
+        if telefono and len(telefono) > 20:
+            flash('El teléfono no puede superar 20 caracteres.', 'danger')
+            return redirect(url_for('editar_proveedor', id=id))
+        direccion = texto(request.form.get('direccion'))
+        if direccion and len(direccion) > 100:
+            flash('La dirección no puede superar 100 caracteres.', 'danger')
+            return redirect(url_for('editar_proveedor', id=id))
+        email = texto(request.form.get('email'))
+        if email:
+            email, error = _correo_valido(email, 50)
+            if error:
+                flash('El correo electrónico no tiene un formato válido.', 'danger')
+                return redirect(url_for('editar_proveedor', id=id))
         try:
             cursor.execute(
                 "UPDATE proveedor SET nombre=%s, contacto=%s, telefono=%s, email=%s, direccion=%s WHERE id_proveedor=%s",
@@ -1655,9 +1847,10 @@ def editar_proveedor(id):
             )
             conn.commit()
             flash("Proveedor actualizado.", "success")
-        except Exception as e:
+        except Exception:
             conn.rollback()
-            flash(f"Error: {e}", "danger")
+            app.logger.exception("Error al actualizar el proveedor %s", id)
+            flash('No se pudo actualizar el proveedor. Revisa los datos e inténtalo de nuevo.', 'danger')
         finally:
             conn.close()
         return redirect(url_for('proveedores'))
@@ -2773,11 +2966,29 @@ def reportes():
                        rango_params)
         top_monto = cursor.fetchall()
 
+        # RF17: reporte de vencimiento — activos con fecha dentro del
+        # umbral (vencidos primero por fecha ASC), valor a costo si lo
+        # hay y a precio si no (nunca se inventa: COALESCE explícito).
+        from services.kpis import umbral_vencimiento_dias
+        cursor.execute("""
+            SELECT nombre, stock, fecha_vencimiento,
+                   (fecha_vencimiento < CURRENT_DATE) AS vencido,
+                   stock * COALESCE(precio_costo, precio) AS valor
+              FROM producto
+             WHERE activo = TRUE
+               AND fecha_vencimiento IS NOT NULL
+               AND fecha_vencimiento <= CURRENT_DATE + make_interval(days => %s)
+             ORDER BY fecha_vencimiento ASC, id_producto ASC
+        """, (umbral_vencimiento_dias(),))
+        vencimiento = cursor.fetchall()
+
     finally:
         conn.close()
 
     return render_template('reportes.html', resumen=resumen, reportes=reportes_data,
-                           top_unidades=top_unidades, top_monto=top_monto)
+                           top_unidades=top_unidades, top_monto=top_monto,
+                           vencimiento=vencimiento,
+                           vence_umbral=umbral_vencimiento_dias())
 
 
 # ── Alertas ─────────────────────────────────────────────────
@@ -2818,6 +3029,55 @@ def alertas():
             UPDATE alerta SET resuelta = TRUE
             WHERE id_tipo_alerta = 1 AND resuelta = FALSE AND id_producto NOT IN (SELECT id_producto FROM producto WHERE stock < 15)
         """)
+        # RF17: sincronizar alertas de VENCIMIENTO (tipo 3
+        # 'vencimiento_proximo', ya existente en tipo_alerta): vencidos
+        # (fecha < hoy, prioridad alta) y por vencer (dentro del umbral
+        # VENCIMIENTO_UMBRAL_DIAS, prioridad media). Una alerta sin
+        # resolver por producto; si el estado empeora (por vencer ->
+        # vencido) la existente se ACTUALIZA; las stale se resuelven.
+        from services.kpis import umbral_vencimiento_dias
+        umbral = umbral_vencimiento_dias()
+        cursor.execute("""
+            SELECT id_producto, nombre, stock, fecha_vencimiento,
+                   (fecha_vencimiento < CURRENT_DATE) AS vencido
+              FROM producto
+             WHERE activo = TRUE
+               AND fecha_vencimiento IS NOT NULL
+               AND fecha_vencimiento <= CURRENT_DATE + make_interval(days => %s)
+        """, (umbral,))
+        for p in cursor.fetchall():
+            fecha_txt = p['fecha_vencimiento'].strftime('%d/%m/%Y')
+            if p['vencido']:
+                descripcion = f"Vencido el {fecha_txt}: {p['nombre']} (stock {p['stock']})"
+                prioridad = 'alta'
+            else:
+                descripcion = f"Vence el {fecha_txt}: {p['nombre']} (stock {p['stock']})"
+                prioridad = 'media'
+            cursor.execute("""
+                SELECT id_alerta FROM alerta
+                 WHERE id_tipo_alerta = 3 AND id_producto = %s AND resuelta = FALSE
+                 LIMIT 1
+            """, (p['id_producto'],))
+            existente = cursor.fetchone()
+            if existente:
+                cursor.execute("""
+                    UPDATE alerta SET descripcion = %s, prioridad = %s
+                     WHERE id_alerta = %s
+                """, (descripcion, prioridad, existente['id_alerta']))
+            else:
+                cursor.execute("""
+                    INSERT INTO alerta (id_tipo_alerta, id_producto, descripcion, prioridad, fecha)
+                    VALUES (3, %s, %s, %s, NOW())
+                """, (p['id_producto'], descripcion, prioridad))
+        # Limpiar stale de vencimiento: sin fecha, inactivo o fuera del umbral
+        cursor.execute("""
+            UPDATE alerta SET resuelta = TRUE
+             WHERE id_tipo_alerta = 3 AND resuelta = FALSE
+               AND id_producto NOT IN (
+                   SELECT id_producto FROM producto
+                    WHERE activo = TRUE AND fecha_vencimiento IS NOT NULL
+                      AND fecha_vencimiento <= CURRENT_DATE + make_interval(days => %s))
+        """, (umbral,))
         conn.commit()
         cursor.execute("SELECT * FROM alerta ORDER BY fecha DESC LIMIT 200")
         alertas = cursor.fetchall()
@@ -3002,6 +3262,11 @@ def admin_ofertas_nueva():
     if error:
         flash(error, 'danger')
         return redirect(url_for('admin_ofertas'))
+    # FASE 2: inicio en el pasado se ADVIERTE, no se bloquea (la oferta
+    # queda activa desde su vigencia; el solape lo impide la BD).
+    if datos['inicio'] < datetime.now():
+        flash('La fecha de inicio es anterior a ahora: la oferta quedará '
+              'activa desde su vigencia.', 'warning')
     conn = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
     try:
@@ -3037,6 +3302,10 @@ def admin_ofertas_editar(id):
     if error:
         flash(error, 'danger')
         return redirect(url_for('admin_ofertas'))
+    # FASE 2: misma advertencia que el alta (no bloquea)
+    if datos['inicio'] < datetime.now():
+        flash('La fecha de inicio es anterior a ahora: la oferta quedará '
+              'activa desde su vigencia.', 'warning')
     conn = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
     try:
@@ -3283,11 +3552,30 @@ def registro_cliente():
     """
     import random
 
-    nombre     = request.form.get('nombre', '').strip()
-    apellido   = request.form.get('apellido', '').strip()
-    correo     = _normalizar_correo(request.form.get('correo'))
+    # FASE 2: nombres de PERSONA sin dígitos (tildes y ñ sí), con las
+    # longitudes reales de las columnas (100) y correo con formato.
+    nombre, error = nombre_persona('nombre', request.form.get('nombre'), 100)
+    if error:
+        return render_template('login_cliente.html',
+                               error=error, registro_activo=True)
+    apellido, error = nombre_persona('apellido', request.form.get('apellido'), 100)
+    if error:
+        return render_template('login_cliente.html',
+                               error=error, registro_activo=True)
+    correo, error = _correo_valido(request.form.get('correo'), 120)
+    if error:
+        return render_template('login_cliente.html',
+                               error=error, registro_activo=True)
     telefono   = request.form.get('telefono', '').strip()
+    if len(telefono) > 20:
+        return render_template('login_cliente.html',
+                               error='El teléfono no puede superar 20 caracteres.',
+                               registro_activo=True)
     direccion  = request.form.get('direccion', '').strip()
+    if len(direccion) > 200:
+        return render_template('login_cliente.html',
+                               error='La dirección no puede superar 200 caracteres.',
+                               registro_activo=True)
     contrasena = request.form.get('contrasena', '')
     confirmar  = request.form.get('confirmar', '')
 
@@ -3313,7 +3601,7 @@ def registro_cliente():
 
     if not nombre or not correo or not contrasena:
         return render_template('login_cliente.html',
-                               error='Nombre, correo y contrasena son obligatorios.',
+                               error='Nombre, correo y contraseña son obligatorios.',
                                registro_activo=True)
     if len(direccion) < 5:
         return render_template('login_cliente.html',
@@ -3321,11 +3609,11 @@ def registro_cliente():
                                registro_activo=True)
     if contrasena != confirmar:
         return render_template('login_cliente.html',
-                               error='Las contrasenas no coinciden.',
+                               error='Las contraseñas no coinciden.',
                                registro_activo=True)
     if len(contrasena) < 6:
         return render_template('login_cliente.html',
-                               error='La contrasena debe tener al menos 6 caracteres.',
+                               error='La contraseña debe tener al menos 6 caracteres.',
                                registro_activo=True)
 
     codigo      = f"{random.randint(0, 999999):06d}"
@@ -3335,6 +3623,16 @@ def registro_cliente():
     conn   = get_connection_auth()
     cursor = conn.cursor(dictionary=True)
     try:
+        # FASE 2 (bug latente corregido): el id del tipo de documento se
+        # resuelve AQUÍ — el INSERT/UPDATE de abajo usaba _id_tipo_doc sin
+        # definirlo (NameError que el except engullía: el registro fallaba
+        # siempre con "No se pudo iniciar el registro"; los tests viejos solo
+        # asertaban status 200, que el render de error también da).
+        cursor.execute("SELECT id_tipo_documento FROM tipo_documento"
+                       " WHERE LOWER(TRIM(nombre)) = %s",
+                       (tipo_doc_nombre or 'dni',))
+        fila_td = cursor.fetchone()
+        _id_tipo_doc = fila_td['id_tipo_documento'] if fila_td else 1
         # Comparacion insensible a mayusculas y espacios: asi no se crean
         # duplicados ni se bloquea por diferencias de formato.
         cursor.execute("""
@@ -4907,6 +5205,19 @@ def admin_dashboard():
         from services.reservas import preview_reservas_vencidas
         vencidas = preview_reservas_vencidas(cursor)
         reservas_vencidas = len(vencidas)
+
+        # KPIs empresariales (FASE 1 aprobada: 3, 4, 5 y 6) con su
+        # semáforo, fórmula y meta en services/kpis.py (un solo lugar
+        # de umbrales). Cálculo sobre el conjunto completo.
+        from services.kpis import (kpi_cancelados_online, kpi_margen_bruto,
+                                   kpi_mezcla, kpi_rotacion, kpi_stock_riesgo,
+                                   kpi_tiempo_entrega)
+        kpis['rotacion'] = kpi_rotacion(cursor)
+        kpis['cancelados_online'] = kpi_cancelados_online(cursor)
+        kpis['tiempo_entrega'] = kpi_tiempo_entrega(cursor)
+        kpis['mezcla'] = kpi_mezcla(cursor)
+        kpis['margen'] = kpi_margen_bruto(cursor)
+        kpis['stock_riesgo'] = kpi_stock_riesgo(cursor)
     finally:
         conn.close()
 
