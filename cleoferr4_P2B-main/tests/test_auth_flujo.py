@@ -283,3 +283,73 @@ def test_sin_smtp_avisa_sin_romper(fx, monkeypatch):
                         lambda *a, **k: 'smtp_no_configurado')
     r = _post(_cliente(), '/recuperar_contrasena', correo=CORREO_STAFF)
     assert 'El envío de correos no está configurado' in r.get_data(as_text=True)
+
+
+# ── 1b: bloqueo por intentos fallidos (el test pendiente de RF1) ─
+
+def test_bloqueo_tras_intentos_fallidos(fx):
+    c = _cliente()
+    for _ in range(5):
+        r = _post(c, '/login', correo=CORREO_STAFF, clave='equivocada')
+        assert 'Credenciales incorrectas' in r.get_data(as_text=True)
+    # bloqueada incluso con la clave CORRECTA: mismo mensaje, sin revelar
+    r = _post(c, '/login', correo=CORREO_STAFF, clave=CLAVE)
+    assert r.status_code == 200
+    html = r.get_data(as_text=True)
+    assert 'Credenciales incorrectas' in html
+    assert 'bloque' not in html.lower()      # sin revelar el motivo
+    with c.session_transaction() as s:
+        assert 'rol' not in s
+
+
+def test_bloqueo_expira_y_vuelve_a_permitir(fx):
+    c = _cliente()
+    for _ in range(5):
+        _post(c, '/login', correo=CORREO_STAFF, clave='equivocada')
+    # el bloqueo caduca (15 min simulados hacia el pasado)
+    fx['cur'].execute("UPDATE usuario SET bloqueado_hasta = NOW() - INTERVAL '1 minute'")
+    r = _post(c, '/login', correo=CORREO_STAFF, clave=CLAVE)
+    assert r.status_code == 302
+
+
+def test_acceso_exitoso_reinicia_el_contador(fx):
+    c = _cliente()
+    for _ in range(4):
+        _post(c, '/login', correo=CORREO_STAFF, clave='equivocada')
+    assert _post(c, '/login', correo=CORREO_STAFF, clave=CLAVE).status_code == 302
+    fx['cur'].execute("SELECT intentos_fallidos FROM usuario WHERE email=%s",
+                      (CORREO_STAFF,))
+    assert fx['cur'].fetchone()['intentos_fallidos'] == 0
+    # el contador volvió a cero: 4 fallos más NO bloquean
+    for _ in range(4):
+        _post(c, '/login', correo=CORREO_STAFF, clave='equivocada')
+    assert _post(c, '/login', correo=CORREO_STAFF, clave=CLAVE).status_code == 302
+
+
+def test_bloqueo_tambien_en_portal_de_clientes(fx):
+    c = _cliente()
+    for _ in range(5):
+        _post(c, '/login_cliente', correo=CORREO_CLI, contrasena='equivocada')
+    r = _post(c, '/login_cliente', correo=CORREO_CLI, contrasena=CLAVE)
+    assert r.status_code == 200
+    assert 'Credenciales incorrectas' in r.get_data(as_text=True)
+    with c.session_transaction() as s:
+        assert 'rol' not in s
+
+
+def test_correo_inexistente_no_cuenta_intentos(fx):
+    """Anti-enumeración: solo las cuentas reales acumulan intentos."""
+    c = _cliente()
+    for _ in range(7):
+        _post(c, '/login', correo=CORREO_FANTASMA, clave='x')
+    # la cuenta real sigue operativa
+    assert _post(c, '/login', correo=CORREO_STAFF, clave=CLAVE).status_code == 302
+
+
+def test_umbral_configurable_por_entorno(fx, monkeypatch):
+    monkeypatch.setenv('LOGIN_INTENTOS_MAX', '2')
+    c = _cliente()
+    _post(c, '/login', correo=CORREO_STAFF, clave='mala')
+    _post(c, '/login', correo=CORREO_STAFF, clave='mala')   # 2º fallo: bloquea
+    r = _post(c, '/login', correo=CORREO_STAFF, clave=CLAVE)
+    assert r.status_code == 200            # bloqueada tras 2 intentos

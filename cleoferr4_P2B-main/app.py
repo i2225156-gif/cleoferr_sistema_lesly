@@ -321,6 +321,75 @@ def inicio():
     return redirect(url_for('catalogo_cliente'))
 
 
+# ── Seguridad de login: bloqueo por intentos fallidos (1b) ────────
+# Umbral y duración por variables de entorno (defaults: 5 intentos,
+# 15 minutos). El contador y el bloqueo usan las columnas EXISTENTES de
+# la BD Auth (intentos_fallidos, bloqueado_hasta). Las tablas
+# intento_login e ip_bloqueada existen pero NO se usan (decisión: un
+# bloqueo por IP encerraría aulas/oficinas enteras con IP compartida,
+# incluida la demo; quedan intactas y sin crear nada).
+def _login_intentos_max():
+    try:
+        return max(1, int(os.environ.get('LOGIN_INTENTOS_MAX', '5')))
+    except ValueError:
+        return 5
+
+
+def _login_bloqueo_min():
+    try:
+        return max(1, int(os.environ.get('LOGIN_BLOQUEO_MIN', '15')))
+    except ValueError:
+        return 15
+
+
+def _cuenta_bloqueada(fila):
+    """True si la cuenta está bloqueada AHORA (columna bloqueado_hasta)."""
+    from datetime import timezone
+    hasta = fila.get('bloqueado_hasta')
+    return bool(hasta and hasta > datetime.now(timezone.utc))
+
+
+def _login_intento_fallido(conn, fila, es_cliente):
+    """Cuenta un intento fallido; al llegar al umbral bloquea la cuenta.
+
+    La auditoría del bloqueo va al log del servidor con el id de la
+    cuenta, nunca el correo (regla de no datos personales en logs).
+    """
+    cursor = conn.cursor()
+    if es_cliente:
+        tabla, id_col, id_cuenta = 'cliente', 'id_cliente', fila['id_cliente']
+    else:
+        tabla, id_col, id_cuenta = 'usuario', 'id_usuario', fila['id_usuario']
+    intentos = int(fila.get('intentos_fallidos') or 0) + 1
+    if intentos >= _login_intentos_max():
+        cursor.execute(f"""
+            UPDATE {tabla}
+               SET intentos_fallidos = %s,
+                   bloqueado_hasta = NOW() + make_interval(mins => %s)
+             WHERE {id_col} = %s
+        """, (intentos, _login_bloqueo_min(), id_cuenta))
+        app.logger.warning('Login bloqueado tras %d intentos fallidos: %s %s',
+                           intentos, tabla, id_cuenta)
+    else:
+        cursor.execute(f"UPDATE {tabla} SET intentos_fallidos = %s"
+                       f" WHERE {id_col} = %s", (intentos, id_cuenta))
+    conn.commit()
+
+
+def _login_reiniciar_intentos(conn, fila, es_cliente):
+    """Acceso exitoso: contador a cero y bloqueo retirado."""
+    cursor = conn.cursor()
+    if es_cliente:
+        cursor.execute("UPDATE cliente SET intentos_fallidos = 0,"
+                       " bloqueado_hasta = NULL WHERE id_cliente = %s",
+                       (fila['id_cliente'],))
+    else:
+        cursor.execute("UPDATE usuario SET intentos_fallidos = 0,"
+                       " bloqueado_hasta = NULL WHERE id_usuario = %s",
+                       (fila['id_usuario'],))
+    conn.commit()
+
+
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
@@ -330,28 +399,41 @@ def login():
         cursor = conn.cursor(dictionary=True)
         cursor.execute("""
             SELECT u.id_usuario, u.nombres, u.email, u.contrasena, r.nombre AS rol,
-                   u.activo
+                   u.activo, u.intentos_fallidos, u.bloqueado_hasta
             FROM usuario u
             INNER JOIN rol r ON u.id_rol = r.id_rol
             WHERE LOWER(TRIM(u.email)) = %s
         """, (correo,))
         usuario = cursor.fetchone()
-        conn.close()
 
-        # 1a: cuenta inactiva = credencial inválida, sin revelar el motivo
-        if usuario and not usuario.get('activo'):
-            usuario = None
-        if usuario and bcrypt.check_password_hash(usuario['contrasena'], clave):
-            rol_usuario = (usuario.get('rol') or '').lower()
-            # Permitir solo administradores y vendedores en este login
-            if rol_usuario not in ('administrador', 'vendedor'):
-                # Mensaje breve indicando redirección al login de clientes
-                return render_template('login.html', error='Acceso restringido. Si eres cliente usa el acceso de clientes: /login_cliente')
-            session['usuario_id'] = usuario['id_usuario']
-            session['rol']        = usuario['rol']
-            session['nombre']     = usuario['nombres']
-            return redirect(url_for('productos'))
-        return render_template('login.html', error='Credenciales incorrectas')
+        def _invalido():
+            return render_template('login.html',
+                                   error='Credenciales incorrectas')
+
+        try:
+            # 1a: cuenta inactiva = credencial inválida, sin revelar el motivo
+            if usuario and not usuario.get('activo'):
+                usuario = None
+            # 1b: bloqueada por intentos fallidos → mismo mensaje genérico
+            if usuario and _cuenta_bloqueada(usuario):
+                return _invalido()
+            if not (usuario and bcrypt.check_password_hash(usuario['contrasena'], clave)):
+                if usuario:
+                    _login_intento_fallido(conn, usuario, es_cliente=False)
+                return _invalido()
+            # acceso exitoso: contador a cero
+            _login_reiniciar_intentos(conn, usuario, es_cliente=False)
+        finally:
+            conn.close()
+        rol_usuario = (usuario.get('rol') or '').lower()
+        # Permitir solo administradores y vendedores en este login
+        if rol_usuario not in ('administrador', 'vendedor'):
+            # Mensaje breve indicando redirección al login de clientes
+            return render_template('login.html', error='Acceso restringido. Si eres cliente usa el acceso de clientes: /login_cliente')
+        session['usuario_id'] = usuario['id_usuario']
+        session['rol']        = usuario['rol']
+        session['nombre']     = usuario['nombres']
+        return redirect(url_for('productos'))
     # Botón WhatsApp para recuperar credenciales (personal administrativo)
     msg_admin = quote(
         "Hola Soporte de Inversiones CLEOFERR, soy del personal ADMINISTRATIVO "
@@ -373,36 +455,45 @@ def login_cliente():
             "SELECT * FROM cliente WHERE LOWER(TRIM(email)) = %s ORDER BY id_cliente LIMIT 1",
             (correo,))
         cliente = cursor.fetchone()
-        conn.close()
 
-        if cliente:
+        def _invalido():
+            return render_template('login_cliente.html',
+                                   error='Credenciales incorrectas')
+
+        try:
             # 1a: cuenta inactiva o sin verificar = credencial inválida,
             # sin revelar el motivo (el registro web activa con el OTP;
             # desde aquí no se distingue 'inactiva' de 'sin verificar')
-            if not cliente.get('activo'):
-                return render_template('login_cliente.html',
-                                       error='Credenciales incorrectas')
-            # Solo Bcrypt: las contraseñas de clientes deben estar hasheadas con bcrypt.
-            # Si el hash almacenado no es bcrypt válido, el acceso se rechaza.
-            stored = cliente.get('contrasena') or cliente.get('password') or ''
-            try:
-                ok = bcrypt.check_password_hash(stored, contrasena)
-            except (ValueError, TypeError):
-                ok = False
-
-            if ok:
-                nombre_cliente = (
-                    cliente.get('nombre') or
-                    cliente.get('nombres') or
-                    cliente.get('name') or
-                    cliente.get('email')
-                )
-                session['usuario_id'] = cliente.get('id_cliente') or cliente.get('id')
-                session['rol']        = 'cliente'
-                session['nombre']     = nombre_cliente
-                return redirect(url_for('catalogo_cliente'))
-
-        return render_template('login_cliente.html', error='Credenciales incorrectas')
+            if cliente and not cliente.get('activo'):
+                cliente = None
+            # 1b: bloqueada por intentos fallidos → mismo mensaje genérico
+            if cliente and _cuenta_bloqueada(cliente):
+                return _invalido()
+            if cliente:
+                # Solo Bcrypt: las contraseñas de clientes deben estar
+                # hasheadas con bcrypt; si no, el acceso se rechaza.
+                stored = cliente.get('contrasena') or cliente.get('password') or ''
+                try:
+                    ok = bcrypt.check_password_hash(stored, contrasena)
+                except (ValueError, TypeError):
+                    ok = False
+                if ok:
+                    # acceso exitoso: contador a cero
+                    _login_reiniciar_intentos(conn, cliente, es_cliente=True)
+                    nombre_cliente = (
+                        cliente.get('nombre') or
+                        cliente.get('nombres') or
+                        cliente.get('name') or
+                        cliente.get('email')
+                    )
+                    session['usuario_id'] = cliente.get('id_cliente') or cliente.get('id')
+                    session['rol']        = 'cliente'
+                    session['nombre']     = nombre_cliente
+                    return redirect(url_for('catalogo_cliente'))
+                _login_intento_fallido(conn, cliente, es_cliente=True)
+            return _invalido()
+        finally:
+            conn.close()
     # Botón WhatsApp para recuperar credenciales (clientes)
     msg_cliente = quote(
         "Hola Soporte de Inversiones CLEOFERR, soy un CLIENTE registrado y necesito ayuda "
