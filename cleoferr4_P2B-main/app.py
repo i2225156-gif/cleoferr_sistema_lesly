@@ -41,6 +41,7 @@ from services.inventario import devolver_stock_venta
 from services.ofertas import (SQL_IMPORTE_LINEA, SQL_PRECIO_VIGENTE,
                               calcular_descuento_unitario, oferta_vigente,
                               precios_vigentes)
+from services.validacion import entero, numero, requerido, texto
 from services.reservas import (liberar_reservas_vencidas, preview_reservas_vencidas,
                                total_reservas_vencidas)
 from services.pagos import (cancelar_pedido_con_pago_inicial, confirmar_pago,
@@ -269,6 +270,21 @@ def _validar_csrf():
 def _ctx_recuperacion_origen():
     """Determina desde qué login se llegó a recuperar_contrasena (admin | cliente)."""
     return {'recuperar_origen': request.values.get('origen', 'cliente')}
+
+
+# ── Páginas de error sin detalles técnicos (FASE 2) ─────────────
+@app.errorhandler(404)
+def _error_404(e):
+    return render_template('error.html', codigo=404,
+                           mensaje='La página que buscas no existe o fue movida.'), 404
+
+
+@app.errorhandler(500)
+def _error_500(e):
+    return render_template('error.html', codigo=500,
+                           mensaje='Ocurrió un error inesperado y ya quedó '
+                                   'registrado en el log. Inténtalo de nuevo '
+                                   'en un momento.'), 500
 
 
 # Rutas de cliente (públicas/catálogo) que deben redirigir a /login_cliente,
@@ -963,24 +979,86 @@ def nuevo_producto():
     return render_template('producto_form.html', categorias=categorias, marcas=marcas)
 
 
+def _id_foranea(cursor, campo_form, tabla, id_col, etiqueta):
+    """FK OPCIONAL del form: vacío o '0' → None; si viene, debe ser un
+    dígito y existir en la tabla (parámetros preparados, sin 500)."""
+    bruto = (request.form.get(campo_form) or '').strip()
+    if not bruto or bruto == '0':
+        return None, None
+    if not bruto.isdigit():
+        return None, f'La {etiqueta} seleccionada no es válida.'
+    cursor.execute(f"SELECT 1 FROM {tabla} WHERE {id_col} = %s", (int(bruto),))
+    if not cursor.fetchone():
+        return None, f'La {etiqueta} seleccionada no existe.'
+    return int(bruto), None
+
+
+def _validar_producto(cursor):
+    """Valida el form de alta/edición de producto (FASE 2).
+
+    Recibe el cursor de la MISMA conexión que luego escribe. Devuelve
+    (datos, None) o (None, mensaje). El NOMBRE de producto admite dígitos
+    ('Taladro 650W'); precio y stock aceptan 0 (los CHECKs de la BD
+    permiten >= 0) y rechazan negativos y no numéricos.
+    """
+    nombre, error = requerido('nombre', request.form.get('nombre'), 150)
+    if error:
+        return None, error
+    precio, error = numero('precio', request.form.get('precio'))
+    if error:
+        return None, error
+    stock, error = entero('stock', request.form.get('stock'))
+    if error:
+        return None, error
+    descripcion = texto(request.form.get('descripcion'))
+    if descripcion and len(descripcion) > 2000:
+        return None, 'La descripción no puede superar 2000 caracteres.'
+    estado = (request.form.get('estado') or '').strip()
+    if estado not in ('activo', 'inactivo'):
+        estado = 'activo'
+
+    id_categoria, error = _id_foranea(cursor, 'id_categoria', 'categoria',
+                                      'id_categoria', 'categoría')
+    if error:
+        return None, error
+    id_marca, error = _id_foranea(cursor, 'id_marca', 'marca',
+                                  'id_marca', 'marca')
+    if error:
+        return None, error
+    return {'nombre': nombre, 'descripcion': descripcion, 'precio': precio,
+            'stock': stock, 'id_categoria': id_categoria, 'id_marca': id_marca,
+            'activo': estado == 'activo'}, None
+
+
 @app.route('/productos/guardar', methods=['POST'])
 @login_required
 @escritura_required
 def guardar_producto():
-    nombre_imagen = guardar_imagen('imagen')
-    nuevo = Producto(
-        nombre       = request.form['nombre'],
-        descripcion  = request.form['descripcion'],
-        precio       = request.form['precio'],
-        stock        = request.form['stock'],
-        id_categoria = request.form['id_categoria'],
-        id_marca     = request.form['id_marca'],
-        activo       = request.form.get('estado', 'activo') != 'inactivo',
-        imagen       = nombre_imagen
-    )
-    db.session.add(nuevo)
-    db.session.commit()
-    flash("Producto creado correctamente.", "success")
+    conn = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        # FASE 2: validación de servidor con el módulo común — una entrada
+        # malformada da un flash claro y vuelve al form, nunca un 500.
+        datos, error = _validar_producto(cursor)
+        if error:
+            flash(error, 'danger')
+            return redirect(url_for('nuevo_producto'))
+        nombre_imagen = guardar_imagen('imagen')
+        cursor.execute("""
+            INSERT INTO producto (nombre, descripcion, precio, stock,
+                                  id_categoria, id_marca, activo, imagen)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """, (datos['nombre'], datos['descripcion'], datos['precio'],
+              datos['stock'], datos['id_categoria'], datos['id_marca'],
+              datos['activo'], nombre_imagen))
+        conn.commit()
+        flash("Producto creado correctamente.", "success")
+    except Exception:
+        conn.rollback()
+        app.logger.exception("Error al guardar el producto")
+        flash('No se pudo guardar el producto. Revisa los datos e inténtalo de nuevo.', 'danger')
+    finally:
+        conn.close()
     return redirect(url_for('productos'))
 
 
@@ -1003,23 +1081,43 @@ def editar_producto(id):
 @login_required
 @escritura_required
 def actualizar_producto(id):
-    producto             = db.get_or_404(Producto, id)
-    nombre_imagen = guardar_imagen('imagen')            # ← NUEVO
-    if nombre_imagen and producto.imagen:               # ← NUEVO: borra imagen vieja
-        ruta_vieja = os.path.join(UPLOAD_FOLDER, producto.imagen)
-        if os.path.exists(ruta_vieja):
-            os.remove(ruta_vieja)
-    producto.nombre      = request.form['nombre']
-    producto.descripcion = request.form['descripcion']
-    producto.precio      = request.form['precio']
-    producto.stock       = request.form['stock']
-    producto.id_categoria = request.form['id_categoria']
-    producto.id_marca    = request.form['id_marca']
-    producto.activo      = request.form.get('estado', 'activo') != 'inactivo'
-    if nombre_imagen:                                   # ← CAMBIÓ
-        producto.imagen = nombre_imagen
-    db.session.commit()
-    flash("Producto actualizado correctamente.", "success")
+    conn = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT imagen FROM producto WHERE id_producto = %s", (id,))
+    fila = cursor.fetchone()
+    if not fila:
+        conn.close()
+        abort(404)
+    try:
+        # FASE 2: misma validación que el alta; error → flash y vuelta al form
+        datos, error = _validar_producto(cursor)
+        if error:
+            flash(error, 'danger')
+            return redirect(url_for('editar_producto', id=id))
+        nombre_imagen = guardar_imagen('imagen')
+        if nombre_imagen and fila['imagen']:      # borra la imagen vieja
+            ruta_vieja = os.path.join(UPLOAD_FOLDER, fila['imagen'])
+            if os.path.exists(ruta_vieja):
+                os.remove(ruta_vieja)
+        cursor.execute("""
+            UPDATE producto
+               SET nombre = %s, descripcion = %s, precio = %s, stock = %s,
+                   id_categoria = %s, id_marca = %s, activo = %s
+             WHERE id_producto = %s
+        """, (datos['nombre'], datos['descripcion'], datos['precio'],
+              datos['stock'], datos['id_categoria'], datos['id_marca'],
+              datos['activo'], id))
+        if nombre_imagen:
+            cursor.execute("UPDATE producto SET imagen = %s WHERE id_producto = %s",
+                           (nombre_imagen, id))
+        conn.commit()
+        flash("Producto actualizado correctamente.", "success")
+    except Exception:
+        conn.rollback()
+        app.logger.exception("Error al actualizar el producto %s", id)
+        flash('No se pudo actualizar el producto. Revisa los datos e inténtalo de nuevo.', 'danger')
+    finally:
+        conn.close()
     return redirect(url_for('productos'))
 
 
