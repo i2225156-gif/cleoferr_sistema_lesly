@@ -1695,11 +1695,33 @@ def proveedores():
 @escritura_required
 def nuevo_proveedor():
     if request.method == 'POST':
-        nombre    = request.form['nombre']
-        contacto  = request.form.get('contacto', '')
-        telefono  = request.form.get('telefono', '')
-        email     = request.form.get('email', '')
-        direccion = request.form.get('direccion', '')
+        # FASE 2: razón social (admite dígitos: 'Ferretería Los 2 Amigos'),
+        # contacto opcional como nombre de persona, correo opcional con
+        # formato, longitudes reales de las columnas.
+        nombre, error = requerido('razón social', request.form.get('nombre'), 100)
+        if error:
+            flash(error, 'danger')
+            return redirect(url_for('nuevo_proveedor'))
+        contacto = texto(request.form.get('contacto'))
+        if contacto:
+            contacto, error = nombre_persona('contacto', contacto, 50)
+            if error:
+                flash(error, 'danger')
+                return redirect(url_for('nuevo_proveedor'))
+        telefono = texto(request.form.get('telefono'))
+        if telefono and len(telefono) > 20:
+            flash('El teléfono no puede superar 20 caracteres.', 'danger')
+            return redirect(url_for('nuevo_proveedor'))
+        direccion = texto(request.form.get('direccion'))
+        if direccion and len(direccion) > 100:
+            flash('La dirección no puede superar 100 caracteres.', 'danger')
+            return redirect(url_for('nuevo_proveedor'))
+        email = texto(request.form.get('email'))
+        if email:
+            email, error = _correo_valido(email, 50)
+            if error:
+                flash('El correo electrónico no tiene un formato válido.', 'danger')
+                return redirect(url_for('nuevo_proveedor'))
         conn      = get_connection_tienda()
         cursor    = conn.cursor()
         try:
@@ -1709,9 +1731,10 @@ def nuevo_proveedor():
             )
             conn.commit()
             flash("Proveedor registrado.", "success")
-        except Exception as e:
+        except Exception:
             conn.rollback()
-            flash(f"Error: {e}", "danger")
+            app.logger.exception("Error al registrar proveedor")
+            flash('No se pudo registrar el proveedor. Revisa los datos e inténtalo de nuevo.', 'danger')
         finally:
             conn.close()
         return redirect(url_for('proveedores'))
@@ -1725,11 +1748,31 @@ def editar_proveedor(id):
     conn   = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
     if request.method == 'POST':
-        nombre    = request.form['nombre']
-        contacto  = request.form.get('contacto', '')
-        telefono  = request.form.get('telefono', '')
-        email     = request.form.get('email', '')
-        direccion = request.form.get('direccion', '')
+        # FASE 2: mismas reglas que el alta
+        nombre, error = requerido('razón social', request.form.get('nombre'), 100)
+        if error:
+            flash(error, 'danger')
+            return redirect(url_for('editar_proveedor', id=id))
+        contacto = texto(request.form.get('contacto'))
+        if contacto:
+            contacto, error = nombre_persona('contacto', contacto, 50)
+            if error:
+                flash(error, 'danger')
+                return redirect(url_for('editar_proveedor', id=id))
+        telefono = texto(request.form.get('telefono'))
+        if telefono and len(telefono) > 20:
+            flash('El teléfono no puede superar 20 caracteres.', 'danger')
+            return redirect(url_for('editar_proveedor', id=id))
+        direccion = texto(request.form.get('direccion'))
+        if direccion and len(direccion) > 100:
+            flash('La dirección no puede superar 100 caracteres.', 'danger')
+            return redirect(url_for('editar_proveedor', id=id))
+        email = texto(request.form.get('email'))
+        if email:
+            email, error = _correo_valido(email, 50)
+            if error:
+                flash('El correo electrónico no tiene un formato válido.', 'danger')
+                return redirect(url_for('editar_proveedor', id=id))
         try:
             cursor.execute(
                 "UPDATE proveedor SET nombre=%s, contacto=%s, telefono=%s, email=%s, direccion=%s WHERE id_proveedor=%s",
@@ -1737,9 +1780,10 @@ def editar_proveedor(id):
             )
             conn.commit()
             flash("Proveedor actualizado.", "success")
-        except Exception as e:
+        except Exception:
             conn.rollback()
-            flash(f"Error: {e}", "danger")
+            app.logger.exception("Error al actualizar el proveedor %s", id)
+            flash('No se pudo actualizar el proveedor. Revisa los datos e inténtalo de nuevo.', 'danger')
         finally:
             conn.close()
         return redirect(url_for('proveedores'))
