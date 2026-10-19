@@ -1527,12 +1527,70 @@ def pedidos():
     """)
     lista_estados = [r['nombre'] for r in cursor.fetchall()]
     PASOS = [e for e in lista_estados if e != 'cancelado']
+
+    # RF9: filtros del listado aplicados EN SERVIDOR, validados y
+    # parametrizados (entradas maliciosas no generan 500: se ignoran
+    # con un aviso). Fechas en días calendario Lima (services/horario).
+    filtros_sql, filtros_params = [], []
+    for campo in ('desde', 'hasta'):
+        valor = (request.args.get(campo) or '').strip()
+        if not valor:
+            continue
+        try:
+            fecha = datetime.strptime(valor, '%Y-%m-%d').date()
+        except ValueError:
+            flash('Fecha inválida, filtro ignorado.', 'warning')
+            continue
+        operador = '>=' if campo == 'desde' else '<='
+        filtros_sql.append(
+            f"{SQL_DIA_LIMA.format(p='v.', col='fecha')} {operador} %s")
+        filtros_params.append(fecha)
+    estado_f = (request.args.get('estado') or '').strip()
+    if estado_f:
+        if estado_f not in lista_estados:
+            flash('Estado no válido, filtro ignorado.', 'warning')
+        else:
+            filtros_sql.append("ev.nombre = %s")
+            filtros_params.append(estado_f)
+    q = (request.args.get('q') or '').strip()
+    id_venta_q = int(q) if q.isdigit() else None
+
     total, pagina = 0, 1
     try:
-        # P1: paginación en servidor — COUNT del conjunto COMPLETO y
-        # LIMIT/OFFSET parametrizados; ORDER BY estable con id de desempate
+        # Consulta (Auth) primero: clientes y usuarios. El filtro q de
+        # cliente se resuelve aquí en memoria (la BD Auth es aparte) y
+        # los ids coincidentes viajan parametrizados a la consulta de
+        # tienda; si q es todo dígitos también casa el código de venta.
+        conn_a   = get_connection_auth()
+        cursor_a = conn_a.cursor(dictionary=True)
+        cursor_a.execute("SELECT id_cliente, nombre, apellido, telefono FROM cliente")
+        clientes_map = {c['id_cliente']: c for c in cursor_a.fetchall()}
+        cursor_a.execute("SELECT id_usuario, nombres FROM usuario")
+        usuarios_map = {u['id_usuario']: u for u in cursor_a.fetchall()}
+        conn_a.close()
+
+        if q:
+            clientes_q = [cid for cid, c in clientes_map.items()
+                          if q.lower() in (f"{c.get('nombre') or ''} "
+                                           f"{c.get('apellido') or ''}").lower()]
+            if clientes_q or id_venta_q is not None:
+                if id_venta_q is not None:
+                    filtros_sql.append("(v.id_cliente = ANY(%s) OR v.id_venta = %s)")
+                    filtros_params += [clientes_q, id_venta_q]
+                else:
+                    filtros_sql.append("v.id_cliente = ANY(%s)")
+                    filtros_params.append(clientes_q)
+            else:
+                filtros_sql.append("FALSE")   # q sin coincidencias: vacío
+
+        where_sql = (" WHERE " + " AND ".join(filtros_sql)) if filtros_sql else ""
+        # P1: paginación en servidor — COUNT del conjunto FILTRADO completo
+        # y LIMIT/OFFSET parametrizados; ORDER BY estable con id de desempate
         # (ventas del mismo instante no intercambian página entre recargas).
-        cursor.execute("SELECT COUNT(*) AS total FROM venta")
+        cursor.execute("SELECT COUNT(*) AS total FROM venta v"
+                       " LEFT JOIN estado_venta ev"
+                       " ON v.id_estado_venta = ev.id_estado_venta" + where_sql,
+                       filtros_params)
         total = cursor.fetchone()['total']
         pagina = _pagina_actual(total, POR_PAGINA_ADMIN)
         # Consulta 1 (Tienda): ventas + total, sin joins cross-BD
@@ -1548,22 +1606,14 @@ def pedidos():
             FROM venta v
             LEFT JOIN tipo_venta tv ON v.id_tipo_venta = tv.id_tipo_venta
             LEFT JOIN estado_venta ev ON v.id_estado_venta = ev.id_estado_venta
-            LEFT JOIN detalle_venta d ON v.id_venta = d.id_venta
+            LEFT JOIN detalle_venta d ON d.id_venta = v.id_venta
+            {where_sql}
             GROUP BY v.id_venta, v.fecha, tv.nombre, ev.nombre,
                      v.id_cliente, v.id_usuario_vendedor
             ORDER BY v.fecha DESC, v.id_venta DESC
             LIMIT %s OFFSET %s
-        """, (POR_PAGINA_ADMIN, (pagina - 1) * POR_PAGINA_ADMIN))
+        """, filtros_params + [POR_PAGINA_ADMIN, (pagina - 1) * POR_PAGINA_ADMIN])
         pedidos_raw = cursor.fetchall()
-
-        # Consulta 2 (Auth): clientes y usuarios
-        conn_a   = get_connection_auth()
-        cursor_a = conn_a.cursor(dictionary=True)
-        cursor_a.execute("SELECT id_cliente, nombre, apellido, telefono FROM cliente")
-        clientes_map = {c['id_cliente']: c for c in cursor_a.fetchall()}
-        cursor_a.execute("SELECT id_usuario, nombres FROM usuario")
-        usuarios_map = {u['id_usuario']: u for u in cursor_a.fetchall()}
-        conn_a.close()
 
         # Unión en memoria (equivalente al JOIN cross-BD)
         for ped in pedidos_raw:

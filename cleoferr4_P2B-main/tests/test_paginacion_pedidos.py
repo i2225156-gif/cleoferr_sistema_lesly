@@ -125,13 +125,16 @@ def test_pagina_invalida_y_clamp(fx):
 
 def test_enlaces_conservan_filtros(fx):
     import html as _htmlmod
+    # RF9: los filtros ahora se aplican de verdad en el servidor, así que
+    # el combo debe TENER resultados (las 45 sintéticas son pendientes de
+    # este año) para que exista el paginador cuyos href conserva los filtros.
     crudo = fx['admin'].get(
-        '/pedidos?desde=2026-01-01&estado=pendiente&q=testpag'
+        '/pedidos?desde=2026-01-01&estado=pendiente'
     ).get_data(as_text=True)
-    # El enlace a la página 2 conserva fecha, estado y búsqueda. En el
-    # atributo el & viaja HTML-escapado; se des-escapa para asertar plano.
+    # El enlace a la página 2 conserva fecha y estado. En el atributo el &
+    # viaja HTML-escapado; se des-escapa para asertar plano.
     plano = _htmlmod.unescape(crudo)
-    assert 'desde=2026-01-01&estado=pendiente&q=testpag&pagina=2' in plano
+    assert 'desde=2026-01-01&estado=pendiente&pagina=2' in plano
     assert 'pagina=' in crudo            # hay navegación
     assert 'aria-label="Página siguiente"' in crudo
 

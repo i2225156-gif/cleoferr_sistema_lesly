@@ -54,6 +54,13 @@
         <i class="fa fa-filter me-2"></i>Generar Reporte
     </div>
     <div class="card-body">
+        <div class="alert alert-secondary mb-3" style="font-size:0.9rem">
+            <i class="fa fa-info-circle me-1"></i>
+            El reporte por rango de fechas está <strong>temporalmente
+            deshabilitado</strong> (en redefinición). Mientras tanto usa los
+            export de la parte superior y los filtros del panel de pedidos.
+        </div>
+        <fieldset disabled>
         <form method="GET" action="/reportes/generar" class="row g-3">
             <div class="col-md-3">
                 <label class="form-label fw-semibold">Tipo de reporte</label>
@@ -77,6 +84,7 @@
                 <a href="/reportes/exportar" class="btn btn-outline-secondary">Exportar</a>
             </div>
         </form>
+        </fieldset>
     </div>
 </div>
 
