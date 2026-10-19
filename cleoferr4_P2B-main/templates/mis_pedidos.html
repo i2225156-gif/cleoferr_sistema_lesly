@@ -1,4 +1,5 @@
 {% extends 'base.html' %}
+{% from 'components/paginacion.html' import paginacion %}
 {% block titulito %}Mis Pedidos – Cleoferr{% endblock %}
 {% block contenido %}
 
@@ -159,6 +160,7 @@
     </div>
 </div>
 {% endfor %}
+{{ paginacion(pagina, total, por_pagina, filtros_qs) }}
 {% endif %}
 
 <script>

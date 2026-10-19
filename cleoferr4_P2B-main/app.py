@@ -1492,7 +1492,8 @@ def eliminar_proveedor(id):
 
 
 # ── Paginación en servidor (P1..P4) ─────────────────────────────
-POR_PAGINA_ADMIN = 20   # listados admin (las páginas de cliente usarán 10)
+POR_PAGINA_ADMIN = 20   # listados admin
+POR_PAGINA_CLIENTE = 10 # páginas del cliente (mis_pedidos, mis_comprobantes)
 
 
 def _pagina_actual(total, por_pagina):
@@ -2375,6 +2376,13 @@ def mis_comprobantes():
     conn   = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
     try:
+        # P4: COUNT del conjunto del CLIENTE (no de la página) y página
+        # con ORDER BY estable (id de desempate); el LIMIT 100 fijo se va.
+        cursor.execute("SELECT COUNT(*) AS total FROM venta v"
+                       " JOIN comprobante c ON c.id_venta = v.id_venta"
+                       " WHERE v.id_cliente = %s", (session['usuario_id'],))
+        total = cursor.fetchone()['total']
+        pagina = _pagina_actual(total, POR_PAGINA_CLIENTE)
         cursor.execute(f"""
             SELECT c.serie, c.numero, c.total, c.fecha_emision, c.estado_sunat,
                    tc.nombre AS tipo, v.id_venta,
@@ -2383,13 +2391,17 @@ def mis_comprobantes():
               JOIN comprobante c ON c.id_venta = v.id_venta
               LEFT JOIN tipo_comprobante tc ON tc.id_tipo_comprobante = c.id_tipo_comprobante
              WHERE v.id_cliente = %s
-             ORDER BY c.fecha_emision DESC
-             LIMIT 100
-        """, (session['usuario_id'],))
+             ORDER BY c.fecha_emision DESC, c.id_comprobante DESC
+             LIMIT %s OFFSET %s
+        """, (session['usuario_id'], POR_PAGINA_CLIENTE,
+              (pagina - 1) * POR_PAGINA_CLIENTE))
         comprobantes = cursor.fetchall()
     finally:
         conn.close()
-    return render_template('mis_comprobantes.html', comprobantes=comprobantes)
+    return render_template('mis_comprobantes.html', comprobantes=comprobantes,
+                           pagina=pagina, total=total,
+                           por_pagina=POR_PAGINA_CLIENTE,
+                           filtros_qs=_filtros_sin_pagina())
 
 
 # Criterio del alcance (§6.9): solo cuentan como vendidas las ventas con pago
@@ -3457,6 +3469,12 @@ def mis_pedidos():
         fases_orden = [r['nombre'] for r in cursor.fetchall()]
         fases_orden = [f for f in fases_orden if f != 'cancelado']
         PASOS = fases_orden
+        # P4: COUNT del conjunto del CLIENTE (no de la página) y página
+        # con ORDER BY estable (id de desempate).
+        cursor.execute("SELECT COUNT(*) AS total FROM venta WHERE id_cliente = %s",
+                       (session['usuario_id'],))
+        total = cursor.fetchone()['total']
+        pagina = _pagina_actual(total, POR_PAGINA_CLIENTE)
         cursor.execute(f"""
             SELECT v.id_venta,
                    {SQL_PARED_LIMA.format(p='v.', col='fecha')} AS fecha,
@@ -3464,11 +3482,13 @@ def mis_pedidos():
                    COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='d.')}), 0) AS total
             FROM venta v
             LEFT JOIN estado_venta ev ON v.id_estado_venta = ev.id_estado_venta
-            LEFT JOIN detalle_venta d ON v.id_venta = d.id_venta
+            LEFT JOIN detalle_venta d ON d.id_venta = v.id_venta
             WHERE v.id_cliente = %s
             GROUP BY v.id_venta, v.fecha, ev.nombre
-            ORDER BY v.fecha DESC
-        """, (session['usuario_id'],))
+            ORDER BY v.fecha DESC, v.id_venta DESC
+            LIMIT %s OFFSET %s
+        """, (session['usuario_id'], POR_PAGINA_CLIENTE,
+              (pagina - 1) * POR_PAGINA_CLIENTE))
         pedidos_lista = cursor.fetchall()
         for ped in pedidos_lista:
             ped['fecha_peru'] = ped.get('fecha')
@@ -3493,7 +3513,10 @@ def mis_pedidos():
         conn.close()
     if not fases_orden:
         fases_orden = ['pendiente', 'procesando', 'enviado', 'entregado']
-    return render_template('mis_pedidos.html', pedidos=pedidos_lista, fases_orden=fases_orden)
+    return render_template('mis_pedidos.html', pedidos=pedidos_lista,
+                           fases_orden=fases_orden, pagina=pagina, total=total,
+                           por_pagina=POR_PAGINA_CLIENTE,
+                           filtros_qs=_filtros_sin_pagina())
 
 
 @app.route('/pedido_aceptado')
