@@ -143,6 +143,54 @@ def kpi_margen_bruto(cursor):
                         'de líneas con costo')}
 
 
+def _semaforo_riesgo(pct):
+    if pct is None:
+        return 'sin_datos'
+    if pct <= RIESGO_PCT_VERDE:
+        return 'verde'
+    if pct <= RIESGO_PCT_AMBAR:
+        return 'ambar'
+    return 'rojo'
+
+
+def kpi_stock_riesgo(cursor):
+    """KPI 2 — Valor de stock en riesgo por vencimiento.
+
+    Valor (a costo si existe, a precio si no: COALESCE explícito) del
+    stock activo vencido o que vence dentro del umbral
+    (VENCIMIENTO_UMBRAL_DIAS), como % del valor total del inventario
+    activo. La decisión que habilita: liquidar o devolver antes de
+    perder — el KPI estrella para la dueña.
+    """
+    umbral = umbral_vencimiento_dias()
+    cursor.execute("""
+        SELECT COALESCE(SUM(stock * COALESCE(precio_costo, precio)) FILTER (
+                        WHERE fecha_vencimiento IS NOT NULL
+                          AND fecha_vencimiento <= CURRENT_DATE
+                                  + make_interval(days => %s)), 0) AS riesgo,
+               COALESCE(SUM(stock * COALESCE(precio_costo, precio)), 0) AS total
+          FROM producto
+         WHERE activo = TRUE
+    """, (umbral,))
+    fila = cursor.fetchone()
+    riesgo = float(fila['riesgo'] or 0)
+    total = float(fila['total'] or 0)
+    if total <= 0:
+        return {'valor': None, 'pct': None, 'texto': '—',
+                'semaforo': 'sin_datos',
+                'formula': 'stock vencido o por vencer × costo (o precio) ÷ valor total del inventario',
+                'meta': f'verde ≤ {RIESGO_PCT_VERDE:.0f}%',
+                'detalle': 'sin inventario activo'}
+    pct = round(riesgo / total * 100.0, 1)
+    return {'valor': round(riesgo, 2), 'pct': pct,
+            'texto': f'S/ {riesgo:.2f} ({pct}%)',
+            'semaforo': _semaforo_riesgo(pct),
+            'formula': 'stock vencido o por vencer × costo (o precio) ÷ valor total del inventario',
+            'meta': (f'verde ≤ {RIESGO_PCT_VERDE:.0f}%; ámbar hasta '
+                     f'{RIESGO_PCT_AMBAR:.0f}%; rojo por encima'),
+            'detalle': f'umbral: {umbral} días'}
+
+
 def kpi_rotacion(cursor):
     """KPI 3 — Días de cobertura de stock.
 

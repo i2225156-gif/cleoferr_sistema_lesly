@@ -5210,12 +5210,14 @@ def admin_dashboard():
         # semáforo, fórmula y meta en services/kpis.py (un solo lugar
         # de umbrales). Cálculo sobre el conjunto completo.
         from services.kpis import (kpi_cancelados_online, kpi_margen_bruto,
-                                   kpi_mezcla, kpi_rotacion, kpi_tiempo_entrega)
+                                   kpi_mezcla, kpi_rotacion, kpi_stock_riesgo,
+                                   kpi_tiempo_entrega)
         kpis['rotacion'] = kpi_rotacion(cursor)
         kpis['cancelados_online'] = kpi_cancelados_online(cursor)
         kpis['tiempo_entrega'] = kpi_tiempo_entrega(cursor)
         kpis['mezcla'] = kpi_mezcla(cursor)
         kpis['margen'] = kpi_margen_bruto(cursor)
+        kpis['stock_riesgo'] = kpi_stock_riesgo(cursor)
     finally:
         conn.close()
 

@@ -17,9 +17,10 @@ import db_supabase
 import app as modulo_app
 from app import app
 from services import kpis as k
-from services.kpis import (_semaforo_margen, _semaforo_rotacion,
-                           kpi_cancelados_online, kpi_margen_bruto, kpi_mezcla,
-                           kpi_rotacion, kpi_tiempo_entrega)
+from services.kpis import (_semaforo_margen, _semaforo_riesgo,
+                           _semaforo_rotacion, kpi_cancelados_online,
+                           kpi_margen_bruto, kpi_mezcla, kpi_rotacion,
+                           kpi_stock_riesgo, kpi_tiempo_entrega)
 from services.ofertas import SQL_IMPORTE_LINEA
 
 
@@ -135,6 +136,7 @@ def test_constantes_configurables_en_un_lugar():
     assert k.EFECTIVO_PCT_VERDE == 60.0 and k.EFECTIVO_PCT_AMBAR == 80.0
     assert k.MARGEN_PCT_VERDE == 25.0 and k.MARGEN_PCT_AMBAR == 15.0
     assert k.MARGEN_COBERTURA_MINIMA == 60.0
+    assert k.RIESGO_PCT_VERDE == 2.0 and k.RIESGO_PCT_AMBAR == 5.0
 
 
 # ── integración del dashboard (valores contra cálculo independiente) ──
@@ -149,7 +151,8 @@ def test_dashboard_renderiza_los_cuatro_kpis(fx):
                              (kpi_cancelados_online(cur), 'cancelados'),
                              (kpi_tiempo_entrega(cur), 'entrega'),
                              (kpi_mezcla(cur), 'mezcla'),
-                             (kpi_margen_bruto(cur), 'margen')):
+                             (kpi_margen_bruto(cur), 'margen'),
+                             (kpi_stock_riesgo(cur), 'riesgo')):
         assert esperado['texto'] in html, (funcion, esperado)
         # tooltip visible con fórmula y meta
         assert esperado['formula'] in html
@@ -157,7 +160,7 @@ def test_dashboard_renderiza_los_cuatro_kpis(fx):
     # las tarjetas con sus etiquetas
     for etiqueta in ('Cobertura de stock', 'Pedidos online cancelados',
                      'Tiempo medio de entrega', 'Mezcla de medios de pago',
-                     'Margen bruto'):
+                     'Margen bruto', 'Stock en riesgo por vencimiento'):
         assert etiqueta in html
 
 
@@ -294,3 +297,53 @@ def test_margen_sin_costo_nunca_inventa(fx):
         assert resultado['semaforo'] == 'sin_datos'
         assert resultado['texto'] == '—'
         assert 'cobertura' in resultado['detalle']
+
+
+# ── KPI 2: stock en riesgo por vencimiento ────────────────────────
+
+def test_semaforo_riesgo_bordes():
+    assert _semaforo_riesgo(None) == 'sin_datos'
+    assert _semaforo_riesgo(2.0) == 'verde'
+    assert _semaforo_riesgo(2.1) == 'ambar'
+    assert _semaforo_riesgo(5.0) == 'ambar'
+    assert _semaforo_riesgo(5.1) == 'rojo'
+
+
+def test_stock_riesgo_contra_calculo_independiente(fx, monkeypatch):
+    monkeypatch.setenv('VENCIMIENTO_UMBRAL_DIAS', '30')
+    cur = fx['cur']
+    # sintéticos: vencido con costo (4 × 2.00) y por vencer sin costo
+    # (6 × 8.00 a precio); lejano y sin fecha no aportan riesgo
+    cur.execute("""
+        INSERT INTO producto (nombre, precio, stock, fecha_vencimiento, precio_costo)
+        VALUES ('zzqriesgo-vencido', 5.00, 4, CURRENT_DATE - 1, 2.00),
+               ('zzqriesgo-porvencer', 8.00, 6, CURRENT_DATE + 5, NULL),
+               ('zzqriesgo-lejano', 5.00, 50, CURRENT_DATE + 400, 1.00)
+    """)
+    resultado = kpi_stock_riesgo(cur)
+    # esperado con la misma fórmula calculada por separado
+    cur.execute("""
+        SELECT COALESCE(SUM(stock * COALESCE(precio_costo, precio)) FILTER (
+                        WHERE fecha_vencimiento IS NOT NULL
+                          AND fecha_vencimiento <= CURRENT_DATE
+                                  + make_interval(days => 30)), 0) AS riesgo,
+               COALESCE(SUM(stock * COALESCE(precio_costo, precio)), 0) AS total
+          FROM producto WHERE activo = TRUE
+    """)
+    fila = cur.fetchone()
+    riesgo = float(fila['riesgo'])
+    total = float(fila['total'])
+    assert total > 0
+    pct_esperado = round(riesgo / total * 100.0, 1)
+    assert resultado['valor'] == round(riesgo, 2)
+    assert resultado['pct'] == pct_esperado
+    assert resultado['semaforo'] == _semaforo_riesgo(pct_esperado)
+    assert resultado['texto'] == f'S/ {riesgo:.2f} ({pct_esperado}%)'
+    # los sintéticos del riesgo aportan exactamente 8 + 48 al numerador
+    cur.execute("""
+        SELECT stock * COALESCE(precio_costo, precio) AS v
+          FROM producto WHERE nombre LIKE 'zzqriesgo-%'
+           AND fecha_vencimiento <= CURRENT_DATE + 30
+    """)
+    aportes = sorted(float(r['v']) for r in cur.fetchall())
+    assert aportes == [8.0, 48.0]
