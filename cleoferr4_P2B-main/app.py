@@ -1007,6 +1007,8 @@ def _validar_producto(cursor):
     precio, error = numero('precio', request.form.get('precio'))
     if error:
         return None, error
+    if precio <= 0:
+        return None, 'El campo «precio» debe ser mayor que cero.'
     stock, error = entero('stock', request.form.get('stock'))
     if error:
         return None, error
