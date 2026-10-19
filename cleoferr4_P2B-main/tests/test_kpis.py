@@ -17,8 +17,10 @@ import db_supabase
 import app as modulo_app
 from app import app
 from services import kpis as k
-from services.kpis import (_semaforo_rotacion, kpi_cancelados_online,
-                           kpi_mezcla, kpi_rotacion, kpi_tiempo_entrega)
+from services.kpis import (_semaforo_margen, _semaforo_rotacion,
+                           kpi_cancelados_online, kpi_margen_bruto, kpi_mezcla,
+                           kpi_rotacion, kpi_tiempo_entrega)
+from services.ofertas import SQL_IMPORTE_LINEA
 
 
 class ConnProxy:
@@ -131,6 +133,8 @@ def test_constantes_configurables_en_un_lugar():
     assert k.CANCELADOS_PCT_VERDE == 10.0 and k.CANCELADOS_PCT_AMBAR == 20.0
     assert k.ENTREGA_DIAS_VERDE == 2.0 and k.ENTREGA_DIAS_AMBAR == 4.0
     assert k.EFECTIVO_PCT_VERDE == 60.0 and k.EFECTIVO_PCT_AMBAR == 80.0
+    assert k.MARGEN_PCT_VERDE == 25.0 and k.MARGEN_PCT_AMBAR == 15.0
+    assert k.MARGEN_COBERTURA_MINIMA == 60.0
 
 
 # ── integración del dashboard (valores contra cálculo independiente) ──
@@ -144,14 +148,16 @@ def test_dashboard_renderiza_los_cuatro_kpis(fx):
     for esperado, funcion in ((kpi_rotacion(cur), 'rotacion'),
                              (kpi_cancelados_online(cur), 'cancelados'),
                              (kpi_tiempo_entrega(cur), 'entrega'),
-                             (kpi_mezcla(cur), 'mezcla')):
+                             (kpi_mezcla(cur), 'mezcla'),
+                             (kpi_margen_bruto(cur), 'margen')):
         assert esperado['texto'] in html, (funcion, esperado)
         # tooltip visible con fórmula y meta
         assert esperado['formula'] in html
         assert esperado['meta'] in html
-    # las cuatro tarjetas con sus etiquetas
+    # las tarjetas con sus etiquetas
     for etiqueta in ('Cobertura de stock', 'Pedidos online cancelados',
-                     'Tiempo medio de entrega', 'Mezcla de medios de pago'):
+                     'Tiempo medio de entrega', 'Mezcla de medios de pago',
+                     'Margen bruto'):
         assert etiqueta in html
 
 
@@ -196,3 +202,95 @@ def test_sin_datos_muestra_guion(fx):
     mezcla = kpi_mezcla(cur)
     for clave in ('valor', 'texto', 'semaforo', 'formula', 'meta', 'detalle'):
         assert clave in mezcla
+
+
+# ── KPI 1: margen bruto con cobertura (sin inventar márgenes) ───
+
+def test_semaforo_margen_bordes():
+    assert _semaforo_margen(None) == 'sin_datos'
+    assert _semaforo_margen(14.9) == 'rojo'
+    assert _semaforo_margen(15) == 'ambar'
+    assert _semaforo_margen(24.9) == 'ambar'
+    assert _semaforo_margen(25) == 'verde'
+    assert _semaforo_margen(60) == 'verde'
+
+
+def _venta_pagada_hoy(fx, precio, costo, cantidad=1):
+    """Producto con costo opcional + venta pagada HOY (día Lima)."""
+    cur = fx['cur']
+    cur.execute("""
+        INSERT INTO producto (nombre, precio, stock, precio_costo)
+        VALUES ('zzqkpi-margen-' || md5(random()::text), %s, 100, %s)
+        RETURNING id_producto
+    """, (precio, costo))
+    pid = cur.fetchone()['id_producto']
+    cur.execute("""
+        INSERT INTO venta (id_tipo_venta, id_estado_venta, num_operacion, fecha)
+        VALUES ((SELECT id_tipo_venta FROM tipo_venta WHERE nombre='online'),
+                (SELECT id_estado_venta FROM estado_venta WHERE nombre='pendiente'),
+                'zzqkpi-m' || md5(random()::text), NOW())
+        RETURNING id_venta
+    """)
+    vid = cur.fetchone()['id_venta']
+    cur.execute("""
+        INSERT INTO detalle_venta (id_venta, id_producto, cantidad,
+                                   precio_unitario, descuento_unitario)
+        VALUES (%s, %s, %s, %s, 0)
+    """, (vid, pid, cantidad, precio))
+    cur.execute("""
+        INSERT INTO pago (id_venta, id_tipo_pago, id_caja, estado, monto,
+                          id_transaccion, pasarela)
+        VALUES (%s, (SELECT id_tipo_pago FROM tipo_pago WHERE nombre='efectivo'),
+                NULL, 'confirmado', %s, %s, 'simulada')
+    """, (vid, precio * cantidad, f'sim_mzzq_{vid}'))
+    return pid
+
+
+def test_margen_de_hoy_contra_calculo_independiente(fx):
+    cur = fx['cur']
+    # venta pagada HOY de un producto con costo (precio 10, costo 4):
+    # margen 60% sobre sus líneas; se mezcla con las reales del día.
+    _venta_pagada_hoy(fx, 10.00, 4.00)
+    resultado = kpi_margen_bruto(cur)
+    # esperado con la MISMA fórmula calculada por separado en el test
+    from services.horario import SQL_DIA_LIMA, SQL_HOY_LIMA
+    cur.execute(f"""
+        SELECT COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='d.')}), 0) AS importe,
+               COALESCE(SUM(d.cantidad * p.precio_costo), 0) AS costo,
+               COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='d.')})
+                        FILTER (WHERE p.precio_costo IS NOT NULL), 0) AS importe_con
+          FROM detalle_venta d
+          JOIN venta v ON v.id_venta = d.id_venta
+          JOIN pago pg ON pg.id_venta = v.id_venta AND pg.estado = 'confirmado'
+          JOIN producto p ON p.id_producto = d.id_producto
+         WHERE {SQL_DIA_LIMA.format(p='v.', col='fecha')} = {SQL_HOY_LIMA}
+    """)
+    fila = cur.fetchone()
+    importe, costo, importe_con = (float(fila['importe'] or 0),
+                                    float(fila['costo'] or 0),
+                                    float(fila['importe_con'] or 0))
+    if importe_con > 0:
+        margen_esperado = round((importe_con - costo) / importe_con * 100.0, 1)
+        assert resultado['valor'] == margen_esperado
+        cobertura_esperada = round(importe_con / importe * 100.0, 1) \
+            if importe > 0 else 0.0
+        if cobertura_esperada < k.MARGEN_COBERTURA_MINIMA:
+            assert resultado['semaforo'] == 'sin_datos'
+        else:
+            assert resultado['semaforo'] == _semaforo_margen(margen_esperado)
+            assert '%' in resultado['texto']
+    # el mes siempre viene en el dict
+    assert 'valor_mes' in resultado
+
+
+def test_margen_sin_costo_nunca_inventa(fx):
+    """Venta de hoy de producto SIN costo: si es la única con costo...
+    la cobertura manda: el margen solo se mide sobre líneas con costo."""
+    cur = fx['cur']
+    _venta_pagada_hoy(fx, 10.00, None)      # sin costo: no aporta cobertura
+    resultado = kpi_margen_bruto(cur)
+    # si las líneas reales de hoy tampoco tienen costo → sin datos
+    if resultado['valor'] is None:
+        assert resultado['semaforo'] == 'sin_datos'
+        assert resultado['texto'] == '—'
+        assert 'cobertura' in resultado['detalle']

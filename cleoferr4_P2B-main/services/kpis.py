@@ -16,6 +16,7 @@ que son estados de la venta.
 """
 import os
 
+from services.horario import SQL_DIA_LIMA, SQL_HOY_LIMA
 from services.ofertas import SQL_IMPORTE_LINEA
 from services.reservas import _plazo_segundos, _ventas_vencidas_sql
 
@@ -51,6 +52,16 @@ ENTREGA_DIAS_AMBAR = 4.0
 EFECTIVO_PCT_VERDE = 60.0        # <= 60% verde
 EFECTIVO_PCT_AMBAR = 80.0        # 60–80 ámbar; > 80 rojo
 
+# KPI 1 — margen bruto (hoy y mes en curso, Lima)
+MARGEN_PCT_VERDE = 25.0          # >= 25% verde
+MARGEN_PCT_AMBAR = 15.0          # 15–25 ámbar; < 15 rojo
+MARGEN_COBERTURA_MINIMA = 60.0   # % de líneas con costo bajo el cual el
+                                # semáforo es 'sin_datos' (no se inventa)
+
+# KPI 2 — valor de stock en riesgo por vencimiento
+RIESGO_PCT_VERDE = 2.0           # <= 2% del valor de inventario
+RIESGO_PCT_AMBAR = 5.0           # 2–5 ámbar; > 5 rojo
+
 
 def _semaforo_rotacion(dias):
     if dias < ROTACION_DIAS_QUIEBRE:
@@ -62,6 +73,74 @@ def _semaforo_rotacion(dias):
     if dias <= ROTACION_DIAS_AMBAR_MAX:
         return 'ambar'
     return 'rojo'
+
+
+def _semaforo_margen(pct):
+    if pct is None:
+        return 'sin_datos'
+    if pct >= MARGEN_PCT_VERDE:
+        return 'verde'
+    if pct >= MARGEN_PCT_AMBAR:
+        return 'ambar'
+    return 'rojo'
+
+
+def _margen_de(cursor, rango_sql):
+    """(margen%, cobertura%) de las ventas pagadas de un rango, sobre las
+    líneas cuyo producto TIENE costo. Cobertura = % del importe con
+    costo: por debajo de MARGEN_COBERTURA_MINIMA el margen no es
+    representativo y el semáforo va a 'sin_datos' (nunca se inventa)."""
+    cursor.execute(f"""
+        SELECT COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='d.')}), 0) AS importe,
+               COALESCE(SUM(d.cantidad * p.precio_costo), 0) AS costo,
+               COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='d.')})
+                        FILTER (WHERE p.precio_costo IS NOT NULL), 0) AS importe_con
+          FROM detalle_venta d
+          JOIN venta v ON v.id_venta = d.id_venta
+          JOIN pago pg ON pg.id_venta = v.id_venta AND pg.estado = 'confirmado'
+          JOIN producto p ON p.id_producto = d.id_producto
+         WHERE {rango_sql}
+    """)
+    fila = cursor.fetchone()
+    importe = float(fila['importe'] or 0)
+    importe_con = float(fila['importe_con'] or 0)
+    costo = float(fila['costo'] or 0)
+    if importe <= 0 or importe_con <= 0:
+        return None, 0.0
+    margen = (importe_con - costo) / importe_con * 100.0
+    cobertura = importe_con / importe * 100.0
+    return round(margen, 1), round(cobertura, 1)
+
+
+def kpi_margen_bruto(cursor):
+    """KPI 1 — Margen bruto de HOY y del MES en curso (días Lima).
+
+    (importe con costo − costo estimado) / importe con costo × 100.
+    El costo es el precio_costo ACTUAL del producto aplicado a las
+    líneas vendidas: aproximación honesta mientras no se congele el
+    costo por línea (exigiría esquema adicional). El semáforo es del
+    margen de HOY; el detalle muestra el mes y la cobertura.
+    """
+    hoy_sql = f"{SQL_DIA_LIMA.format(p='v.', col='fecha')} = {SQL_HOY_LIMA}"
+    mes_sql = (f"{SQL_DIA_LIMA.format(p='v.', col='fecha')} >="
+               " date_trunc('month', (NOW() AT TIME ZONE 'America/Lima')::date)")
+    margen_hoy, cobertura = _margen_de(cursor, hoy_sql)
+    margen_mes, _ = _margen_de(cursor, mes_sql)
+    if margen_hoy is None or cobertura < MARGEN_COBERTURA_MINIMA:
+        return {'valor': margen_hoy, 'valor_mes': margen_mes, 'texto': '—',
+                'semaforo': 'sin_datos',
+                'formula': '(importe con costo − costo) / importe con costo × 100, pagos confirmados',
+                'meta': f'verde ≥ {MARGEN_PCT_VERDE:.0f}%; ámbar hasta {MARGEN_PCT_AMBAR:.0f}%',
+                'detalle': (f'cobertura: {cobertura:.0f}% de líneas con costo '
+                            f'(mínimo {MARGEN_COBERTURA_MINIMA:.0f}% para medir)')}
+    return {'valor': margen_hoy, 'valor_mes': margen_mes,
+            'texto': f'{margen_hoy}%',
+            'semaforo': _semaforo_margen(margen_hoy),
+            'formula': '(importe con costo − costo) / importe con costo × 100, pagos confirmados',
+            'meta': (f'verde ≥ {MARGEN_PCT_VERDE:.0f}%; ámbar hasta '
+                     f'{MARGEN_PCT_AMBAR:.0f}%; rojo por debajo'),
+            'detalle': (f"mes {margen_mes}% · cobertura: {cobertura:.0f}% "
+                        'de líneas con costo')}
 
 
 def kpi_rotacion(cursor):

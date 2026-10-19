@@ -5209,12 +5209,13 @@ def admin_dashboard():
         # KPIs empresariales (FASE 1 aprobada: 3, 4, 5 y 6) con su
         # semáforo, fórmula y meta en services/kpis.py (un solo lugar
         # de umbrales). Cálculo sobre el conjunto completo.
-        from services.kpis import (kpi_cancelados_online, kpi_mezcla,
-                                   kpi_rotacion, kpi_tiempo_entrega)
+        from services.kpis import (kpi_cancelados_online, kpi_margen_bruto,
+                                   kpi_mezcla, kpi_rotacion, kpi_tiempo_entrega)
         kpis['rotacion'] = kpi_rotacion(cursor)
         kpis['cancelados_online'] = kpi_cancelados_online(cursor)
         kpis['tiempo_entrega'] = kpi_tiempo_entrega(cursor)
         kpis['mezcla'] = kpi_mezcla(cursor)
+        kpis['margen'] = kpi_margen_bruto(cursor)
     finally:
         conn.close()
 
