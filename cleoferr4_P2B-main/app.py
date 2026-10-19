@@ -41,7 +41,8 @@ from services.inventario import devolver_stock_venta
 from services.ofertas import (SQL_IMPORTE_LINEA, SQL_PRECIO_VIGENTE,
                               calcular_descuento_unitario, oferta_vigente,
                               precios_vigentes)
-from services.validacion import entero, numero, requerido, texto
+from services.validacion import (correo as _correo_valido, entero, nombre_persona,
+                                 numero, requerido, texto)
 from services.reservas import (liberar_reservas_vencidas, preview_reservas_vencidas,
                                total_reservas_vencidas)
 from services.pagos import (cancelar_pedido_con_pago_inicial, confirmar_pago,
@@ -1207,30 +1208,55 @@ def clientes():
 @escritura_required
 def nuevo_cliente():
     if request.method == 'POST':
-        nombre    = request.form['nombre']
-        email     = _normalizar_correo(request.form['email'])
-        telefono  = request.form.get('telefono', '')
-        direccion = request.form.get('direccion', '')
-        contrasena = request.form.get('contrasena', '123456')
-        hash_pw   = bcrypt.generate_password_hash(contrasena).decode('utf-8')
+        # FASE 2: validación de servidor con el módulo común — nombre de
+        # PERSONA (sin dígitos), correo con formato y no duplicado con
+        # mensaje amigable, teléfono/dirección opcionales con longitud, y
+        # contraseña OBLIGATORIA con la MISMA regla del registro web
+        # (el default '123456' queda eliminado).
+        nombre, error = nombre_persona('nombre', request.form.get('nombre'), 100)
+        if error:
+            flash(error, 'danger')
+            return redirect(url_for('nuevo_cliente'))
+        email, error = _correo_valido(request.form.get('email'), 120)
+        if error:
+            flash(error, 'danger')
+            return redirect(url_for('nuevo_cliente'))
+        telefono = texto(request.form.get('telefono'))
+        if telefono and len(telefono) > 20:
+            flash('El teléfono no puede superar 20 caracteres.', 'danger')
+            return redirect(url_for('nuevo_cliente'))
+        direccion = texto(request.form.get('direccion'))
+        if direccion and len(direccion) > 200:
+            flash('La dirección no puede superar 200 caracteres.', 'danger')
+            return redirect(url_for('nuevo_cliente'))
+        contrasena = request.form.get('contrasena') or ''
+        if len(contrasena) < 6:
+            flash('La contraseña es obligatoria y debe tener al menos 6 caracteres.', 'danger')
+            return redirect(url_for('nuevo_cliente'))
+        hash_pw = bcrypt.generate_password_hash(contrasena).decode('utf-8')
 
         conn   = get_connection_auth()
         cursor = conn.cursor()
         try:
+            # Duplicado con mensaje amigable (sin esperar al error de la BD)
+            cursor.execute("SELECT 1 FROM cliente WHERE LOWER(TRIM(email)) = %s",
+                           (email,))
+            if cursor.fetchone():
+                flash('Ese correo ya está registrado por otro cliente.', 'danger')
+                return redirect(url_for('nuevo_cliente'))
             # El formulario envía nombre y apellidos CONCATENADOS en "nombre"
             # (hidden nombreCompleto del cliente_form): se separan con el
             # MISMO criterio del POS (registrar_pos): primera palabra =
-            # nombre, resto = apellido (el JS del form valida ambos).
+            # nombre, resto = apellido.
             partes = nombre.split()
-            nombre_db = partes[0] if partes else nombre
+            nombre_db = partes[0]
             apellido_db = ' '.join(partes[1:])
             # Sin documento: id_tipo_documento=1 (DNI) y nro_documento NULL,
-            # criterio del registro web (registro_cliente). OJO: nunca ''
-            # — la BD tiene UNIQUE (id_tipo_documento, nro_documento).
+            # criterio del registro web. OJO: nunca '' — la BD tiene UNIQUE
+            # (id_tipo_documento, nro_documento).
+            # activo se fija de forma explicita: si se deja al DEFAULT de la
+            # columna (TRUE) el cliente queda "verificado" sin haberlo hecho.
             cursor.execute(
-                # activo se fija de forma explicita: si se deja al DEFAULT de la
-                # columna (TRUE) el cliente queda "verificado" sin haberlo hecho y
-                # despues no puede registrarse por la web ("ya esta registrado").
                 "INSERT INTO cliente (nombre, apellido, email, telefono, direccion,"
                 " contrasena, activo, id_tipo_documento, nro_documento) "
                 "VALUES (%s,%s,%s,%s,%s,%s,TRUE,1,NULL)",
@@ -1238,11 +1264,11 @@ def nuevo_cliente():
             )
             conn.commit()
             flash("Cliente registrado correctamente.", "success")
-        except Exception as e:
+        except Exception:
             conn.rollback()
             # El flash nunca oculta el bug: la excepción queda en el log.
             app.logger.exception("Error al registrar cliente desde el panel admin")
-            flash(f"Error al registrar cliente: {e}", "danger")
+            flash('No se pudo registrar el cliente. Revisa los datos e inténtalo de nuevo.', 'danger')
         finally:
             conn.close()
         return redirect(url_for('clientes'))
@@ -1256,10 +1282,23 @@ def editar_cliente(id):
     conn   = get_connection_auth()
     cursor = conn.cursor(dictionary=True)
     if request.method == 'POST':
-        nombre    = request.form['nombre']
-        email     = _normalizar_correo(request.form['email'])
-        telefono  = request.form.get('telefono', '')
-        direccion = request.form.get('direccion', '')
+        # FASE 2: validación de servidor con el módulo común
+        nombre, error = nombre_persona('nombre', request.form.get('nombre'), 100)
+        if error:
+            flash(error, 'danger')
+            return redirect(url_for('editar_cliente', id=id))
+        email, error = _correo_valido(request.form.get('email'), 120)
+        if error:
+            flash(error, 'danger')
+            return redirect(url_for('editar_cliente', id=id))
+        telefono = texto(request.form.get('telefono'))
+        if telefono and len(telefono) > 20:
+            flash('El teléfono no puede superar 20 caracteres.', 'danger')
+            return redirect(url_for('editar_cliente', id=id))
+        direccion = texto(request.form.get('direccion'))
+        if direccion and len(direccion) > 200:
+            flash('La dirección no puede superar 200 caracteres.', 'danger')
+            return redirect(url_for('editar_cliente', id=id))
         # Documento de identidad (admin puede corregirlo)
         tipo_doc_nombre = (request.form.get('tipo_documento') or '').strip().lower()
         nro_documento  = normalizar_numero(request.form.get('nro_documento', ''))
@@ -1272,6 +1311,12 @@ def editar_cliente(id):
             tipo_doc_nombre = None
             nro_documento = None
         try:
+            # Duplicado con mensaje amigable, excluyendo al propio cliente
+            cursor.execute("SELECT 1 FROM cliente WHERE LOWER(TRIM(email)) = %s"
+                           " AND id_cliente <> %s", (email, id))
+            if cursor.fetchone():
+                flash('Ese correo ya está registrado por otro cliente.', 'danger')
+                return redirect(url_for('editar_cliente', id=id))
             if tipo_doc_nombre:
                 cursor.execute(
                     "SELECT id_tipo_documento FROM tipo_documento WHERE LOWER(TRIM(nombre)) = %s",
@@ -1319,9 +1364,10 @@ def editar_cliente(id):
                 )
             conn.commit()
             flash("Cliente actualizado correctamente.", "success")
-        except Exception as e:
+        except Exception:
             conn.rollback()
-            flash(f"Error: {e}", "danger")
+            app.logger.exception("Error al actualizar el cliente %s", id)
+            flash('No se pudo actualizar el cliente. Revisa los datos e inténtalo de nuevo.', 'danger')
         finally:
             conn.close()
         return redirect(url_for('clientes'))
