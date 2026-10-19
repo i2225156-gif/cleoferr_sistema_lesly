@@ -41,7 +41,8 @@ from services.inventario import devolver_stock_venta
 from services.ofertas import (SQL_IMPORTE_LINEA, SQL_PRECIO_VIGENTE,
                               calcular_descuento_unitario, oferta_vigente,
                               precios_vigentes)
-from services.reservas import liberar_reservas_vencidas, preview_reservas_vencidas
+from services.reservas import (liberar_reservas_vencidas, preview_reservas_vencidas,
+                               total_reservas_vencidas)
 from services.pagos import (cancelar_pedido_con_pago_inicial, confirmar_pago,
                             registrar_evento)
 from services.pasarela import (EstadoPago, PagoResultado, PagoSolicitud,
@@ -4262,6 +4263,9 @@ def admin_pagos_simulados():
     conn = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
     try:
+        cursor.execute("SELECT COUNT(*) AS total FROM pago_evento")
+        total = cursor.fetchone()['total']
+        pagina = _pagina_actual(total, POR_PAGINA_ADMIN)
         cursor.execute(f"""
             SELECT {SQL_PARED_LIMA.format(p='pe.', col='recibido_en')} AS recibido_en,
                    pe.proveedor, pe.id_evento_proveedor, pe.tipo,
@@ -4271,9 +4275,9 @@ def admin_pagos_simulados():
               FROM pago_evento pe
               LEFT JOIN pago p ON p.id_pago = pe.id_pago
               LEFT JOIN venta v ON v.id_venta = p.id_venta
-             ORDER BY pe.recibido_en DESC
-             LIMIT 30
-        """)
+             ORDER BY pe.recibido_en DESC, pe.id_pago_evento DESC
+             LIMIT %s OFFSET %s
+        """, (POR_PAGINA_ADMIN, (pagina - 1) * POR_PAGINA_ADMIN))
         eventos = cursor.fetchall()
         cursor.execute("""
             SELECT p.id_pago, p.id_transaccion, p.monto, v.id_venta
@@ -4288,7 +4292,10 @@ def admin_pagos_simulados():
     finally:
         conn.close()
     return render_template('admin_pagos_simulados.html',
-                           eventos=eventos, pendientes=pendientes)
+                           eventos=eventos, pendientes=pendientes,
+                           pagina=pagina, total=total,
+                           por_pagina=POR_PAGINA_ADMIN,
+                           filtros_qs=_filtros_sin_pagina())
 
 
 @app.route('/admin/pagos_simulados/disparar', methods=['POST'])
@@ -4437,10 +4444,18 @@ def admin_reservas():
     conn = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
     try:
-        vencidas = preview_reservas_vencidas(cursor)
+        # P3: la tabla se pagina (20 por página), pero el número que
+        # muestran el aviso y el botón es el TOTAL del conjunto completo.
+        total = total_reservas_vencidas(cursor)
+        pagina = _pagina_actual(total, POR_PAGINA_ADMIN)
+        vencidas = preview_reservas_vencidas(
+            cursor, POR_PAGINA_ADMIN, (pagina - 1) * POR_PAGINA_ADMIN)
     finally:
         conn.close()
-    return render_template('admin_reservas.html', vencidas=vencidas)
+    return render_template('admin_reservas.html', vencidas=vencidas,
+                           total_vencidas=total, pagina=pagina,
+                           por_pagina=POR_PAGINA_ADMIN,
+                           filtros_qs=_filtros_sin_pagina())
 
 
 @app.route('/admin/reservas/liberar', methods=['POST'])

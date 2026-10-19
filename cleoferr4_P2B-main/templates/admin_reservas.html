@@ -1,4 +1,5 @@
 {% extends 'admin_base.html' %}
+{% from 'components/paginacion.html' import paginacion %}
 {% set seccion_activa = 'reservas' %}
 {% block titulito %}Reservas vencidas – Cleoferr{% endblock %}
 {% block admin_contenido %}
@@ -21,7 +22,7 @@
   {% if vencidas %}
   <div class="card shadow-sm mb-4" style="border-radius:12px;border:1px solid #f59e0b">
     <div class="card-header bg-warning text-dark" style="border-radius:12px 12px 0 0">
-      <strong><i class="fa fa-exclamation-triangle me-2"></i>Vista previa: {{ vencidas|length }} reserva(s) vencida(s) que se liberarán</strong>
+      <strong><i class="fa fa-exclamation-triangle me-2"></i>Vista previa: {{ total_vencidas }} reserva(s) vencida(s) que se liberarán</strong>
     </div>
     <div class="card-body">
       <div class="table-responsive">
@@ -57,6 +58,7 @@
           </tbody>
         </table>
       </div>
+      {{ paginacion(pagina, total_vencidas, por_pagina, filtros_qs) }}
       <hr>
       <p class="mb-2" style="font-size:0.85rem">
         Al pulsar el botón: cada venta pasará a <strong>cancelado</strong>,
@@ -65,13 +67,13 @@
         registrará cada cambio.
       </p>
       <form method="POST" action="/admin/reservas/liberar"
-            data-confirm="¿Liberar {{ vencidas|length }} reserva(s)? El stock volverá al catálogo y las ventas se cancelarán."
+            data-confirm="¿Liberar {{ total_vencidas }} reserva(s)? El stock volverá al catálogo y las ventas se cancelarán."
             data-confirm-titulo="Liberar reservas"
             data-confirm-tipo="peligro"
             data-confirm-aceptar="Liberar">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <button type="submit" class="btn btn-naranja fw-bold">
-          <i class="fa fa-unlock me-1"></i>Liberar {{ vencidas|length }} reserva(s) vencida(s)
+          <i class="fa fa-unlock me-1"></i>Liberar {{ total_vencidas }} reserva(s) vencida(s)
         </button>
       </form>
     </div>

@@ -1,4 +1,5 @@
 {% extends 'admin_base.html' %}
+{% from 'components/paginacion.html' import paginacion %}
 {% set seccion_activa = 'pagos_simulados' %}
 {% block titulito %}Pagos simulados – Cleoferr{% endblock %}
 {% block admin_contenido %}
@@ -53,7 +54,7 @@
 
   <div class="card shadow-sm" style="border-radius:12px">
     <div class="card-body">
-      <h6 class="fw-bold mb-3"><i class="fa fa-list me-2"></i>Últimos eventos (máx. 30)</h6>
+      <h6 class="fw-bold mb-3"><i class="fa fa-list me-2"></i>Últimos eventos</h6>
       {% if eventos %}
       <div class="table-responsive">
         <table class="table table-sm table-hover align-middle mb-0">
@@ -88,6 +89,7 @@
           </tbody>
         </table>
       </div>
+      {{ paginacion(pagina, total, por_pagina, filtros_qs) }}
       {% else %}
       <p class="text-muted mb-0">Todavía no hay eventos de pago registrados.</p>
       {% endif %}
