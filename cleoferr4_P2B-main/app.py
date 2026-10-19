@@ -5071,6 +5071,16 @@ def admin_dashboard():
         from services.reservas import preview_reservas_vencidas
         vencidas = preview_reservas_vencidas(cursor)
         reservas_vencidas = len(vencidas)
+
+        # KPIs empresariales (FASE 1 aprobada: 3, 4, 5 y 6) con su
+        # semáforo, fórmula y meta en services/kpis.py (un solo lugar
+        # de umbrales). Cálculo sobre el conjunto completo.
+        from services.kpis import (kpi_cancelados_online, kpi_mezcla,
+                                   kpi_rotacion, kpi_tiempo_entrega)
+        kpis['rotacion'] = kpi_rotacion(cursor)
+        kpis['cancelados_online'] = kpi_cancelados_online(cursor)
+        kpis['tiempo_entrega'] = kpi_tiempo_entrega(cursor)
+        kpis['mezcla'] = kpi_mezcla(cursor)
     finally:
         conn.close()
 
