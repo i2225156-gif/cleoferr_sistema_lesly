@@ -165,10 +165,31 @@ def test_login_cliente_correcto(fx):
 
 
 def test_login_cliente_no_verificado(fx):
-    r = _post(_cliente(), '/login_cliente', correo=CORREO_NOVER,
-              contrasena=CLAVE)
+    """1a: cuenta sin verificar (activo=FALSE) = credencial inválida,
+    sin revelar el motivo ni abrir sesión."""
+    c = _cliente()
+    r = _post(c, '/login_cliente', correo=CORREO_NOVER, contrasena=CLAVE)
     assert r.status_code == 200
-    assert 'aún no está verificada' in r.get_data(as_text=True)
+    html = r.get_data(as_text=True)
+    assert 'Credenciales incorrectas' in html
+    assert 'verificada' not in html.lower()
+    with c.session_transaction() as s:
+        assert 'rol' not in s
+
+
+def test_login_usuario_inactivo_rechazado(fx):
+    """1a: un usuario de staff desactivado recibe el mismo mensaje
+    genérico aunque su contraseña sea correcta."""
+    fx['cur'].execute("UPDATE usuario SET activo = FALSE WHERE email=%s",
+                      (CORREO_STAFF,))
+    c = _cliente()
+    r = _post(c, '/login', correo=CORREO_STAFF, clave=CLAVE)
+    assert r.status_code == 200
+    html = r.get_data(as_text=True)
+    assert 'Credenciales incorrectas' in html
+    assert 'inactiv' not in html.lower()      # sin revelar el motivo
+    with c.session_transaction() as s:
+        assert 'rol' not in s
 
 
 def test_post_sin_csrf_es_400(fx):

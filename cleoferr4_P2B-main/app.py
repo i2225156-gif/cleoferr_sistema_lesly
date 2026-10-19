@@ -329,7 +329,8 @@ def login():
         conn   = get_connection_auth()
         cursor = conn.cursor(dictionary=True)
         cursor.execute("""
-            SELECT u.id_usuario, u.nombres, u.email, u.contrasena, r.nombre AS rol
+            SELECT u.id_usuario, u.nombres, u.email, u.contrasena, r.nombre AS rol,
+                   u.activo
             FROM usuario u
             INNER JOIN rol r ON u.id_rol = r.id_rol
             WHERE LOWER(TRIM(u.email)) = %s
@@ -337,6 +338,9 @@ def login():
         usuario = cursor.fetchone()
         conn.close()
 
+        # 1a: cuenta inactiva = credencial inválida, sin revelar el motivo
+        if usuario and not usuario.get('activo'):
+            usuario = None
         if usuario and bcrypt.check_password_hash(usuario['contrasena'], clave):
             rol_usuario = (usuario.get('rol') or '').lower()
             # Permitir solo administradores y vendedores en este login
@@ -372,11 +376,12 @@ def login_cliente():
         conn.close()
 
         if cliente:
-            # Cuenta registrada pero sin verificar su correo
+            # 1a: cuenta inactiva o sin verificar = credencial inválida,
+            # sin revelar el motivo (el registro web activa con el OTP;
+            # desde aquí no se distingue 'inactiva' de 'sin verificar')
             if not cliente.get('activo'):
                 return render_template('login_cliente.html',
-                                       error='Tu cuenta aún no está verificada. Completa el registro con el código enviado a tu correo.',
-                                       registro_activo=True)
+                                       error='Credenciales incorrectas')
             # Solo Bcrypt: las contraseñas de clientes deben estar hasheadas con bcrypt.
             # Si el hash almacenado no es bcrypt válido, el acceso se rechaza.
             stored = cliente.get('contrasena') or cliente.get('password') or ''
