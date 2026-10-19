@@ -3128,6 +3128,11 @@ def admin_ofertas_nueva():
     if error:
         flash(error, 'danger')
         return redirect(url_for('admin_ofertas'))
+    # FASE 2: inicio en el pasado se ADVIERTE, no se bloquea (la oferta
+    # queda activa desde su vigencia; el solape lo impide la BD).
+    if datos['inicio'] < datetime.now():
+        flash('La fecha de inicio es anterior a ahora: la oferta quedará '
+              'activa desde su vigencia.', 'warning')
     conn = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
     try:
@@ -3163,6 +3168,10 @@ def admin_ofertas_editar(id):
     if error:
         flash(error, 'danger')
         return redirect(url_for('admin_ofertas'))
+    # FASE 2: misma advertencia que el alta (no bloquea)
+    if datos['inicio'] < datetime.now():
+        flash('La fecha de inicio es anterior a ahora: la oferta quedará '
+              'activa desde su vigencia.', 'warning')
     conn = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
     try:
