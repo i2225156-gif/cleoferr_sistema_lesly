@@ -1523,55 +1523,88 @@ def inventario():
 @login_required
 @escritura_required
 def registrar_movimiento():
-    tipo         = request.form['tipo']           # 'entrada' | 'salida'
-    id_producto  = request.form['id_producto']
+    # FASE 2: validación de servidor con el módulo común — nada de 500
+    # por entradas malformadas ni flashes con texto crudo de la BD.
+    tipo = (request.form.get('tipo') or '').strip()
+    if tipo not in ('entrada', 'salida'):
+        flash('El tipo de movimiento debe ser entrada o salida.', 'danger')
+        return redirect(url_for('inventario'))
+    id_producto, error = entero('producto', request.form.get('id_producto'))
+    if error:
+        flash(error, 'danger')
+        return redirect(url_for('inventario'))
+    cantidad, error = entero('cantidad', request.form.get('cantidad'))
+    if error:
+        flash(error, 'danger')
+        return redirect(url_for('inventario'))
+    if cantidad <= 0:
+        flash('El campo «cantidad» debe ser mayor que cero.', 'danger')
+        return redirect(url_for('inventario'))
+    # Precio unitario OPCIONAL: si viene, debe ser número >= 0
+    precio_unit = texto(request.form.get('precio_unitario'))
+    if precio_unit is not None:
+        precio_unit, error = numero('precio unitario', precio_unit)
+        if error:
+            flash(error, 'danger')
+            return redirect(url_for('inventario'))
+    observacion = texto(request.form.get('observacion'))
     # Para compatibilidad: recibimos ambos campos, uno estará vacío según tipo
-    id_proveedor = request.form.get('id_proveedor') or None
-    id_vendedor  = request.form.get('id_vendedor') or None
-    cantidad     = int(request.form['cantidad'])
-    precio_unit  = request.form.get('precio_unitario') or 0
-    observacion  = request.form.get('observacion', '')
-    id_usuario   = session['usuario_id']
+    id_proveedor = None
+    id_vendedor = None
+    if tipo == 'entrada' and texto(request.form.get('id_proveedor')):
+        id_proveedor, error = entero('proveedor', request.form.get('id_proveedor'))
+        if error:
+            flash(error, 'danger')
+            return redirect(url_for('inventario'))
+    if tipo == 'salida' and texto(request.form.get('id_vendedor')):
+        id_vendedor, error = entero('vendedor', request.form.get('id_vendedor'))
+        if error:
+            flash(error, 'danger')
+            return redirect(url_for('inventario'))
+    id_usuario = session['usuario_id']
 
     conn   = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
-
-    # Obtener stock actual
-    cursor.execute("SELECT stock FROM producto WHERE id_producto=%s", (id_producto,))
-    prod = cursor.fetchone()
-    if not prod:
-        flash("Producto no encontrado.", "danger")
-        conn.close()
-        return redirect(url_for('inventario'))
-
-    stock_actual = prod['stock']
-    if tipo == 'salida' and cantidad > stock_actual:
-        flash(f"Stock insuficiente. Disponible: {stock_actual}", "danger")
-        conn.close()
-        return redirect(url_for('inventario'))
-
-    nuevo_stock = stock_actual + cantidad if tipo == 'entrada' else stock_actual - cantidad
-
-    # Si es salida y se seleccionó un vendedor, obtener su nombre y añadir a observación
-    # (la tabla usuario vive en la BD Auth, por eso se consulta por separado)
-    if tipo == 'salida' and id_vendedor:
-        try:
-            conn_a   = get_connection_auth()
-            cursor_a = conn_a.cursor(dictionary=True)
-            cursor_a.execute("SELECT nombres FROM usuario WHERE id_usuario=%s", (id_vendedor,))
-            row = cursor_a.fetchone()
-            conn_a.close()
-            nombre_vendedor = row['nombres'] if row else None
-            if nombre_vendedor:
-                observacion = f"Vendedor: {nombre_vendedor}" + (f" - {observacion}" if observacion else "")
-        except Exception:
-            # no crítico, continuar con la observación sin nombre
-            app.logger.exception("Error consultando nombre del vendedor id=%s para observación", id_vendedor)
-
-    # Para compatibilidad con la estructura actual, solo llenamos id_proveedor para entradas.
-    proveedor_db_value = id_proveedor if tipo == 'entrada' and id_proveedor else None
-
     try:
+        cursor.execute("SELECT stock FROM producto WHERE id_producto=%s", (id_producto,))
+        prod = cursor.fetchone()
+        if not prod:
+            flash("Producto no encontrado.", "danger")
+            return redirect(url_for('inventario'))
+
+        if id_proveedor:
+            cursor.execute("SELECT 1 FROM proveedor WHERE id_proveedor=%s",
+                           (id_proveedor,))
+            if not cursor.fetchone():
+                flash("El proveedor seleccionado no existe.", "danger")
+                return redirect(url_for('inventario'))
+
+        stock_actual = prod['stock']
+        if tipo == 'salida' and cantidad > stock_actual:
+            flash(f"Stock insuficiente. Disponible: {stock_actual}", "danger")
+            return redirect(url_for('inventario'))
+
+        nuevo_stock = stock_actual + cantidad if tipo == 'entrada' else stock_actual - cantidad
+
+        # Si es salida y se seleccionó un vendedor, obtener su nombre y añadir a observación
+        # (la tabla usuario vive en la BD Auth, por eso se consulta por separado)
+        if tipo == 'salida' and id_vendedor:
+            try:
+                conn_a   = get_connection_auth()
+                cursor_a = conn_a.cursor(dictionary=True)
+                cursor_a.execute("SELECT nombres FROM usuario WHERE id_usuario=%s", (id_vendedor,))
+                row = cursor_a.fetchone()
+                conn_a.close()
+                nombre_vendedor = row['nombres'] if row else None
+                if nombre_vendedor:
+                    observacion = f"Vendedor: {nombre_vendedor}" + (f" - {observacion}" if observacion else "")
+            except Exception:
+                # no crítico, continuar con la observación sin nombre
+                app.logger.exception("Error consultando nombre del vendedor id=%s para observación", id_vendedor)
+
+        # Para compatibilidad con la estructura actual, solo llenamos id_proveedor para entradas.
+        proveedor_db_value = id_proveedor if tipo == 'entrada' and id_proveedor else None
+
         cursor.execute("""
             INSERT INTO inventario_movimiento
                 (tipo, id_producto, id_proveedor, cantidad, precio_unitario, observacion, id_usuario, stock_resultante)
@@ -1581,9 +1614,10 @@ def registrar_movimiento():
         cursor.execute("UPDATE producto SET stock=%s WHERE id_producto=%s", (nuevo_stock, id_producto))
         conn.commit()
         flash(f"Movimiento de {'entrada' if tipo=='entrada' else 'salida'} registrado. Nuevo stock: {nuevo_stock}", "success")
-    except Exception as e:
+    except Exception:
         conn.rollback()
-        flash(f"Error al registrar movimiento: {e}", "danger")
+        app.logger.exception("Error al registrar el movimiento de inventario")
+        flash('No se pudo registrar el movimiento. Revisa los datos e inténtalo de nuevo.', 'danger')
     finally:
         conn.close()
     return redirect(url_for('inventario'))
