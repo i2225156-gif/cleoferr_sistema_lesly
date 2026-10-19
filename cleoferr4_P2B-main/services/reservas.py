@@ -65,17 +65,39 @@ def _ventas_vencidas_sql():
     """
 
 
-def preview_reservas_vencidas(cursor):
-    """Solo lectura: lista las ventas que LIBERARIA el botón.
+def total_reservas_vencidas(cursor):
+    """Solo lectura: COUNT del conjunto COMPLETO de vencidas.
 
-    Devuelve lista de dicts con id_venta, tipo_pago, segundos_transcurridos
-    y plazo. SIN datos personales.
+    Envuelve el MISMO SQL del preview para que el número del panel no
+    pueda desincronizarse del conjunto que libera el botón.
     """
     plazo_tarjeta = _plazo_segundos('tarjeta')
     plazo_operacion = _plazo_segundos('efectivo')
-    cursor.execute(_ventas_vencidas_sql(),
-                    (plazo_tarjeta, plazo_operacion,
-                     plazo_tarjeta, plazo_operacion))
+    cursor.execute(
+        "SELECT COUNT(*) AS total FROM (" + _ventas_vencidas_sql() + ") t",
+        (plazo_tarjeta, plazo_operacion, plazo_tarjeta, plazo_operacion))
+    fila = cursor.fetchone()
+    total = fila['total'] if isinstance(fila, dict) else fila[0]
+    return int(total)
+
+
+def preview_reservas_vencidas(cursor, limite=None, offset=0):
+    """Solo lectura: lista las ventas que LIBERARIA el botón.
+
+    Devuelve lista de dicts con id_venta, tipo_pago, segundos_transcurridos
+    y plazo. SIN datos personales. Con limite devuelve solo esa página del
+    historial (ORDER BY estable fecha DESC + id DESC); sin limite, el
+    conjunto completo como siempre. liberar_reservas_vencidas NO usa
+    esto: sigue operando sobre el conjunto completo.
+    """
+    plazo_tarjeta = _plazo_segundos('tarjeta')
+    plazo_operacion = _plazo_segundos('efectivo')
+    sql = _ventas_vencidas_sql()
+    params = [plazo_tarjeta, plazo_operacion, plazo_tarjeta, plazo_operacion]
+    if limite is not None:
+        sql += " ORDER BY v.fecha DESC, v.id_venta DESC LIMIT %s OFFSET %s"
+        params += [limite, offset]
+    cursor.execute(sql, params)
     filas = cursor.fetchall()
     resultado = []
     for f in filas:

@@ -41,7 +41,9 @@ from services.inventario import devolver_stock_venta
 from services.ofertas import (SQL_IMPORTE_LINEA, SQL_PRECIO_VIGENTE,
                               calcular_descuento_unitario, oferta_vigente,
                               precios_vigentes)
-from services.reservas import liberar_reservas_vencidas, preview_reservas_vencidas
+from services.validacion import entero, numero, requerido, texto
+from services.reservas import (liberar_reservas_vencidas, preview_reservas_vencidas,
+                               total_reservas_vencidas)
 from services.pagos import (cancelar_pedido_con_pago_inicial, confirmar_pago,
                             registrar_evento)
 from services.pasarela import (EstadoPago, PagoResultado, PagoSolicitud,
@@ -270,6 +272,21 @@ def _ctx_recuperacion_origen():
     return {'recuperar_origen': request.values.get('origen', 'cliente')}
 
 
+# ── Páginas de error sin detalles técnicos (FASE 2) ─────────────
+@app.errorhandler(404)
+def _error_404(e):
+    return render_template('error.html', codigo=404,
+                           mensaje='La página que buscas no existe o fue movida.'), 404
+
+
+@app.errorhandler(500)
+def _error_500(e):
+    return render_template('error.html', codigo=500,
+                           mensaje='Ocurrió un error inesperado y ya quedó '
+                                   'registrado en el log. Inténtalo de nuevo '
+                                   'en un momento.'), 500
+
+
 # Rutas de cliente (públicas/catálogo) que deben redirigir a /login_cliente,
 # no al login administrativo
 _RUTAS_CLIENTE = ('/carrito', '/mis_pedidos')
@@ -320,6 +337,75 @@ def inicio():
     return redirect(url_for('catalogo_cliente'))
 
 
+# ── Seguridad de login: bloqueo por intentos fallidos (1b) ────────
+# Umbral y duración por variables de entorno (defaults: 5 intentos,
+# 15 minutos). El contador y el bloqueo usan las columnas EXISTENTES de
+# la BD Auth (intentos_fallidos, bloqueado_hasta). Las tablas
+# intento_login e ip_bloqueada existen pero NO se usan (decisión: un
+# bloqueo por IP encerraría aulas/oficinas enteras con IP compartida,
+# incluida la demo; quedan intactas y sin crear nada).
+def _login_intentos_max():
+    try:
+        return max(1, int(os.environ.get('LOGIN_INTENTOS_MAX', '5')))
+    except ValueError:
+        return 5
+
+
+def _login_bloqueo_min():
+    try:
+        return max(1, int(os.environ.get('LOGIN_BLOQUEO_MIN', '15')))
+    except ValueError:
+        return 15
+
+
+def _cuenta_bloqueada(fila):
+    """True si la cuenta está bloqueada AHORA (columna bloqueado_hasta)."""
+    from datetime import timezone
+    hasta = fila.get('bloqueado_hasta')
+    return bool(hasta and hasta > datetime.now(timezone.utc))
+
+
+def _login_intento_fallido(conn, fila, es_cliente):
+    """Cuenta un intento fallido; al llegar al umbral bloquea la cuenta.
+
+    La auditoría del bloqueo va al log del servidor con el id de la
+    cuenta, nunca el correo (regla de no datos personales en logs).
+    """
+    cursor = conn.cursor()
+    if es_cliente:
+        tabla, id_col, id_cuenta = 'cliente', 'id_cliente', fila['id_cliente']
+    else:
+        tabla, id_col, id_cuenta = 'usuario', 'id_usuario', fila['id_usuario']
+    intentos = int(fila.get('intentos_fallidos') or 0) + 1
+    if intentos >= _login_intentos_max():
+        cursor.execute(f"""
+            UPDATE {tabla}
+               SET intentos_fallidos = %s,
+                   bloqueado_hasta = NOW() + make_interval(mins => %s)
+             WHERE {id_col} = %s
+        """, (intentos, _login_bloqueo_min(), id_cuenta))
+        app.logger.warning('Login bloqueado tras %d intentos fallidos: %s %s',
+                           intentos, tabla, id_cuenta)
+    else:
+        cursor.execute(f"UPDATE {tabla} SET intentos_fallidos = %s"
+                       f" WHERE {id_col} = %s", (intentos, id_cuenta))
+    conn.commit()
+
+
+def _login_reiniciar_intentos(conn, fila, es_cliente):
+    """Acceso exitoso: contador a cero y bloqueo retirado."""
+    cursor = conn.cursor()
+    if es_cliente:
+        cursor.execute("UPDATE cliente SET intentos_fallidos = 0,"
+                       " bloqueado_hasta = NULL WHERE id_cliente = %s",
+                       (fila['id_cliente'],))
+    else:
+        cursor.execute("UPDATE usuario SET intentos_fallidos = 0,"
+                       " bloqueado_hasta = NULL WHERE id_usuario = %s",
+                       (fila['id_usuario'],))
+    conn.commit()
+
+
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
@@ -328,25 +414,42 @@ def login():
         conn   = get_connection_auth()
         cursor = conn.cursor(dictionary=True)
         cursor.execute("""
-            SELECT u.id_usuario, u.nombres, u.email, u.contrasena, r.nombre AS rol
+            SELECT u.id_usuario, u.nombres, u.email, u.contrasena, r.nombre AS rol,
+                   u.activo, u.intentos_fallidos, u.bloqueado_hasta
             FROM usuario u
             INNER JOIN rol r ON u.id_rol = r.id_rol
             WHERE LOWER(TRIM(u.email)) = %s
         """, (correo,))
         usuario = cursor.fetchone()
-        conn.close()
 
-        if usuario and bcrypt.check_password_hash(usuario['contrasena'], clave):
-            rol_usuario = (usuario.get('rol') or '').lower()
-            # Permitir solo administradores y vendedores en este login
-            if rol_usuario not in ('administrador', 'vendedor'):
-                # Mensaje breve indicando redirección al login de clientes
-                return render_template('login.html', error='Acceso restringido. Si eres cliente usa el acceso de clientes: /login_cliente')
-            session['usuario_id'] = usuario['id_usuario']
-            session['rol']        = usuario['rol']
-            session['nombre']     = usuario['nombres']
-            return redirect(url_for('productos'))
-        return render_template('login.html', error='Credenciales incorrectas')
+        def _invalido():
+            return render_template('login.html',
+                                   error='Credenciales incorrectas')
+
+        try:
+            # 1a: cuenta inactiva = credencial inválida, sin revelar el motivo
+            if usuario and not usuario.get('activo'):
+                usuario = None
+            # 1b: bloqueada por intentos fallidos → mismo mensaje genérico
+            if usuario and _cuenta_bloqueada(usuario):
+                return _invalido()
+            if not (usuario and bcrypt.check_password_hash(usuario['contrasena'], clave)):
+                if usuario:
+                    _login_intento_fallido(conn, usuario, es_cliente=False)
+                return _invalido()
+            # acceso exitoso: contador a cero
+            _login_reiniciar_intentos(conn, usuario, es_cliente=False)
+        finally:
+            conn.close()
+        rol_usuario = (usuario.get('rol') or '').lower()
+        # Permitir solo administradores y vendedores en este login
+        if rol_usuario not in ('administrador', 'vendedor'):
+            # Mensaje breve indicando redirección al login de clientes
+            return render_template('login.html', error='Acceso restringido. Si eres cliente usa el acceso de clientes: /login_cliente')
+        session['usuario_id'] = usuario['id_usuario']
+        session['rol']        = usuario['rol']
+        session['nombre']     = usuario['nombres']
+        return redirect(url_for('productos'))
     # Botón WhatsApp para recuperar credenciales (personal administrativo)
     msg_admin = quote(
         "Hola Soporte de Inversiones CLEOFERR, soy del personal ADMINISTRATIVO "
@@ -368,35 +471,45 @@ def login_cliente():
             "SELECT * FROM cliente WHERE LOWER(TRIM(email)) = %s ORDER BY id_cliente LIMIT 1",
             (correo,))
         cliente = cursor.fetchone()
-        conn.close()
 
-        if cliente:
-            # Cuenta registrada pero sin verificar su correo
-            if not cliente.get('activo'):
-                return render_template('login_cliente.html',
-                                       error='Tu cuenta aún no está verificada. Completa el registro con el código enviado a tu correo.',
-                                       registro_activo=True)
-            # Solo Bcrypt: las contraseñas de clientes deben estar hasheadas con bcrypt.
-            # Si el hash almacenado no es bcrypt válido, el acceso se rechaza.
-            stored = cliente.get('contrasena') or cliente.get('password') or ''
-            try:
-                ok = bcrypt.check_password_hash(stored, contrasena)
-            except (ValueError, TypeError):
-                ok = False
+        def _invalido():
+            return render_template('login_cliente.html',
+                                   error='Credenciales incorrectas')
 
-            if ok:
-                nombre_cliente = (
-                    cliente.get('nombre') or
-                    cliente.get('nombres') or
-                    cliente.get('name') or
-                    cliente.get('email')
-                )
-                session['usuario_id'] = cliente.get('id_cliente') or cliente.get('id')
-                session['rol']        = 'cliente'
-                session['nombre']     = nombre_cliente
-                return redirect(url_for('catalogo_cliente'))
-
-        return render_template('login_cliente.html', error='Credenciales incorrectas')
+        try:
+            # 1a: cuenta inactiva o sin verificar = credencial inválida,
+            # sin revelar el motivo (el registro web activa con el OTP;
+            # desde aquí no se distingue 'inactiva' de 'sin verificar')
+            if cliente and not cliente.get('activo'):
+                cliente = None
+            # 1b: bloqueada por intentos fallidos → mismo mensaje genérico
+            if cliente and _cuenta_bloqueada(cliente):
+                return _invalido()
+            if cliente:
+                # Solo Bcrypt: las contraseñas de clientes deben estar
+                # hasheadas con bcrypt; si no, el acceso se rechaza.
+                stored = cliente.get('contrasena') or cliente.get('password') or ''
+                try:
+                    ok = bcrypt.check_password_hash(stored, contrasena)
+                except (ValueError, TypeError):
+                    ok = False
+                if ok:
+                    # acceso exitoso: contador a cero
+                    _login_reiniciar_intentos(conn, cliente, es_cliente=True)
+                    nombre_cliente = (
+                        cliente.get('nombre') or
+                        cliente.get('nombres') or
+                        cliente.get('name') or
+                        cliente.get('email')
+                    )
+                    session['usuario_id'] = cliente.get('id_cliente') or cliente.get('id')
+                    session['rol']        = 'cliente'
+                    session['nombre']     = nombre_cliente
+                    return redirect(url_for('catalogo_cliente'))
+                _login_intento_fallido(conn, cliente, es_cliente=True)
+            return _invalido()
+        finally:
+            conn.close()
     # Botón WhatsApp para recuperar credenciales (clientes)
     msg_cliente = quote(
         "Hola Soporte de Inversiones CLEOFERR, soy un CLIENTE registrado y necesito ayuda "
@@ -866,24 +979,86 @@ def nuevo_producto():
     return render_template('producto_form.html', categorias=categorias, marcas=marcas)
 
 
+def _id_foranea(cursor, campo_form, tabla, id_col, etiqueta):
+    """FK OPCIONAL del form: vacío o '0' → None; si viene, debe ser un
+    dígito y existir en la tabla (parámetros preparados, sin 500)."""
+    bruto = (request.form.get(campo_form) or '').strip()
+    if not bruto or bruto == '0':
+        return None, None
+    if not bruto.isdigit():
+        return None, f'La {etiqueta} seleccionada no es válida.'
+    cursor.execute(f"SELECT 1 FROM {tabla} WHERE {id_col} = %s", (int(bruto),))
+    if not cursor.fetchone():
+        return None, f'La {etiqueta} seleccionada no existe.'
+    return int(bruto), None
+
+
+def _validar_producto(cursor):
+    """Valida el form de alta/edición de producto (FASE 2).
+
+    Recibe el cursor de la MISMA conexión que luego escribe. Devuelve
+    (datos, None) o (None, mensaje). El NOMBRE de producto admite dígitos
+    ('Taladro 650W'); precio y stock aceptan 0 (los CHECKs de la BD
+    permiten >= 0) y rechazan negativos y no numéricos.
+    """
+    nombre, error = requerido('nombre', request.form.get('nombre'), 150)
+    if error:
+        return None, error
+    precio, error = numero('precio', request.form.get('precio'))
+    if error:
+        return None, error
+    stock, error = entero('stock', request.form.get('stock'))
+    if error:
+        return None, error
+    descripcion = texto(request.form.get('descripcion'))
+    if descripcion and len(descripcion) > 2000:
+        return None, 'La descripción no puede superar 2000 caracteres.'
+    estado = (request.form.get('estado') or '').strip()
+    if estado not in ('activo', 'inactivo'):
+        estado = 'activo'
+
+    id_categoria, error = _id_foranea(cursor, 'id_categoria', 'categoria',
+                                      'id_categoria', 'categoría')
+    if error:
+        return None, error
+    id_marca, error = _id_foranea(cursor, 'id_marca', 'marca',
+                                  'id_marca', 'marca')
+    if error:
+        return None, error
+    return {'nombre': nombre, 'descripcion': descripcion, 'precio': precio,
+            'stock': stock, 'id_categoria': id_categoria, 'id_marca': id_marca,
+            'activo': estado == 'activo'}, None
+
+
 @app.route('/productos/guardar', methods=['POST'])
 @login_required
 @escritura_required
 def guardar_producto():
-    nombre_imagen = guardar_imagen('imagen')
-    nuevo = Producto(
-        nombre       = request.form['nombre'],
-        descripcion  = request.form['descripcion'],
-        precio       = request.form['precio'],
-        stock        = request.form['stock'],
-        id_categoria = request.form['id_categoria'],
-        id_marca     = request.form['id_marca'],
-        activo       = request.form.get('estado', 'activo') != 'inactivo',
-        imagen       = nombre_imagen
-    )
-    db.session.add(nuevo)
-    db.session.commit()
-    flash("Producto creado correctamente.", "success")
+    conn = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        # FASE 2: validación de servidor con el módulo común — una entrada
+        # malformada da un flash claro y vuelve al form, nunca un 500.
+        datos, error = _validar_producto(cursor)
+        if error:
+            flash(error, 'danger')
+            return redirect(url_for('nuevo_producto'))
+        nombre_imagen = guardar_imagen('imagen')
+        cursor.execute("""
+            INSERT INTO producto (nombre, descripcion, precio, stock,
+                                  id_categoria, id_marca, activo, imagen)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """, (datos['nombre'], datos['descripcion'], datos['precio'],
+              datos['stock'], datos['id_categoria'], datos['id_marca'],
+              datos['activo'], nombre_imagen))
+        conn.commit()
+        flash("Producto creado correctamente.", "success")
+    except Exception:
+        conn.rollback()
+        app.logger.exception("Error al guardar el producto")
+        flash('No se pudo guardar el producto. Revisa los datos e inténtalo de nuevo.', 'danger')
+    finally:
+        conn.close()
     return redirect(url_for('productos'))
 
 
@@ -906,23 +1081,43 @@ def editar_producto(id):
 @login_required
 @escritura_required
 def actualizar_producto(id):
-    producto             = db.get_or_404(Producto, id)
-    nombre_imagen = guardar_imagen('imagen')            # ← NUEVO
-    if nombre_imagen and producto.imagen:               # ← NUEVO: borra imagen vieja
-        ruta_vieja = os.path.join(UPLOAD_FOLDER, producto.imagen)
-        if os.path.exists(ruta_vieja):
-            os.remove(ruta_vieja)
-    producto.nombre      = request.form['nombre']
-    producto.descripcion = request.form['descripcion']
-    producto.precio      = request.form['precio']
-    producto.stock       = request.form['stock']
-    producto.id_categoria = request.form['id_categoria']
-    producto.id_marca    = request.form['id_marca']
-    producto.activo      = request.form.get('estado', 'activo') != 'inactivo'
-    if nombre_imagen:                                   # ← CAMBIÓ
-        producto.imagen = nombre_imagen
-    db.session.commit()
-    flash("Producto actualizado correctamente.", "success")
+    conn = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT imagen FROM producto WHERE id_producto = %s", (id,))
+    fila = cursor.fetchone()
+    if not fila:
+        conn.close()
+        abort(404)
+    try:
+        # FASE 2: misma validación que el alta; error → flash y vuelta al form
+        datos, error = _validar_producto(cursor)
+        if error:
+            flash(error, 'danger')
+            return redirect(url_for('editar_producto', id=id))
+        nombre_imagen = guardar_imagen('imagen')
+        if nombre_imagen and fila['imagen']:      # borra la imagen vieja
+            ruta_vieja = os.path.join(UPLOAD_FOLDER, fila['imagen'])
+            if os.path.exists(ruta_vieja):
+                os.remove(ruta_vieja)
+        cursor.execute("""
+            UPDATE producto
+               SET nombre = %s, descripcion = %s, precio = %s, stock = %s,
+                   id_categoria = %s, id_marca = %s, activo = %s
+             WHERE id_producto = %s
+        """, (datos['nombre'], datos['descripcion'], datos['precio'],
+              datos['stock'], datos['id_categoria'], datos['id_marca'],
+              datos['activo'], id))
+        if nombre_imagen:
+            cursor.execute("UPDATE producto SET imagen = %s WHERE id_producto = %s",
+                           (nombre_imagen, id))
+        conn.commit()
+        flash("Producto actualizado correctamente.", "success")
+    except Exception:
+        conn.rollback()
+        app.logger.exception("Error al actualizar el producto %s", id)
+        flash('No se pudo actualizar el producto. Revisa los datos e inténtalo de nuevo.', 'danger')
+    finally:
+        conn.close()
     return redirect(url_for('productos'))
 
 
@@ -1491,7 +1686,8 @@ def eliminar_proveedor(id):
 
 
 # ── Paginación en servidor (P1..P4) ─────────────────────────────
-POR_PAGINA_ADMIN = 20   # listados admin (las páginas de cliente usarán 10)
+POR_PAGINA_ADMIN = 20   # listados admin
+POR_PAGINA_CLIENTE = 10 # páginas del cliente (mis_pedidos, mis_comprobantes)
 
 
 def _pagina_actual(total, por_pagina):
@@ -1525,12 +1721,70 @@ def pedidos():
     """)
     lista_estados = [r['nombre'] for r in cursor.fetchall()]
     PASOS = [e for e in lista_estados if e != 'cancelado']
+
+    # RF9: filtros del listado aplicados EN SERVIDOR, validados y
+    # parametrizados (entradas maliciosas no generan 500: se ignoran
+    # con un aviso). Fechas en días calendario Lima (services/horario).
+    filtros_sql, filtros_params = [], []
+    for campo in ('desde', 'hasta'):
+        valor = (request.args.get(campo) or '').strip()
+        if not valor:
+            continue
+        try:
+            fecha = datetime.strptime(valor, '%Y-%m-%d').date()
+        except ValueError:
+            flash('Fecha inválida, filtro ignorado.', 'warning')
+            continue
+        operador = '>=' if campo == 'desde' else '<='
+        filtros_sql.append(
+            f"{SQL_DIA_LIMA.format(p='v.', col='fecha')} {operador} %s")
+        filtros_params.append(fecha)
+    estado_f = (request.args.get('estado') or '').strip()
+    if estado_f:
+        if estado_f not in lista_estados:
+            flash('Estado no válido, filtro ignorado.', 'warning')
+        else:
+            filtros_sql.append("ev.nombre = %s")
+            filtros_params.append(estado_f)
+    q = (request.args.get('q') or '').strip()
+    id_venta_q = int(q) if q.isdigit() else None
+
     total, pagina = 0, 1
     try:
-        # P1: paginación en servidor — COUNT del conjunto COMPLETO y
-        # LIMIT/OFFSET parametrizados; ORDER BY estable con id de desempate
+        # Consulta (Auth) primero: clientes y usuarios. El filtro q de
+        # cliente se resuelve aquí en memoria (la BD Auth es aparte) y
+        # los ids coincidentes viajan parametrizados a la consulta de
+        # tienda; si q es todo dígitos también casa el código de venta.
+        conn_a   = get_connection_auth()
+        cursor_a = conn_a.cursor(dictionary=True)
+        cursor_a.execute("SELECT id_cliente, nombre, apellido, telefono FROM cliente")
+        clientes_map = {c['id_cliente']: c for c in cursor_a.fetchall()}
+        cursor_a.execute("SELECT id_usuario, nombres FROM usuario")
+        usuarios_map = {u['id_usuario']: u for u in cursor_a.fetchall()}
+        conn_a.close()
+
+        if q:
+            clientes_q = [cid for cid, c in clientes_map.items()
+                          if q.lower() in (f"{c.get('nombre') or ''} "
+                                           f"{c.get('apellido') or ''}").lower()]
+            if clientes_q or id_venta_q is not None:
+                if id_venta_q is not None:
+                    filtros_sql.append("(v.id_cliente = ANY(%s) OR v.id_venta = %s)")
+                    filtros_params += [clientes_q, id_venta_q]
+                else:
+                    filtros_sql.append("v.id_cliente = ANY(%s)")
+                    filtros_params.append(clientes_q)
+            else:
+                filtros_sql.append("FALSE")   # q sin coincidencias: vacío
+
+        where_sql = (" WHERE " + " AND ".join(filtros_sql)) if filtros_sql else ""
+        # P1: paginación en servidor — COUNT del conjunto FILTRADO completo
+        # y LIMIT/OFFSET parametrizados; ORDER BY estable con id de desempate
         # (ventas del mismo instante no intercambian página entre recargas).
-        cursor.execute("SELECT COUNT(*) AS total FROM venta")
+        cursor.execute("SELECT COUNT(*) AS total FROM venta v"
+                       " LEFT JOIN estado_venta ev"
+                       " ON v.id_estado_venta = ev.id_estado_venta" + where_sql,
+                       filtros_params)
         total = cursor.fetchone()['total']
         pagina = _pagina_actual(total, POR_PAGINA_ADMIN)
         # Consulta 1 (Tienda): ventas + total, sin joins cross-BD
@@ -1546,22 +1800,14 @@ def pedidos():
             FROM venta v
             LEFT JOIN tipo_venta tv ON v.id_tipo_venta = tv.id_tipo_venta
             LEFT JOIN estado_venta ev ON v.id_estado_venta = ev.id_estado_venta
-            LEFT JOIN detalle_venta d ON v.id_venta = d.id_venta
+            LEFT JOIN detalle_venta d ON d.id_venta = v.id_venta
+            {where_sql}
             GROUP BY v.id_venta, v.fecha, tv.nombre, ev.nombre,
                      v.id_cliente, v.id_usuario_vendedor
             ORDER BY v.fecha DESC, v.id_venta DESC
             LIMIT %s OFFSET %s
-        """, (POR_PAGINA_ADMIN, (pagina - 1) * POR_PAGINA_ADMIN))
+        """, filtros_params + [POR_PAGINA_ADMIN, (pagina - 1) * POR_PAGINA_ADMIN])
         pedidos_raw = cursor.fetchall()
-
-        # Consulta 2 (Auth): clientes y usuarios
-        conn_a   = get_connection_auth()
-        cursor_a = conn_a.cursor(dictionary=True)
-        cursor_a.execute("SELECT id_cliente, nombre, apellido, telefono FROM cliente")
-        clientes_map = {c['id_cliente']: c for c in cursor_a.fetchall()}
-        cursor_a.execute("SELECT id_usuario, nombres FROM usuario")
-        usuarios_map = {u['id_usuario']: u for u in cursor_a.fetchall()}
-        conn_a.close()
 
         # Unión en memoria (equivalente al JOIN cross-BD)
         for ped in pedidos_raw:
@@ -2237,7 +2483,7 @@ def _datos_comprobante(id_venta):
             SELECT v.*, tv.nombre AS tipo_venta, ev.nombre AS estado_venta
             FROM venta v
             LEFT JOIN tipo_venta tv   ON v.id_tipo_venta   = tv.id_tipo_venta
-            LEFT JOIN estado_venta ev ON v.id_estado_venta  = v.id_estado_venta
+            LEFT JOIN estado_venta ev ON v.id_estado_venta = ev.id_estado_venta
             WHERE v.id_venta = %s
         """, (id_venta,))
         venta = cursor.fetchone()
@@ -2276,7 +2522,7 @@ def _datos_comprobante(id_venta):
         cursor.execute("""
             SELECT c.*, tc.nombre AS tipo
             FROM comprobante c
-            LEFT JOIN tipo_comprobante tc ON c.id_tipo_comprobante = c.id_tipo_comprobante
+            LEFT JOIN tipo_comprobante tc ON c.id_tipo_comprobante = tc.id_tipo_comprobante
             WHERE c.id_venta = %s LIMIT 1
         """, (id_venta,))
         comprobante = cursor.fetchone()
@@ -2374,6 +2620,13 @@ def mis_comprobantes():
     conn   = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
     try:
+        # P4: COUNT del conjunto del CLIENTE (no de la página) y página
+        # con ORDER BY estable (id de desempate); el LIMIT 100 fijo se va.
+        cursor.execute("SELECT COUNT(*) AS total FROM venta v"
+                       " JOIN comprobante c ON c.id_venta = v.id_venta"
+                       " WHERE v.id_cliente = %s", (session['usuario_id'],))
+        total = cursor.fetchone()['total']
+        pagina = _pagina_actual(total, POR_PAGINA_CLIENTE)
         cursor.execute(f"""
             SELECT c.serie, c.numero, c.total, c.fecha_emision, c.estado_sunat,
                    tc.nombre AS tipo, v.id_venta,
@@ -2382,13 +2635,17 @@ def mis_comprobantes():
               JOIN comprobante c ON c.id_venta = v.id_venta
               LEFT JOIN tipo_comprobante tc ON tc.id_tipo_comprobante = c.id_tipo_comprobante
              WHERE v.id_cliente = %s
-             ORDER BY c.fecha_emision DESC
-             LIMIT 100
-        """, (session['usuario_id'],))
+             ORDER BY c.fecha_emision DESC, c.id_comprobante DESC
+             LIMIT %s OFFSET %s
+        """, (session['usuario_id'], POR_PAGINA_CLIENTE,
+              (pagina - 1) * POR_PAGINA_CLIENTE))
         comprobantes = cursor.fetchall()
     finally:
         conn.close()
-    return render_template('mis_comprobantes.html', comprobantes=comprobantes)
+    return render_template('mis_comprobantes.html', comprobantes=comprobantes,
+                           pagina=pagina, total=total,
+                           por_pagina=POR_PAGINA_CLIENTE,
+                           filtros_qs=_filtros_sin_pagina())
 
 
 # Criterio del alcance (§6.9): solo cuentan como vendidas las ventas con pago
@@ -2421,6 +2678,38 @@ def reportes():
     cursor = conn.cursor(dictionary=True)
     resumen = {}
     reportes_data = None
+    top_unidades = top_monto = None
+
+    # RF12: productos más vendidos por rango de fechas — SOLO pagos
+    # confirmados (criterio §6.9), días calendario Lima, parametrizado.
+    # Rango vacío = todo el historial; top 10 por unidades y por monto.
+    rango_sql, rango_params = "", []
+    for campo in ('desde', 'hasta'):
+        valor = (request.args.get(campo) or '').strip()
+        if not valor:
+            continue
+        try:
+            fecha = datetime.strptime(valor, '%Y-%m-%d').date()
+        except ValueError:
+            flash('Fecha inválida, rango ignorado.', 'warning')
+            continue
+        operador = '>=' if campo == 'desde' else '<='
+        rango_sql += f" AND {SQL_DIA_LIMA.format(p='v.', col='fecha')} {operador} %s"
+        rango_params.append(fecha)
+    if len(rango_params) == 2 and rango_params[0] > rango_params[1]:
+        flash('Rango inválido: «desde» es posterior a «hasta».', 'warning')
+        rango_sql, rango_params = "", []
+    sql_top = f"""
+        SELECT p.id_producto, p.nombre,
+               SUM(d.cantidad) AS unidades,
+               SUM({SQL_IMPORTE_LINEA.format(p='d.')}) AS monto
+          FROM detalle_venta d
+          JOIN venta v ON v.id_venta = d.id_venta
+          JOIN pago pg ON pg.id_venta = v.id_venta AND pg.estado = 'confirmado'
+          JOIN producto p ON p.id_producto = d.id_producto
+         WHERE 1=1{rango_sql}
+         GROUP BY p.id_producto, p.nombre
+    """
 
     try:
         # Ventas de hoy SOLO con pago confirmado (criterio del alcance §6.9).
@@ -2476,10 +2765,19 @@ def reportes():
         except Exception:
             reportes_data = None
 
+        # RF12: los dos rankings (mismo WHERE, órdenes distintos, id desempate)
+        cursor.execute(sql_top + " ORDER BY unidades DESC, p.id_producto ASC LIMIT 10",
+                       rango_params)
+        top_unidades = cursor.fetchall()
+        cursor.execute(sql_top + " ORDER BY monto DESC, p.id_producto ASC LIMIT 10",
+                       rango_params)
+        top_monto = cursor.fetchall()
+
     finally:
         conn.close()
 
-    return render_template('reportes.html', resumen=resumen, reportes=reportes_data)
+    return render_template('reportes.html', resumen=resumen, reportes=reportes_data,
+                           top_unidades=top_unidades, top_monto=top_monto)
 
 
 # ── Alertas ─────────────────────────────────────────────────
@@ -3456,6 +3754,12 @@ def mis_pedidos():
         fases_orden = [r['nombre'] for r in cursor.fetchall()]
         fases_orden = [f for f in fases_orden if f != 'cancelado']
         PASOS = fases_orden
+        # P4: COUNT del conjunto del CLIENTE (no de la página) y página
+        # con ORDER BY estable (id de desempate).
+        cursor.execute("SELECT COUNT(*) AS total FROM venta WHERE id_cliente = %s",
+                       (session['usuario_id'],))
+        total = cursor.fetchone()['total']
+        pagina = _pagina_actual(total, POR_PAGINA_CLIENTE)
         cursor.execute(f"""
             SELECT v.id_venta,
                    {SQL_PARED_LIMA.format(p='v.', col='fecha')} AS fecha,
@@ -3463,11 +3767,13 @@ def mis_pedidos():
                    COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='d.')}), 0) AS total
             FROM venta v
             LEFT JOIN estado_venta ev ON v.id_estado_venta = ev.id_estado_venta
-            LEFT JOIN detalle_venta d ON v.id_venta = d.id_venta
+            LEFT JOIN detalle_venta d ON d.id_venta = v.id_venta
             WHERE v.id_cliente = %s
             GROUP BY v.id_venta, v.fecha, ev.nombre
-            ORDER BY v.fecha DESC
-        """, (session['usuario_id'],))
+            ORDER BY v.fecha DESC, v.id_venta DESC
+            LIMIT %s OFFSET %s
+        """, (session['usuario_id'], POR_PAGINA_CLIENTE,
+              (pagina - 1) * POR_PAGINA_CLIENTE))
         pedidos_lista = cursor.fetchall()
         for ped in pedidos_lista:
             ped['fecha_peru'] = ped.get('fecha')
@@ -3492,7 +3798,10 @@ def mis_pedidos():
         conn.close()
     if not fases_orden:
         fases_orden = ['pendiente', 'procesando', 'enviado', 'entregado']
-    return render_template('mis_pedidos.html', pedidos=pedidos_lista, fases_orden=fases_orden)
+    return render_template('mis_pedidos.html', pedidos=pedidos_lista,
+                           fases_orden=fases_orden, pagina=pagina, total=total,
+                           por_pagina=POR_PAGINA_CLIENTE,
+                           filtros_qs=_filtros_sin_pagina())
 
 
 @app.route('/pedido_aceptado')
@@ -4262,17 +4571,21 @@ def admin_pagos_simulados():
     conn = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
     try:
-        cursor.execute("""
-            SELECT pe.recibido_en, pe.proveedor, pe.id_evento_proveedor, pe.tipo,
+        cursor.execute("SELECT COUNT(*) AS total FROM pago_evento")
+        total = cursor.fetchone()['total']
+        pagina = _pagina_actual(total, POR_PAGINA_ADMIN)
+        cursor.execute(f"""
+            SELECT {SQL_PARED_LIMA.format(p='pe.', col='recibido_en')} AS recibido_en,
+                   pe.proveedor, pe.id_evento_proveedor, pe.tipo,
                    pe.id_pago, pe.estado_resultante, pe.firma_valida,
                    pe.dentro_de_tolerancia, pe.procesado_en, pe.detalle,
                    p.id_transaccion, p.monto AS pago_monto, v.id_venta
               FROM pago_evento pe
               LEFT JOIN pago p ON p.id_pago = pe.id_pago
               LEFT JOIN venta v ON v.id_venta = p.id_venta
-             ORDER BY pe.recibido_en DESC
-             LIMIT 30
-        """)
+             ORDER BY pe.recibido_en DESC, pe.id_pago_evento DESC
+             LIMIT %s OFFSET %s
+        """, (POR_PAGINA_ADMIN, (pagina - 1) * POR_PAGINA_ADMIN))
         eventos = cursor.fetchall()
         cursor.execute("""
             SELECT p.id_pago, p.id_transaccion, p.monto, v.id_venta
@@ -4287,7 +4600,10 @@ def admin_pagos_simulados():
     finally:
         conn.close()
     return render_template('admin_pagos_simulados.html',
-                           eventos=eventos, pendientes=pendientes)
+                           eventos=eventos, pendientes=pendientes,
+                           pagina=pagina, total=total,
+                           por_pagina=POR_PAGINA_ADMIN,
+                           filtros_qs=_filtros_sin_pagina())
 
 
 @app.route('/admin/pagos_simulados/disparar', methods=['POST'])
@@ -4436,10 +4752,18 @@ def admin_reservas():
     conn = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
     try:
-        vencidas = preview_reservas_vencidas(cursor)
+        # P3: la tabla se pagina (20 por página), pero el número que
+        # muestran el aviso y el botón es el TOTAL del conjunto completo.
+        total = total_reservas_vencidas(cursor)
+        pagina = _pagina_actual(total, POR_PAGINA_ADMIN)
+        vencidas = preview_reservas_vencidas(
+            cursor, POR_PAGINA_ADMIN, (pagina - 1) * POR_PAGINA_ADMIN)
     finally:
         conn.close()
-    return render_template('admin_reservas.html', vencidas=vencidas)
+    return render_template('admin_reservas.html', vencidas=vencidas,
+                           total_vencidas=total, pagina=pagina,
+                           por_pagina=POR_PAGINA_ADMIN,
+                           filtros_qs=_filtros_sin_pagina())
 
 
 @app.route('/admin/reservas/liberar', methods=['POST'])
