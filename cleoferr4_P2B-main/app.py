@@ -4262,8 +4262,9 @@ def admin_pagos_simulados():
     conn = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
     try:
-        cursor.execute("""
-            SELECT pe.recibido_en, pe.proveedor, pe.id_evento_proveedor, pe.tipo,
+        cursor.execute(f"""
+            SELECT {SQL_PARED_LIMA.format(p='pe.', col='recibido_en')} AS recibido_en,
+                   pe.proveedor, pe.id_evento_proveedor, pe.tipo,
                    pe.id_pago, pe.estado_resultante, pe.firma_valida,
                    pe.dentro_de_tolerancia, pe.procesado_en, pe.detalle,
                    p.id_transaccion, p.monto AS pago_monto, v.id_venta

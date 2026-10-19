@@ -159,3 +159,31 @@ def test_disparar_deshabilitado_si_modo_no_simulado(fx):
         'id_pago': pago['id_pago'], 'estado': 'confirmado',
         'csrf_token': 'token-test'})
     assert r.status_code == 403
+
+
+def test_panel_muestra_recibido_en_en_hora_lima(fx):
+    """La celda 'Recibido' muestra la pared Lima, no la UTC (+5h).
+
+    Evento sintético con recibido_en fijado a las 23:00 Lima del 18/10
+    (= 04:00 UTC del 19/10): la fila del panel renderiza '18/10 23:00:00'
+    junto al marcador del evento; con el display legado (timestamptz sin
+    conversión) mostraba '19/10 04:00:00', con la fecha corrida.
+    """
+    import re
+
+    cur = fx['cur']
+    marcador = f"evt-tzfix-{_uuid.uuid4().hex[:10]}"
+    cur.execute("""
+        INSERT INTO pago_evento (proveedor, id_evento_proveedor, tipo,
+                                  estado_resultante, firma_valida,
+                                  dentro_de_tolerancia, recibido_en)
+        VALUES ('simulada', %s, 'pago_actualizado', 'confirmado', TRUE, TRUE,
+                '2026-10-18 23:00:00-05'::timestamptz)
+    """, (marcador,))
+    html = fx['admin'].get('/admin/pagos_simulados').get_data(as_text=True)
+    celda = re.compile(
+        r"(\d{2}/\d{2} \d{2}:\d{2}:\d{2})</td>\s*"
+        r'<td style="font-size:0\.75rem"><code>' + re.escape(marcador[:28]))
+    m = celda.search(html)
+    assert m, 'la fila del evento sintético no apareció en el panel'
+    assert m.group(1) == '18/10 23:00:00'
