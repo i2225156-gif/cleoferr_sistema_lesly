@@ -603,10 +603,20 @@ def productos():
 
     conn.close()
 
+    # RF17: días hasta vencer por fila (para la columna y su semáforo);
+    # hoy como fecha local (la columna es DATE naive).
+    from datetime import date as _date
+    from services.kpis import umbral_vencimiento_dias
+    _hoy = _date.today()
+    for p in lista:
+        p['vence_dias'] = ((p['fecha_vencimiento'] - _hoy).days
+                           if p.get('fecha_vencimiento') else None)
+
     return render_template('productos.html', productos=lista, categorias=categorias, marcas=marcas,
                            pedidos_count=pedidos_count, alertas_count=alertas_count,
                            reportes_count=movimientos_count, bajo_stock=bajo_stock,
                            pagina=pagina, total=total, por_pagina=POR_PAGINA_ADMIN,
+                           vence_umbral=umbral_vencimiento_dias(),
                            filtros_qs=_filtros_sin_pagina())
 
 
@@ -2922,11 +2932,29 @@ def reportes():
                        rango_params)
         top_monto = cursor.fetchall()
 
+        # RF17: reporte de vencimiento — activos con fecha dentro del
+        # umbral (vencidos primero por fecha ASC), valor a costo si lo
+        # hay y a precio si no (nunca se inventa: COALESCE explícito).
+        from services.kpis import umbral_vencimiento_dias
+        cursor.execute("""
+            SELECT nombre, stock, fecha_vencimiento,
+                   (fecha_vencimiento < CURRENT_DATE) AS vencido,
+                   stock * COALESCE(precio_costo, precio) AS valor
+              FROM producto
+             WHERE activo = TRUE
+               AND fecha_vencimiento IS NOT NULL
+               AND fecha_vencimiento <= CURRENT_DATE + make_interval(days => %s)
+             ORDER BY fecha_vencimiento ASC, id_producto ASC
+        """, (umbral_vencimiento_dias(),))
+        vencimiento = cursor.fetchall()
+
     finally:
         conn.close()
 
     return render_template('reportes.html', resumen=resumen, reportes=reportes_data,
-                           top_unidades=top_unidades, top_monto=top_monto)
+                           top_unidades=top_unidades, top_monto=top_monto,
+                           vencimiento=vencimiento,
+                           vence_umbral=umbral_vencimiento_dias())
 
 
 # ── Alertas ─────────────────────────────────────────────────
