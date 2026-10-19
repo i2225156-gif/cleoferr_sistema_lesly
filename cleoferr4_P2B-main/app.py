@@ -2239,7 +2239,7 @@ def _datos_comprobante(id_venta):
             SELECT v.*, tv.nombre AS tipo_venta, ev.nombre AS estado_venta
             FROM venta v
             LEFT JOIN tipo_venta tv   ON v.id_tipo_venta   = tv.id_tipo_venta
-            LEFT JOIN estado_venta ev ON v.id_estado_venta  = v.id_estado_venta
+            LEFT JOIN estado_venta ev ON v.id_estado_venta = ev.id_estado_venta
             WHERE v.id_venta = %s
         """, (id_venta,))
         venta = cursor.fetchone()
@@ -2278,7 +2278,7 @@ def _datos_comprobante(id_venta):
         cursor.execute("""
             SELECT c.*, tc.nombre AS tipo
             FROM comprobante c
-            LEFT JOIN tipo_comprobante tc ON c.id_tipo_comprobante = c.id_tipo_comprobante
+            LEFT JOIN tipo_comprobante tc ON c.id_tipo_comprobante = tc.id_tipo_comprobante
             WHERE c.id_venta = %s LIMIT 1
         """, (id_venta,))
         comprobante = cursor.fetchone()
