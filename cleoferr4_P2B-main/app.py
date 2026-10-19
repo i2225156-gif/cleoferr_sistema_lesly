@@ -199,6 +199,8 @@ class Producto(db.Model):
     id_marca     = db.Column(db.Integer)
     activo       = db.Column(db.Boolean, default=True)
     imagen       = db.Column(db.String(255))
+    fecha_vencimiento = db.Column(db.Date)
+    precio_costo = db.Column(db.Numeric(10, 2))
 
     def __repr__(self):
         return f"<Producto {self.nombre}>"
@@ -1020,6 +1022,22 @@ def _validar_producto(cursor):
     if estado not in ('activo', 'inactivo'):
         estado = 'activo'
 
+    # RF17 / margen: fecha de vencimiento y precio de costo, ambos
+    # OPCIONALES (nullable en la BD). Sin fecha = sin control de
+    # vencimiento; sin costo = el KPI de margen muestra la cobertura.
+    fecha_vencimiento = texto(request.form.get('fecha_vencimiento'))
+    if fecha_vencimiento is not None:
+        try:
+            fecha_vencimiento = datetime.strptime(fecha_vencimiento,
+                                                  '%Y-%m-%d').date()
+        except ValueError:
+            return None, 'La fecha de vencimiento no es válida.'
+    precio_costo = texto(request.form.get('precio_costo'))
+    if precio_costo is not None:
+        precio_costo, error = numero('precio de costo', precio_costo)
+        if error:
+            return None, error
+
     id_categoria, error = _id_foranea(cursor, 'id_categoria', 'categoria',
                                       'id_categoria', 'categoría')
     if error:
@@ -1030,7 +1048,8 @@ def _validar_producto(cursor):
         return None, error
     return {'nombre': nombre, 'descripcion': descripcion, 'precio': precio,
             'stock': stock, 'id_categoria': id_categoria, 'id_marca': id_marca,
-            'activo': estado == 'activo'}, None
+            'activo': estado == 'activo', 'fecha_vencimiento': fecha_vencimiento,
+            'precio_costo': precio_costo}, None
 
 
 @app.route('/productos/guardar', methods=['POST'])
@@ -1049,11 +1068,13 @@ def guardar_producto():
         nombre_imagen = guardar_imagen('imagen')
         cursor.execute("""
             INSERT INTO producto (nombre, descripcion, precio, stock,
-                                  id_categoria, id_marca, activo, imagen)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                                  id_categoria, id_marca, activo, imagen,
+                                  fecha_vencimiento, precio_costo)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (datos['nombre'], datos['descripcion'], datos['precio'],
               datos['stock'], datos['id_categoria'], datos['id_marca'],
-              datos['activo'], nombre_imagen))
+              datos['activo'], nombre_imagen, datos['fecha_vencimiento'],
+              datos['precio_costo']))
         conn.commit()
         flash("Producto creado correctamente.", "success")
     except Exception:
@@ -1105,11 +1126,13 @@ def actualizar_producto(id):
         cursor.execute("""
             UPDATE producto
                SET nombre = %s, descripcion = %s, precio = %s, stock = %s,
-                   id_categoria = %s, id_marca = %s, activo = %s
+                   id_categoria = %s, id_marca = %s, activo = %s,
+                   fecha_vencimiento = %s, precio_costo = %s
              WHERE id_producto = %s
         """, (datos['nombre'], datos['descripcion'], datos['precio'],
               datos['stock'], datos['id_categoria'], datos['id_marca'],
-              datos['activo'], id))
+              datos['activo'], datos['fecha_vencimiento'],
+              datos['precio_costo'], id))
         if nombre_imagen:
             cursor.execute("UPDATE producto SET imagen = %s WHERE id_producto = %s",
                            (nombre_imagen, id))
