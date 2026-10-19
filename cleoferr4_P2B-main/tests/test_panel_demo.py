@@ -166,8 +166,10 @@ def test_panel_muestra_recibido_en_en_hora_lima(fx):
 
     Evento sintético con recibido_en fijado a las 23:00 Lima del 18/10
     (= 04:00 UTC del 19/10): la fila del panel renderiza '18/10 23:00:00'
-    junto al marcador del evento; con el display legado (timestamptz sin
-    conversión) mostraba '19/10 04:00:00', con la fecha corrida.
+    junto al marcador del evento; el display legado solo habría mostrado
+    '19/10 04:00:00' si la sesión no estuviera en America/Lima: con la
+    sesión en Lima se ve igual, y el cambio es un seguro contra una
+    reconfiguración del servidor.
     """
     import re
 
