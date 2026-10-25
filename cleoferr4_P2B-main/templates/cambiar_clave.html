@@ -17,10 +17,23 @@
         <form method="POST">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <div class="mb-3">
-                <label class="form-label fw-semibold">Nueva contraseña</label>
+                <label class="form-label fw-semibold" for="campoPw0">Contraseña actual</label>
+                <div style="position:relative">
+                    <input type="password" name="actual" id="campoPw0" autofocus
+                           class="form-control pe-5" required
+                           placeholder="Tu contraseña actual" autocomplete="current-password">
+                    <button type="button" onclick="togglePw('campoPw0','icon0')"
+                            style="position:absolute;right:0;top:0;height:100%;background:transparent;border:none;padding:0 14px;color:#aaa;cursor:pointer">
+                        <i class="fa fa-eye" id="icon0"></i>
+                    </button>
+                </div>
+            </div>
+            <div class="mb-3">
+                <label class="form-label fw-semibold" for="campoPw1">Nueva contraseña</label>
                 <div style="position:relative">
                     <input type="password" name="nueva" id="campoPw1"
-                           class="form-control pe-5" required minlength="6" placeholder="Mínimo 6 caracteres">
+                           class="form-control pe-5" required minlength="6" placeholder="Mínimo 6 caracteres"
+                           autocomplete="new-password">
                     <button type="button" onclick="togglePw('campoPw1','icon1')"
                             style="position:absolute;right:0;top:0;height:100%;background:transparent;border:none;padding:0 14px;color:#aaa;cursor:pointer">
                         <i class="fa fa-eye" id="icon1"></i>

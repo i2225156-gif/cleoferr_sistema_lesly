@@ -3493,20 +3493,77 @@ def carrito_precios():
 @app.route('/cambiar_clave', methods=['GET', 'POST'])
 @login_required
 def cambiar_clave():
+    """Cambio de contraseña de la propia cuenta, por ROL (corrección C1).
+
+    La tabla se elige según el rol de la sesión: cliente → cliente,
+    staff (administrador/vendedor) → usuario. Antes la ruta escribía
+    SIEMPRE en usuario con session.usuario_id, de modo que un cliente
+    cuyo id coincidía con el de un usuario sobrescribía la contraseña
+    del staff y podía entrar al panel con la clave inyectada.
+    Además exige la clave ACTUAL (verificada con bcrypt) y no muestra
+    "actualizada" si no cambió nada.
+    """
+    rol = session.get('rol')
+    if rol not in ('cliente', 'administrador', 'vendedor'):
+        abort(403)
+    es_cliente = rol == 'cliente'
+    destino = 'perfil' if es_cliente else 'productos'
     if request.method == 'POST':
-        nueva     = request.form['nueva']
-        confirmar = request.form['confirmar']
+        actual    = request.form.get('actual', '')
+        nueva     = request.form.get('nueva', '')
+        confirmar = request.form.get('confirmar', '')
         if nueva != confirmar:
-            return render_template('cambiar_clave.html', error='Las contraseñas no coinciden')
-        nueva_hash = bcrypt.generate_password_hash(nueva).decode('utf-8')
+            return render_template('cambiar_clave.html',
+                                   error='Las contraseñas no coinciden')
+        if len(nueva) < 6:
+            return render_template('cambiar_clave.html',
+                                   error='La nueva contraseña debe tener al menos 6 caracteres.')
+        # Tabla por rol: identificadores FIJOS de un mapa, nunca entrada
+        # del usuario (mismo patrón que _login_intento_fallido).
+        tabla, id_col = ('cliente', 'id_cliente') if es_cliente else ('usuario', 'id_usuario')
         conn   = get_connection_auth()
-        cursor = conn.cursor()
-        cursor.execute("UPDATE usuario SET contrasena = %s WHERE id_usuario = %s",
-                       (nueva_hash, session['usuario_id']))
-        conn.commit()
-        conn.close()
-        flash("Contraseña actualizada correctamente.", "success")
-        return redirect(url_for('productos'))
+        cursor = conn.cursor(dictionary=True)
+        try:
+            cursor.execute(f"SELECT contrasena FROM {tabla} WHERE {id_col} = %s",
+                           (session['usuario_id'],))
+            fila = cursor.fetchone()
+            if not fila:
+                flash('No se pudo actualizar: tu cuenta ya no existe.', 'danger')
+                return redirect(url_for(destino))
+            almacenada = fila.get('contrasena') or ''
+            if not almacenada:
+                # Cuenta sin contraseña establecida (p. ej. alta POS): no hay
+                # nada contra qué verificar; el cambio va por recuperación.
+                return render_template(
+                    'cambiar_clave.html',
+                    error='Tu cuenta no tiene una contraseña que verificar. '
+                          'Usa «Olvidé mi contraseña» para establecer una.')
+            try:
+                ok_actual = bcrypt.check_password_hash(almacenada, actual)
+            except (ValueError, TypeError):
+                ok_actual = False
+            if not ok_actual:
+                return render_template('cambiar_clave.html',
+                                       error='La contraseña actual no es correcta.')
+            nueva_hash = bcrypt.generate_password_hash(nueva).decode('utf-8')
+            cursor.execute(f"""
+                UPDATE {tabla}
+                   SET contrasena = %s, fecha_ultimo_cambio_pwd = NOW()
+                 WHERE {id_col} = %s
+            """, (nueva_hash, session['usuario_id']))
+            if cursor.rowcount != 1:
+                conn.rollback()
+                flash('No se pudo actualizar la contraseña. Inténtalo de nuevo.', 'danger')
+                return redirect(url_for(destino))
+            conn.commit()
+            flash('Contraseña actualizada correctamente.', 'success')
+        except Exception:
+            conn.rollback()
+            app.logger.exception('Error al cambiar la contraseña (rol=%s)', rol)
+            flash('No se pudo actualizar la contraseña. Inténtalo de nuevo.', 'danger')
+        finally:
+            conn.close()
+        return redirect(url_for(destino))
     return render_template('cambiar_clave.html')
 
 
