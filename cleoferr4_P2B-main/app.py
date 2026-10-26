@@ -2138,33 +2138,49 @@ def venta_nueva_guardar():
         """, (tipo_venta, id_cliente, session.get('usuario_id'), estado_inicial))
         id_venta = cursor.fetchone()['id_venta']
 
-        # Insertar cada ítem, descontar stock y registrar el movimiento de salida
-        for id_prod, cant in zip(ids_producto, cantidades):
+        # Insertar cada ítem, descontar stock y registrar el movimiento de salida.
+        # C2: MISMA regla de descuento que el checkout online: UPDATE con
+        # guarda (stock >= cant) y RETURNING; 0 filas = stock insuficiente
+        # con mensaje claro (antes había un SELECT previo sin bloquear que
+        # dejaba una carrera con UPDATE sin guarda). Líneas ordenadas por
+        # id_producto ASC para que dos ventas simultáneas bloqueen los
+        # productos siempre en el mismo orden (sin interbloqueos).
+        def _clave_id_producto(linea):
+            try:
+                return int(linea[0])
+            except (TypeError, ValueError):
+                return float('inf')   # ids basura al final: no bloquean nada
+
+        for id_prod, cant in sorted(zip(ids_producto, cantidades), key=_clave_id_producto):
             try:
                 cant = int(cant) if cant else 1
             except (TypeError, ValueError):
                 cant = 1
             if cant <= 0:
                 raise ValueError("Las cantidades deben ser mayores a cero.")
-            cursor.execute("SELECT precio, stock, nombre FROM producto WHERE id_producto = %s", (id_prod,))
+            cursor.execute("""
+                UPDATE producto
+                   SET stock = stock - %s
+                 WHERE id_producto = %s AND stock >= %s
+                 RETURNING stock, precio, nombre
+            """, (cant, id_prod, cant))
             prod = cursor.fetchone()
             if not prod:
-                continue
-            # No permitir vender más stock del disponible (evita stock negativo)
-            if cant > (prod['stock'] or 0):
+                # ¿No existe o sin stock? Distinguir para conservar el
+                # comportamiento previo (producto inexistente se omite).
+                cursor.execute("SELECT nombre, stock FROM producto WHERE id_producto = %s",
+                               (id_prod,))
+                info = cursor.fetchone()
+                if not info:
+                    continue
                 raise ValueError(
-                    f"Stock insuficiente de \"{prod['nombre']}\" "
-                    f"(disponible: {prod['stock']} unidades). Venta no registrada."
+                    f"Stock insuficiente de \"{info['nombre']}\" "
+                    f"(disponible: {info['stock'] or 0} unidades). Venta no registrada."
                 )
             cursor.execute("""
                 INSERT INTO detalle_venta (id_venta, id_producto, cantidad, precio_unitario)
                 VALUES (%s, %s, %s, %s)
             """, (id_venta, id_prod, cant, prod['precio']))
-            cursor.execute("""
-                UPDATE producto SET stock = stock - %s WHERE id_producto = %s
-                RETURNING stock
-            """, (cant, id_prod))
-            nuevo_stock = cursor.fetchone()['stock']
             cursor.execute("""
                 INSERT INTO inventario_movimiento
                     (tipo, id_producto, id_proveedor, cantidad, precio_unitario,
@@ -2172,7 +2188,7 @@ def venta_nueva_guardar():
                 VALUES ('salida', %s, NULL, %s, %s, %s, %s, %s)
             """, (id_prod, cant, prod['precio'],
                   f'Venta {"local" if tipo_venta == "local" else "online"} #{id_venta}',
-                  session.get('usuario_id'), nuevo_stock))
+                  session.get('usuario_id'), prod['stock']))
 
         # Registrar el pago y el ingreso en caja para ventas locales
         if tipo_venta == 'local' and caja_activa:
@@ -4570,7 +4586,14 @@ def carrito_confirmar_v2():
         fila_caja  = cursor.fetchone()
         id_caja_a  = fila_caja[0] if fila_caja else None
 
-        for it in items_ok:
+        # C2 (sobreventa): descuento con GUARDA en el propio UPDATE (sin
+        # GREATEST): 0 filas = stock insuficiente y TODO el pedido se
+        # revierte con un mensaje que nombra el producto y lo disponible.
+        # El GREATEST anterior neutralizaba el CHECK (stock >= 0) de la BD
+        # y permitía vender dos veces la última unidad. Las líneas se
+        # procesan ORDENADAS por id_producto ASC: dos pedidos simultáneos
+        # bloquean las filas siempre en el mismo orden (sin interbloqueos).
+        for it in sorted(items_ok, key=lambda linea: linea['id_producto']):
             id_producto = it['id_producto']
             cantidad    = it['cantidad']
             # Precio y oferta AUTORITATIVOS releídos dentro de la TXN: el
@@ -4579,10 +4602,35 @@ def carrito_confirmar_v2():
             fila_of = oferta_vigente(cursor, id_producto)
             if fila_of is None:
                 # El producto desapareció entre la validación y la TXN
-                raise ValueError(f"Producto #{id_producto} ya no está disponible.")
+                raise ValueError(
+                    f"El producto \"{it['nombre']}\" ya no está disponible. "
+                    "El pedido no se registró.")
             precio_unit = fila_of['precio']        # precio base oficial
             id_oferta   = fila_of['id_oferta']     # None si no hay oferta
             desc_unit   = fila_of['descuento_unitario']
+            cursor.execute("""
+                UPDATE producto
+                   SET stock = stock - %s
+                 WHERE id_producto = %s AND stock >= %s
+                 RETURNING stock
+            """, (cantidad, id_producto, cantidad))
+            fila_stock = cursor.fetchone()
+            if fila_stock is None:
+                # La guarda no encontró stock (carrera con otra compra o
+                # líneas duplicadas del mismo producto): decir CUÁL y
+                # cuánto queda, sin detalles técnicos; el rollback del
+                # handler deshace también lo que ya bajaron las líneas
+                # previas de este pedido.
+                cursor.execute(
+                    "SELECT nombre, stock FROM producto WHERE id_producto = %s",
+                    (id_producto,))
+                prod = cursor.fetchone()
+                raise ValueError(
+                    'Stock insuficiente de "%s" (quedan %s unidades). '
+                    'El pedido no se registró.'
+                    % (prod[0] if prod else f'producto #{id_producto}',
+                       (prod[1] or 0) if prod else 0))
+            nuevo_stock = fila_stock[0]
             cursor.execute("""
                 INSERT INTO detalle_venta
                     (id_venta, id_producto, cantidad, precio_unitario,
@@ -4590,11 +4638,6 @@ def carrito_confirmar_v2():
                 VALUES (%s, %s, %s, %s, %s, %s)
             """, (id_venta, id_producto, cantidad, precio_unit,
                   id_oferta, desc_unit))
-            cursor.execute("""
-                UPDATE producto SET stock = GREATEST(stock - %s, 0) WHERE id_producto = %s
-                RETURNING stock
-            """, (cantidad, id_producto))
-            nuevo_stock = cursor.fetchone()[0]
             cursor.execute("""
                 INSERT INTO inventario_movimiento
                     (tipo, id_producto, id_proveedor, cantidad, precio_unitario,
@@ -4676,6 +4719,12 @@ def carrito_confirmar_v2():
                 'checkout_url': resultado_pasarela.checkout_url,
                 'requiere_verificacion': bool(resultado_pasarela.requiere_verificacion)}, 200
 
+    except ValueError as e:
+        # C2: error de NEGOCIO (stock insuficiente o producto desaparecido):
+        # rollback de TODO el pedido y mensaje claro con el producto
+        # afectado y lo disponible; sin detalles técnicos ni 500 genérico.
+        conn.rollback()
+        return {'ok': False, 'error': str(e)}, 409
     except Exception:
         conn.rollback()
         app.logger.exception("Error carrito_confirmar_v2")
