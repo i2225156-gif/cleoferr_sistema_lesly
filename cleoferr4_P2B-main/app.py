@@ -9,6 +9,8 @@ import json
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from urllib.parse import quote, urlencode
+import urllib.request
+import urllib.error
 # Intento seguro de importar dependencias externas; si faltan, mostrar instrucciones claras y salir.
 try:
     from flask import Flask, render_template, request, redirect, url_for, session, flash, abort
@@ -95,32 +97,8 @@ def guardar_imagen(file_field):
         return None
     ext          = archivo.filename.rsplit('.', 1)[1].lower()
     nombre_unico = f"{uuid.uuid4().hex}.{ext}"
-    supabase_url = os.environ.get('SUPABASE_URL')
-    supabase_key = os.environ.get('SUPABASE_SERVICE_KEY')
-    if not supabase_url or not supabase_key:
-        app.logger.exception('Faltan variables de entorno SUPABASE_URL o SUPABASE_SERVICE_KEY')
-        flash('No se pudo subir la imagen. Inténtalo de nuevo.', 'danger')
-        return None
-    url = f"{supabase_url}/storage/v1/object/productos/{nombre_unico}"
-    data = archivo.read()
-    try:
-        req = urllib.request.Request(
-            url,
-            data=data,
-            method='POST',
-            headers={
-                'Authorization': f'Bearer {supabase_key}',
-                'Content-Type': archivo.mimetype,
-                'x-upsert': 'false',
-            }
-        )
-        with urllib.request.urlopen(req) as resp:
-            url_publica = f"{supabase_url}/storage/v1/object/public/productos/{nombre_unico}"
-            return url_publica
-    except Exception:
-        app.logger.exception('Error al subir la imagen a Supabase')
-        flash('No se pudo subir la imagen. Inténtalo de nuevo.', 'danger')
-        return None
+    archivo.save(os.path.join(UPLOAD_FOLDER, nombre_unico))
+    return nombre_unico
 db.init_app(app)
 bcrypt = Bcrypt(app)
 
