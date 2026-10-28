@@ -244,6 +244,8 @@ _CSRF_PROTEGIDAS = {
     'perfil_actualizar_documento',
     # C3d: borrados destructivos convertidos de GET a POST con CSRF
     'eliminar_producto', 'eliminar_cliente',
+    # TAREA B2: baja de proveedor también por POST con CSRF
+    'eliminar_proveedor',
     # TAREA 3.4 (RF4 «obsoleto»): baja reversible, también por POST+CSRF
     'desactivar_producto',
     # Commit A: alta admin de clientes (form HTML con token en cliente_form)
@@ -1494,7 +1496,11 @@ def eliminar_cliente(id):
         flash("Cliente eliminado.", "success")
     except Exception as e:
         conn.rollback()
-        flash(f"Error: {e}", "danger")
+        if isinstance(e, _pg_errores.ForeignKeyViolation):
+            flash('No se puede eliminar: tiene registros asociados (productos, ventas o movimientos). Puedes editarlo en su lugar.', 'danger')
+        else:
+            app.logger.exception("Error al eliminar el cliente %s", id)
+            flash('No se pudo eliminar. Inténtalo de nuevo.', 'danger')
     finally:
         conn.close()
     return redirect(url_for('clientes'))
@@ -1884,7 +1890,7 @@ def editar_proveedor(id):
     return render_template('proveedor_form.html', proveedor=proveedor)
 
 
-@app.route('/proveedores/eliminar/<int:id>', methods=['GET', 'POST'])
+@app.route('/proveedores/eliminar/<int:id>', methods=['POST'])
 @login_required
 @admin_required
 def eliminar_proveedor(id):
@@ -1896,7 +1902,11 @@ def eliminar_proveedor(id):
         flash("Proveedor eliminado.", "success")
     except Exception as e:
         conn.rollback()
-        flash(f"Error: {e}", "danger")
+        if isinstance(e, _pg_errores.ForeignKeyViolation):
+            flash('No se puede eliminar: tiene registros asociados (productos, ventas o movimientos). Puedes editarlo en su lugar.', 'danger')
+        else:
+            app.logger.exception("Error al eliminar el proveedor %s", id)
+            flash('No se pudo eliminar. Inténtalo de nuevo.', 'danger')
     finally:
         conn.close()
     return redirect(url_for('proveedores'))

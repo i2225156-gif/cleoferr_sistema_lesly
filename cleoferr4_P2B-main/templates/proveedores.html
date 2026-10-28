@@ -46,6 +46,7 @@
                           data-confirm-titulo="Eliminar proveedor"
                           data-confirm-tipo="peligro"
                           data-confirm-aceptar="Eliminar">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                         <button type="submit" class="btn btn-sm btn-outline-danger" title="Eliminar">
                             <i class="fa fa-trash"></i>
                         </button>
