@@ -82,10 +82,28 @@ app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
 }
 
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+
+# Cookies de sesión: HttpOnly y SameSite=Lax siempre. Secure SOLO si hay
+# despliegue en Vercel (marca la variable VERCEL): en local forzaría HTTPS
+# sobre HTTP y el login dejaría de funcionar.
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_COOKIE_SECURE']   = bool(os.environ.get('VERCEL'))
 UPLOAD_FOLDER      = os.path.join(app.root_path, 'static', 'img')
 ALLOWED_EXTENSIONS = {'jpg', 'jpeg', 'png', 'webp', 'gif'}
 app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024   # 5 MB máximo
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+
+# ── Cabeceras de seguridad en TODAS las respuestas ──────────────
+# Sin Content-Security-Policy a propósito: rompería los scripts en
+# línea y las CDN del frontend (decisión del alcance del proyecto).
+@app.after_request
+def agregar_cabeceras_seguridad(respuesta):
+    respuesta.headers['X-Content-Type-Options'] = 'nosniff'
+    respuesta.headers['X-Frame-Options']        = 'SAMEORIGIN'
+    respuesta.headers['Referrer-Policy']        = 'strict-origin-when-cross-origin'
+    return respuesta
 
 def allowed_file(filename):
     return '.' in filename and \
