@@ -5523,6 +5523,12 @@ def _consultar_api_sunat(tipo, numero):
 
 @app.route('/api/consultar_ruc/<ruc>')
 def api_consultar_ruc(ruc):
+    # Con sesión: sin login, cualquiera podría gastar el token de la
+    # API externa. JSON 401 directo (login_required redirige a HTML y
+    # rompería el fetch).
+    if 'usuario_id' not in session:
+        return ({'ok': False,
+                 'error': 'Inicia sesión para validar el documento.'}, 401)
     if not (ruc.isdigit() and len(ruc) == 11):
         return {'ok': False, 'error': 'RUC inválido: debe tener 11 dígitos.'}, 400
     data, status, err = _consultar_api_sunat('ruc', ruc)
@@ -5534,6 +5540,10 @@ def api_consultar_ruc(ruc):
 
 @app.route('/api/consultar_dni/<dni>')
 def api_consultar_dni(dni):
+    # Con sesión: ver api_consultar_ruc.
+    if 'usuario_id' not in session:
+        return ({'ok': False,
+                 'error': 'Inicia sesión para validar el documento.'}, 401)
     if not (dni.isdigit() and len(dni) == 8):
         return {'ok': False, 'error': 'DNI inválido: debe tener 8 dígitos.'}, 400
     data, status, err = _consultar_api_sunat('dni', dni)
