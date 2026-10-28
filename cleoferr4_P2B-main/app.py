@@ -45,7 +45,8 @@ from services.ofertas import (SQL_IMPORTE_LINEA, SQL_PRECIO_VIGENTE,
                               calcular_descuento_unitario, oferta_vigente,
                               precios_vigentes)
 from services.validacion import (correo as _correo_valido, entero, nombre_persona,
-                                 numero, requerido, texto)
+                                 numero, requerido, telefono as _telefono_valido,
+                                 texto)
 from services.reservas import (liberar_reservas_vencidas, preview_reservas_vencidas,
                                total_reservas_vencidas)
 from services.pagos import (cancelar_pedido_con_pago_inicial, confirmar_pago,
@@ -1311,9 +1312,9 @@ def nuevo_cliente():
         if error:
             flash(error, 'danger')
             return redirect(url_for('nuevo_cliente'))
-        telefono = texto(request.form.get('telefono'))
-        if telefono and len(telefono) > 20:
-            flash('El teléfono no puede superar 20 caracteres.', 'danger')
+        telefono, error = _telefono_valido(request.form.get('telefono'))
+        if error:
+            flash(error, 'danger')
             return redirect(url_for('nuevo_cliente'))
         direccion = texto(request.form.get('direccion'))
         if direccion and len(direccion) > 200:
@@ -1381,9 +1382,9 @@ def editar_cliente(id):
         if error:
             flash(error, 'danger')
             return redirect(url_for('editar_cliente', id=id))
-        telefono = texto(request.form.get('telefono'))
-        if telefono and len(telefono) > 20:
-            flash('El teléfono no puede superar 20 caracteres.', 'danger')
+        telefono, error = _telefono_valido(request.form.get('telefono'))
+        if error:
+            flash(error, 'danger')
             return redirect(url_for('editar_cliente', id=id))
         direccion = texto(request.form.get('direccion'))
         if direccion and len(direccion) > 200:
@@ -1798,9 +1799,9 @@ def nuevo_proveedor():
             if error:
                 flash(error, 'danger')
                 return redirect(url_for('nuevo_proveedor'))
-        telefono = texto(request.form.get('telefono'))
-        if telefono and len(telefono) > 20:
-            flash('El teléfono no puede superar 20 caracteres.', 'danger')
+        telefono, error = _telefono_valido(request.form.get('telefono'))
+        if error:
+            flash(error, 'danger')
             return redirect(url_for('nuevo_proveedor'))
         direccion = texto(request.form.get('direccion'))
         if direccion and len(direccion) > 100:
@@ -1849,9 +1850,9 @@ def editar_proveedor(id):
             if error:
                 flash(error, 'danger')
                 return redirect(url_for('editar_proveedor', id=id))
-        telefono = texto(request.form.get('telefono'))
-        if telefono and len(telefono) > 20:
-            flash('El teléfono no puede superar 20 caracteres.', 'danger')
+        telefono, error = _telefono_valido(request.form.get('telefono'))
+        if error:
+            flash(error, 'danger')
             return redirect(url_for('editar_proveedor', id=id))
         direccion = texto(request.form.get('direccion'))
         if direccion and len(direccion) > 100:

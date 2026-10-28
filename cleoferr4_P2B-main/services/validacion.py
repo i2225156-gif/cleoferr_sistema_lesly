@@ -22,6 +22,8 @@ from decimal import Decimal, InvalidOperation
 _CORREO = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 # Letras (con tildes, ñ, ü), espacios, apóstrofo y guion. Sin dígitos.
 _NOMBRE_PERSONA = re.compile(r"^[A-Za-zÁÉÍÓÚÜÑáéíóúüñ' \-]+$")
+# Teléfono OPCIONAL: solo dígitos, entre 7 y 9 (se ignoran espacios).
+_TELEFONO = re.compile(r"^\d{7,9}$")
 
 
 def texto(valor):
@@ -51,6 +53,18 @@ def nombre_persona(nombre_campo, valor, maximo=None):
         return None, (f'El campo «{nombre_campo}» solo admite letras '
                       f'(con tildes y ñ), espacios, apóstrofo y guion.')
     return limpio, None
+
+
+def telefono(valor):
+    """Teléfono OPCIONAL: sin espacios debe ser solo dígitos y de 7 a 9.
+    Si llega vacío devuelve (None, None); si no cumple, el mensaje."""
+    limpio = texto(valor)
+    if limpio is None:
+        return None, None
+    sin_espacios = limpio.replace(' ', '')
+    if not _TELEFONO.match(sin_espacios):
+        return None, 'El teléfono solo debe contener números (7 a 9 dígitos).'
+    return sin_espacios, None
 
 
 def correo(valor, maximo=None):
