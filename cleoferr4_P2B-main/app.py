@@ -3663,7 +3663,6 @@ def registro_cliente():
     codigo OTP en verificacion_cuenta (BD Auth). El codigo viaja unicamente
     por correo: nunca se muestra en pantalla.
     """
-    import random
 
     # Honeypot: campo «sitio_web» oculto que las personas no ven ni
     # rellenan (los bots sí). Mensaje genérico para no delatar cuál fue
@@ -3752,7 +3751,7 @@ def registro_cliente():
             error='La respuesta de verificación no es correcta. Inténtalo de nuevo.',
             registro_activo=True)
 
-    codigo      = f"{random.randint(0, 999999):06d}"
+    codigo      = f"{secrets.randbelow(1000000):06d}"
     hash_pw     = bcrypt.generate_password_hash(contrasena).decode('utf-8')
     codigo_hash = bcrypt.generate_password_hash(codigo).decode('utf-8')
 
@@ -4037,8 +4036,6 @@ def _buscar_cuenta_por_correo(cursor, correo):
 @app.route('/recuperar_contrasena', methods=['GET', 'POST'])
 def recuperar_contrasena():
     """Paso 1: el usuario ingresa su correo y recibe un código OTP de 6 dígitos."""
-    import random
-
     if request.method == 'GET':
         return render_template('recuperar_contrasena.html')
 
@@ -4057,7 +4054,7 @@ def recuperar_contrasena():
                                    verificar_activo=True, correo_verificar=correo)
 
         nombre = cuenta.get('nombres') or cuenta.get('nombre') or correo
-        codigo = str(random.randint(100000, 999999))
+        codigo = f"{secrets.randbelow(1000000):06d}"
         codigo_hash = bcrypt.generate_password_hash(codigo).decode('utf-8')
 
         id_usuario = cuenta['id_usuario'] if tipo == 'usuario' else None
