@@ -12,6 +12,8 @@ import pytest
 import db_supabase
 import app as modulo_app
 from app import app
+from services import captcha
+import re
 
 
 class ConnProxy:
@@ -56,12 +58,23 @@ def fx(monkeypatch):
     raw.close()
 
 
+def _resolver_captcha(cliente):
+    """Pide el formulario (cada render genera un captcha nuevo) y calcula
+    la respuesta leyendo la pregunta del HTML: la sesión solo guarda su
+    HMAC, nunca la respuesta en claro."""
+    html = cliente.get('/login_cliente').get_data(as_text=True)
+    a, op, b = re.search(r'(\d+)\s*([+-])\s*(\d+)\?', html).groups()
+    return str(int(a) + int(b) if op == '+' else int(a) - int(b))
+
+
 def _registrar(fx, **campos):
     datos = {'csrf_token': 'token-test',
              'nombre': 'José', 'apellido': 'Ñúñez Pérez',
              'correo': 'zzqreg@mail.invalid', 'telefono': '987654321',
              'direccion': 'Av. Prueba 123', 'contrasena': 'clave-ok-9',
-             'confirmar': 'clave-ok-9'}
+             'confirmar': 'clave-ok-9',
+             'acepta_privacidad': '1',
+             'captcha_respuesta': _resolver_captcha(fx['c'])}
     datos.update(campos)
     return fx['c'].post('/registro_cliente', data=datos,
                         follow_redirects=True).get_data(as_text=True)

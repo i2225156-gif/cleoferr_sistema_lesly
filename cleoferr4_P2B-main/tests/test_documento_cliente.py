@@ -13,8 +13,10 @@ import pytest
 import db_supabase
 import app as modulo_app
 from app import app
+from services import captcha
 from services.documentos import (normalizar_numero, validar_documento,
                                  tipo_documento_de_cliente)
+import re
 
 
 class ConnProxy:
@@ -110,6 +112,15 @@ def _sesion_admin():
     return c
 
 
+def _resolver_captcha(cliente):
+    """Pide el formulario (cada render genera un captcha nuevo) y calcula
+    la respuesta leyendo la pregunta del HTML: la sesión solo guarda su
+    HMAC, nunca la respuesta en claro."""
+    html = cliente.get('/login_cliente').get_data(as_text=True)
+    a, op, b = re.search(r'(\d+)\s*([+-])\s*(\d+)\?', html).groups()
+    return str(int(a) + int(b) if op == '+' else int(a) - int(b))
+
+
 def _registro_cliente(client, extra=None):
     datos = {
         'csrf_token': 'token-test',
@@ -120,6 +131,8 @@ def _registro_cliente(client, extra=None):
         'direccion': 'Calle Test 123',
         'contrasena': 'clave123',
         'confirmar': 'clave123',
+        'acepta_privacidad': '1',
+        'captcha_respuesta': _resolver_captcha(client),
     }
     if extra:
         datos.update(extra)

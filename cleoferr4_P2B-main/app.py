@@ -31,6 +31,7 @@ except Exception as e:
 from db import db
 from db_supabase import get_connection_auth, get_connection_tienda
 from psycopg2 import errors as _pg_errores
+from services import captcha
 from services.comprobantes import (EMISOR, UMBRAL_BOLETA_SIN_DOC,
                                     boleta_necesita_documento,
                                     ruc_valido_para_factura,
@@ -188,6 +189,20 @@ def _normalizar_correo(valor):
     que es una de las causas de duplicados y de logins fallidos.
     """
     return (valor or '').strip().lower()
+
+
+def _login_cliente(**contexto):
+    """Render de login_cliente.html con captcha NUEVO cada vez.
+
+    El captcha solo hace falta cuando el formulario de registro es
+    visible, es decir, en todo render que no sea la pantalla de
+    verificación OTP (``verificar_activo``). La respuesta nunca viaja
+    por la sesión en claro: la cookie es firmada pero legible y
+    services.captcha guarda únicamente su HMAC.
+    """
+    if not contexto.get('verificar_activo'):
+        contexto['captcha_pregunta'] = captcha.generar()
+    return render_template('login_cliente.html', **contexto)
 
 
 class Producto(db.Model):
@@ -480,7 +495,7 @@ def login_cliente():
         cliente = cursor.fetchone()
 
         def _invalido():
-            return render_template('login_cliente.html',
+            return _login_cliente(
                                    error='Credenciales incorrectas')
 
         try:
@@ -523,7 +538,7 @@ def login_cliente():
         "para recuperar mi contraseña o mis datos de acceso al sistema web."
     )
     url_whatsapp = f"https://wa.me/51900555015?text={msg_cliente}"
-    return render_template('login_cliente.html', url_whatsapp=url_whatsapp)
+    return _login_cliente( url_whatsapp=url_whatsapp)
 
 
 @app.route('/logout')
@@ -3623,6 +3638,12 @@ def _correo_html_codigo(nombre, codigo, motivo):
     """
 
 
+@app.route('/privacidad')
+def privacidad():
+    """Política de Privacidad (Ley 29733): página pública, sin sesión."""
+    return render_template('privacidad.html')
+
+
 @app.route('/registro_cliente', methods=['POST'])
 def registro_cliente():
     """Registro de nuevo cliente.
@@ -3633,28 +3654,36 @@ def registro_cliente():
     """
     import random
 
+    # Honeypot: campo «sitio_web» oculto que las personas no ven ni
+    # rellenan (los bots sí). Mensaje genérico para no delatar cuál fue
+    # el control que falló; se rechaza antes de validar cualquier dato.
+    if (request.form.get('sitio_web') or '').strip():
+        return _login_cliente(
+            error='La respuesta de verificación no es correcta. Inténtalo de nuevo.',
+            registro_activo=True)
+
     # FASE 2: nombres de PERSONA sin dígitos (tildes y ñ sí), con las
     # longitudes reales de las columnas (100) y correo con formato.
     nombre, error = nombre_persona('nombre', request.form.get('nombre'), 100)
     if error:
-        return render_template('login_cliente.html',
+        return _login_cliente(
                                error=error, registro_activo=True)
     apellido, error = nombre_persona('apellido', request.form.get('apellido'), 100)
     if error:
-        return render_template('login_cliente.html',
+        return _login_cliente(
                                error=error, registro_activo=True)
     correo, error = _correo_valido(request.form.get('correo'), 120)
     if error:
-        return render_template('login_cliente.html',
+        return _login_cliente(
                                error=error, registro_activo=True)
     telefono   = request.form.get('telefono', '').strip()
     if len(telefono) > 20:
-        return render_template('login_cliente.html',
+        return _login_cliente(
                                error='El teléfono no puede superar 20 caracteres.',
                                registro_activo=True)
     direccion  = request.form.get('direccion', '').strip()
     if len(direccion) > 200:
-        return render_template('login_cliente.html',
+        return _login_cliente(
                                error='La dirección no puede superar 200 caracteres.',
                                registro_activo=True)
     contrasena = request.form.get('contrasena', '')
@@ -3673,7 +3702,7 @@ def registro_cliente():
             tipo_doc_nombre = 'dni'   # default razonable
         doc_ok, doc_msg = validar_documento(tipo_doc_nombre, nro_documento)
         if not doc_ok:
-            return render_template('login_cliente.html',
+            return _login_cliente(
                                    error=doc_msg, registro_activo=True)
     else:
         # Sin número: NULL en la BD (no cadena vacía; no bloquea)
@@ -3681,21 +3710,36 @@ def registro_cliente():
         tipo_doc_nombre = tipo_doc_nombre or 'dni'   # tipo default, número NULL
 
     if not nombre or not correo or not contrasena:
-        return render_template('login_cliente.html',
+        return _login_cliente(
                                error='Nombre, correo y contraseña son obligatorios.',
                                registro_activo=True)
     if len(direccion) < 5:
-        return render_template('login_cliente.html',
+        return _login_cliente(
                                error='La dirección es obligatoria para registrarte (mínimo 5 caracteres).',
                                registro_activo=True)
     if contrasena != confirmar:
-        return render_template('login_cliente.html',
+        return _login_cliente(
                                error='Las contraseñas no coinciden.',
                                registro_activo=True)
     if len(contrasena) < 6:
-        return render_template('login_cliente.html',
+        return _login_cliente(
                                error='La contraseña debe tener al menos 6 caracteres.',
                                registro_activo=True)
+
+    # Ley 29733: la casilla de privacidad es OBLIGATORIA y se valida
+    # SIEMPRE en el servidor (el «required» del HTML es solo ayuda).
+    if not request.form.get('acepta_privacidad'):
+        return _login_cliente(
+            error='Debes aceptar la Política de Privacidad para registrarte.',
+            registro_activo=True)
+    acepta_publicidad = bool(request.form.get('acepta_publicidad'))
+
+    # Captcha de un solo uso: se valida ANTES de cualquier consulta a la
+    # BD o envío de correo. Si falla, el render regenera uno nuevo.
+    if not captcha.validar(request.form.get('captcha_respuesta')):
+        return _login_cliente(
+            error='La respuesta de verificación no es correcta. Inténtalo de nuevo.',
+            registro_activo=True)
 
     codigo      = f"{random.randint(0, 999999):06d}"
     hash_pw     = bcrypt.generate_password_hash(contrasena).decode('utf-8')
@@ -3714,6 +3758,25 @@ def registro_cliente():
                        (tipo_doc_nombre or 'dni',))
         fila_td = cursor.fetchone()
         _id_tipo_doc = fila_td['id_tipo_documento'] if fila_td else 1
+
+        # Ley 29733: si la migración auth_04_privacidad.sql aún no se ha
+        # aplicado, el registro NO se rompe: se guarda el cliente SIN los
+        # campos de privacidad (la casilla ya se validó arriba) y queda
+        # la advertencia en el log. La consulta es de lectura y barata.
+        cursor.execute("""
+            SELECT COUNT(*) AS n FROM information_schema.columns
+            WHERE table_schema = CURRENT_SCHEMA()
+              AND table_name = 'cliente'
+              AND column_name IN ('acepta_privacidad', 'fecha_acepta_privacidad',
+                                  'version_privacidad', 'acepta_publicidad')
+        """)
+        con_privacidad = (cursor.fetchone() or {}).get('n') == 4
+        if not con_privacidad:
+            app.logger.warning(
+                "Migracion auth_04_privacidad.sql sin aplicar: el nuevo cliente "
+                "se guarda SIN acepta_privacidad, fecha_acepta_privacidad, "
+                "version_privacidad y acepta_publicidad."
+            )
         # Comparacion insensible a mayusculas y espacios: asi no se crean
         # duplicados ni se bloquea por diferencias de formato.
         cursor.execute("""
@@ -3746,24 +3809,48 @@ def registro_cliente():
             # Cuenta pendiente de verificar, o creada por el area administrativa
             # sin contrasena: se reutiliza la fila y se vuelve a verificar.
             id_cliente = existente['id_cliente']
-            cursor.execute("""
-                UPDATE cliente SET nombre=%s, apellido=%s, telefono=%s, contrasena=%s,
-                       direccion=%s, id_tipo_documento=%s, nro_documento=%s
-                WHERE id_cliente=%s
-            """, (nombre, apellido, telefono or None, hash_pw, direccion,
-                  _id_tipo_doc, nro_documento or None, id_cliente))
+            if con_privacidad:
+                cursor.execute("""
+                    UPDATE cliente SET nombre=%s, apellido=%s, telefono=%s, contrasena=%s,
+                           direccion=%s, id_tipo_documento=%s, nro_documento=%s,
+                           acepta_privacidad=TRUE, fecha_acepta_privacidad=NOW(),
+                           version_privacidad='1.0', acepta_publicidad=%s
+                    WHERE id_cliente=%s
+                """, (nombre, apellido, telefono or None, hash_pw, direccion,
+                      _id_tipo_doc, nro_documento or None, acepta_publicidad,
+                      id_cliente))
+            else:
+                cursor.execute("""
+                    UPDATE cliente SET nombre=%s, apellido=%s, telefono=%s, contrasena=%s,
+                           direccion=%s, id_tipo_documento=%s, nro_documento=%s
+                    WHERE id_cliente=%s
+                """, (nombre, apellido, telefono or None, hash_pw, direccion,
+                      _id_tipo_doc, nro_documento or None, id_cliente))
         else:
             # id_tipo_documento=1 (DNI) y nro_documento NULL por defecto;
             # el formulario web no pide documento todavía.
             # OJO: no usar '' — la BD tiene UNIQUE (id_tipo_documento, nro_documento)
             # y un segundo registro con '' violaría la restricción. NULL no choca.
-            cursor.execute("""
-                INSERT INTO cliente (nombre, apellido, email, telefono, contrasena,
-                                     id_tipo_documento, nro_documento, direccion, activo)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, FALSE)
-                RETURNING id_cliente
-            """, (nombre, apellido, correo, telefono or None, hash_pw,
-                  _id_tipo_doc, nro_documento or None, direccion))
+            if con_privacidad:
+                cursor.execute("""
+                    INSERT INTO cliente (nombre, apellido, email, telefono, contrasena,
+                                         id_tipo_documento, nro_documento, direccion, activo,
+                                         acepta_privacidad, fecha_acepta_privacidad,
+                                         version_privacidad, acepta_publicidad)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, FALSE,
+                            TRUE, NOW(), '1.0', %s)
+                    RETURNING id_cliente
+                """, (nombre, apellido, correo, telefono or None, hash_pw,
+                      _id_tipo_doc, nro_documento or None, direccion,
+                      acepta_publicidad))
+            else:
+                cursor.execute("""
+                    INSERT INTO cliente (nombre, apellido, email, telefono, contrasena,
+                                         id_tipo_documento, nro_documento, direccion, activo)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, FALSE)
+                    RETURNING id_cliente
+                """, (nombre, apellido, correo, telefono or None, hash_pw,
+                      _id_tipo_doc, nro_documento or None, direccion))
             id_cliente = cursor.fetchone()['id_cliente']
 
         # Invalidar codigos anteriores y guardar el nuevo (solo el hash)
@@ -3779,7 +3866,7 @@ def registro_cliente():
     except Exception as e:
         conn.rollback()
         app.logger.exception("Error en registro_cliente")
-        return render_template('login_cliente.html',
+        return _login_cliente(
                                error='No se pudo iniciar el registro. Intenta de nuevo.',
                                registro_activo=True)
     finally:
@@ -3796,12 +3883,12 @@ def registro_cliente():
     )
 
     if resultado == 'smtp_no_configurado':
-        return render_template('login_cliente.html',
+        return _login_cliente(
                                error=('El envio de correos no esta configurado en el servidor. '
                                       'Avisa al administrador (falta SMTP_USER/SMTP_PASS).'),
                                registro_activo=True)
     if resultado == 'smtp_auth':
-        return render_template('login_cliente.html',
+        return _login_cliente(
                                verificar_activo=True,
                                correo_verificar=correo,
                                codigo_visible=codigo,
@@ -3810,16 +3897,16 @@ def registro_cliente():
                                    'Credenciales SMTP inválidas (revisa SMTP_USER/SMTP_PASS '
                                    'usando una contraseña de aplicación de Gmail).'))
     if resultado == 'smtp_conexion':
-        return render_template('login_cliente.html',
+        return _login_cliente(
                                error=('No se pudo conectar con el servidor de correo. '
                                       'Revisa tu conexion e intenta de nuevo.'),
                                registro_activo=True)
     if resultado:
-        return render_template('login_cliente.html',
+        return _login_cliente(
                                error='No se pudo enviar el correo de verificacion. Intenta de nuevo.',
                                registro_activo=True)
 
-    return render_template('login_cliente.html',
+    return _login_cliente(
                            verificar_activo=True,
                            correo_verificar=correo)
 
@@ -3835,7 +3922,7 @@ def verificar_registro():
     correo = session.get('reg_correo') or _normalizar_correo(request.form.get('correo'))
 
     if not correo:
-        return render_template('login_cliente.html',
+        return _login_cliente(
                                error='Sesion expirada. Por favor registrate de nuevo.',
                                registro_activo=True)
 
@@ -3849,7 +3936,7 @@ def verificar_registro():
         """, (correo,))
         cliente = cursor.fetchone()
         if not cliente:
-            return render_template('login_cliente.html',
+            return _login_cliente(
                                    error='No hay un registro pendiente para este correo.',
                                    registro_activo=True)
         id_cliente = cliente['id_cliente']
@@ -3864,7 +3951,7 @@ def verificar_registro():
         verif = cursor.fetchone()
 
         if not verif:
-            return render_template('login_cliente.html',
+            return _login_cliente(
                                    error='No hay un codigo activo. Solicita uno nuevo desde el registro.',
                                    registro_activo=True)
 
@@ -3874,7 +3961,7 @@ def verificar_registro():
         if expira.tzinfo is None:
             expira = expira.replace(tzinfo=timezone.utc)
         if expira < datetime.now(timezone.utc):
-            return render_template('login_cliente.html',
+            return _login_cliente(
                                    error='El codigo expiro. Registrate de nuevo para recibir uno nuevo.',
                                    registro_activo=True)
 
@@ -3883,7 +3970,7 @@ def verificar_registro():
             cursor.execute("UPDATE verificacion_cuenta SET usado = TRUE WHERE id_verificacion = %s",
                            (verif['id_verificacion'],))
             conn.commit()
-            return render_template('login_cliente.html',
+            return _login_cliente(
                                    error='Demasiados intentos fallidos. Solicita un codigo nuevo.',
                                    registro_activo=True)
 
@@ -3899,7 +3986,7 @@ def verificar_registro():
                  WHERE id_verificacion = %s
             """, (verif['id_verificacion'],))
             conn.commit()
-            return render_template('login_cliente.html',
+            return _login_cliente(
                                    error='Codigo incorrecto. Intenta de nuevo.',
                                    verificar_activo=True,
                                    correo_verificar=correo)
@@ -3909,12 +3996,12 @@ def verificar_registro():
         cursor.execute("UPDATE cliente SET activo = TRUE WHERE id_cliente = %s", (id_cliente,))
         conn.commit()
         session.pop('reg_correo', None)
-        return render_template('login_cliente.html',
+        return _login_cliente(
                                success='Cuenta creada y verificada. Ya puedes iniciar sesion.')
     except Exception as e:
         conn.rollback()
         app.logger.exception(f"Error en verificar_registro ({correo}): {e}")
-        return render_template('login_cliente.html',
+        return _login_cliente(
                                error='Error al verificar el codigo. Intenta de nuevo.',
                                registro_activo=True)
     finally:
@@ -4106,7 +4193,7 @@ def restablecer_contrasena():
         if tipo == 'usuario':
             return render_template('login.html',
                                    success='Contraseña actualizada. Inicia sesión con tu nueva clave.')
-        return render_template('login_cliente.html',
+        return _login_cliente(
                                success='Contraseña actualizada. Inicia sesión con tu nueva clave.')
     except Exception as e:
         conn.rollback()
