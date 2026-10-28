@@ -44,7 +44,8 @@ from services.inventario import devolver_stock_venta
 from services.ofertas import (SQL_IMPORTE_LINEA, SQL_PRECIO_VIGENTE,
                               calcular_descuento_unitario, oferta_vigente,
                               precios_vigentes)
-from services.validacion import (correo as _correo_valido, entero, nombre_persona,
+from services.validacion import (correo as _correo_valido, documento_proveedor,
+                                 entero, nombre_persona,
                                  numero, requerido, telefono as _telefono_valido,
                                  texto)
 from services.reservas import (liberar_reservas_vencidas, preview_reservas_vencidas,
@@ -1819,15 +1820,43 @@ def nuevo_proveedor():
             if error:
                 flash('El correo electrónico no tiene un formato válido.', 'danger')
                 return redirect(url_for('nuevo_proveedor'))
+        tipo_doc, numero_doc, error = documento_proveedor(
+            request.form.get('tipo_documento'),
+            request.form.get('numero_documento'))
+        if error:
+            flash(error, 'danger')
+            return redirect(url_for('nuevo_proveedor'))
         conn      = get_connection_tienda()
         cursor    = conn.cursor()
         try:
             cursor.execute(
-                "INSERT INTO proveedor (nombre, contacto, telefono, email, direccion) VALUES (%s,%s,%s,%s,%s)",
-                (nombre, contacto, telefono, email, direccion)
+                "INSERT INTO proveedor (nombre, contacto, telefono, email, direccion, tipo_documento, numero_documento) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                (nombre, contacto, telefono, email, direccion, tipo_doc, numero_doc)
             )
             conn.commit()
             flash("Proveedor registrado.", "success")
+        except _pg_errores.UndefinedColumn:
+            # Migración db/12_proveedor_documento.sql no aplicada: guardar
+            # sin el documento para no romper el alta (error en el log).
+            conn.rollback()
+            app.logger.error(
+                "Columnas tipo_documento/numero_documento inexistentes en "
+                "proveedor (¿falta ejecutar db/12_proveedor_documento.sql?); "
+                "se guarda el proveedor sin documento.")
+            try:
+                cursor.execute(
+                    "INSERT INTO proveedor (nombre, contacto, telefono, email, direccion) VALUES (%s,%s,%s,%s,%s)",
+                    (nombre, contacto, telefono, email, direccion)
+                )
+                conn.commit()
+                flash("Proveedor registrado.", "success")
+            except Exception:
+                conn.rollback()
+                app.logger.exception("Error al registrar proveedor")
+                flash('No se pudo registrar el proveedor. Revisa los datos e inténtalo de nuevo.', 'danger')
+        except _pg_errores.UniqueViolation:
+            conn.rollback()
+            flash('Ya existe un proveedor con ese documento.', 'danger')
         except Exception:
             conn.rollback()
             app.logger.exception("Error al registrar proveedor")
@@ -1870,13 +1899,41 @@ def editar_proveedor(id):
             if error:
                 flash('El correo electrónico no tiene un formato válido.', 'danger')
                 return redirect(url_for('editar_proveedor', id=id))
+        tipo_doc, numero_doc, error = documento_proveedor(
+            request.form.get('tipo_documento'),
+            request.form.get('numero_documento'))
+        if error:
+            flash(error, 'danger')
+            return redirect(url_for('editar_proveedor', id=id))
         try:
             cursor.execute(
-                "UPDATE proveedor SET nombre=%s, contacto=%s, telefono=%s, email=%s, direccion=%s WHERE id_proveedor=%s",
-                (nombre, contacto, telefono, email, direccion, id)
+                "UPDATE proveedor SET nombre=%s, contacto=%s, telefono=%s, email=%s, direccion=%s, tipo_documento=%s, numero_documento=%s WHERE id_proveedor=%s",
+                (nombre, contacto, telefono, email, direccion, tipo_doc, numero_doc, id)
             )
             conn.commit()
             flash("Proveedor actualizado.", "success")
+        except _pg_errores.UndefinedColumn:
+            # Migración db/12_proveedor_documento.sql no aplicada: guardar
+            # sin el documento para no romper la edición (error en el log).
+            conn.rollback()
+            app.logger.error(
+                "Columnas tipo_documento/numero_documento inexistentes en "
+                "proveedor (¿falta ejecutar db/12_proveedor_documento.sql?); "
+                "se actualiza el proveedor %s sin documento.", id)
+            try:
+                cursor.execute(
+                    "UPDATE proveedor SET nombre=%s, contacto=%s, telefono=%s, email=%s, direccion=%s WHERE id_proveedor=%s",
+                    (nombre, contacto, telefono, email, direccion, id)
+                )
+                conn.commit()
+                flash("Proveedor actualizado.", "success")
+            except Exception:
+                conn.rollback()
+                app.logger.exception("Error al actualizar el proveedor %s", id)
+                flash('No se pudo actualizar el proveedor. Revisa los datos e inténtalo de nuevo.', 'danger')
+        except _pg_errores.UniqueViolation:
+            conn.rollback()
+            flash('Ya existe un proveedor con ese documento.', 'danger')
         except Exception:
             conn.rollback()
             app.logger.exception("Error al actualizar el proveedor %s", id)

@@ -19,11 +19,22 @@ no expone detalles técnicos de la BD.
 import re
 from decimal import Decimal, InvalidOperation
 
+from .comprobantes import ruc_valido_para_factura
+
 _CORREO = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 # Letras (con tildes, ñ, ü), espacios, apóstrofo y guion. Sin dígitos.
 _NOMBRE_PERSONA = re.compile(r"^[A-Za-zÁÉÍÓÚÜÑáéíóúüñ' \-]+$")
 # Teléfono OPCIONAL: solo dígitos, entre 7 y 9 (se ignoran espacios).
 _TELEFONO = re.compile(r"^\d{7,9}$")
+
+# Documento de identidad del PROVEEDOR (db/12_proveedor_documento.sql,
+# BD TIENDA). RUC con prefijo de tipo de contribuyente; CE = carné de
+# extranjería, 9 a 12 caracteres (letras y números).
+_TIPOS_DOC_PROVEEDOR = ('RUC', 'DNI', 'CE')
+_RE_RUC = re.compile(r"^\d{11}$")
+_RE_DNI = re.compile(r"^\d{8}$")
+_RE_CE = re.compile(r"^[A-Za-z0-9]{9,12}$")
+_PREFIJOS_RUC = ('10', '15', '17', '20')
 
 
 def texto(valor):
@@ -75,6 +86,58 @@ def correo(valor, maximo=None):
     if not _CORREO.match(limpio):
         return None, 'El correo electrónico no tiene un formato válido.'
     return limpio.lower(), None
+
+
+def documento_proveedor(tipo, numero):
+    """Documento de identidad OBLIGATORIO del proveedor (RUC, DNI o CE).
+
+    Devuelve (tipo_normalizado, numero_limpio, None) si el par es válido
+    o (None, None, mensaje_para_el_usuario) si falla (mismo convenio del
+    resto del módulo). El número se guarda sin espacios internos y el
+    CE en MAYÚSCULAS (coherente con services.documentos).
+    """
+    tipo_limpio = (tipo or '').strip().upper()
+    numero_limpio = re.sub(r'\s+', '', (numero or '').strip())
+    if tipo_limpio not in _TIPOS_DOC_PROVEEDOR:
+        return None, None, 'El tipo de documento debe ser RUC, DNI o CE.'
+    if not numero_limpio:
+        return None, None, 'El número de documento es obligatorio.'
+    if tipo_limpio == 'RUC':
+        if not _RE_RUC.match(numero_limpio) \
+                or numero_limpio[:2] not in _PREFIJOS_RUC:
+            return None, None, (f'El RUC no es válido (11 dígitos, '
+                                f'empieza con 10, 15, 17 o 20).')
+        if numero_limpio[:2] in ('10', '20'):
+            # Reutiliza el proveedor SUNAT: dígito verificador módulo 11.
+            if not ruc_valido_para_factura(numero_limpio):
+                return None, None, ('El RUC no es válido '
+                                    '(dígito verificador incorrecto).')
+        else:
+            # Prefijos 15/17 fuera del alcance del simulado: mismo
+            # módulo 11 de SUNAT aplicado en servidor.
+            if not _digito_verificador_ruc(numero_limpio):
+                return None, None, ('El RUC no es válido '
+                                    '(dígito verificador incorrecto).')
+    elif tipo_limpio == 'DNI':
+        if not _RE_DNI.match(numero_limpio):
+            return None, None, 'El DNI debe tener exactamente 8 dígitos.'
+    else:
+        if not _RE_CE.match(numero_limpio):
+            return None, None, ('El Carné de Extranjería debe tener entre '
+                                '9 y 12 caracteres (solo letras y números).')
+    return tipo_limpio, numero_limpio.upper(), None
+
+
+def _digito_verificador_ruc(ruc):
+    """Módulo 11 de SUNAT (pesos 5,4,3,2,7,6,5,4,3,2; 10->0, 11->1)."""
+    pesos = (5, 4, 3, 2, 7, 6, 5, 4, 3, 2)
+    suma = sum(int(ruc[i]) * pesos[i] for i in range(10))
+    digito = 11 - (suma % 11)
+    if digito == 10:
+        digito = 0
+    elif digito == 11:
+        digito = 1
+    return digito == int(ruc[10])
 
 
 def numero(nombre_campo, valor, minimo=0):

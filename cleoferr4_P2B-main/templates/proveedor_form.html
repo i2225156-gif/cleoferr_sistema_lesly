@@ -3,6 +3,39 @@
 {% block titulito %}{% if proveedor %}Editar{% else %}Nuevo{% endif %} Proveedor – Cleoferr{% endblock %}
 {% block admin_contenido %}
 
+<style>
+    .campo-estado { font-size: 0.82rem; margin-top: 4px; min-height: 18px; }
+    .campo-estado.ok  { color: #28a745; }
+    .campo-estado.err { color: #dc3545; }
+
+    .btn-consultar {
+        background: linear-gradient(135deg, #5c6bc0, #3949ab);
+        border: none; color: white; font-weight: 700;
+        border-radius: 8px; padding: 10px 20px; transition: all 0.2s;
+        white-space: nowrap; cursor: pointer;
+    }
+    .btn-consultar:hover:not(:disabled) {
+        background: linear-gradient(135deg, #3949ab, #283593);
+        color: white; transform: translateY(-1px);
+    }
+    .btn-consultar:disabled { opacity: 0.55; cursor: not-allowed; }
+
+    .resultado-caja {
+        display: none; border-radius: 8px; padding: 12px 16px; margin-top: 12px;
+    }
+    .resultado-ok  { background: #f1f8e9; border: 1px solid #a5d6a7; }
+    .resultado-err { background: #fff8f8; border: 1px solid #ffcdd2; }
+
+    .spinner-mini {
+        display: none; width: 16px; height: 16px;
+        border: 2px solid rgba(255,255,255,0.4);
+        border-top-color: white; border-radius: 50%;
+        animation: spinDocs 0.7s linear infinite;
+        vertical-align: middle; margin-right: 4px;
+    }
+    @keyframes spinDocs { to { transform: rotate(360deg); } }
+</style>
+
 <div class="page-header">
     <div>
         <h2><i class="fa fa-truck me-2"></i>
@@ -15,9 +48,38 @@
 <div class="card card-custom" style="max-width:600px">
     <div class="card-body p-4">
         <form method="POST" id="formProveedor">
+            <div class="row g-3 mb-3">
+                <div class="col-md-4">
+                    <label class="form-label fw-semibold">Tipo de documento *</label>
+                    <select name="tipo_documento" id="tipoDocProv" class="form-select">
+                        <option value="RUC" {% if not proveedor or proveedor.tipo_documento == 'RUC' %}selected{% endif %}>RUC</option>
+                        <option value="DNI" {% if proveedor and proveedor.tipo_documento == 'DNI' %}selected{% endif %}>DNI</option>
+                        <option value="CE" {% if proveedor and proveedor.tipo_documento == 'CE' %}selected{% endif %}>CE</option>
+                    </select>
+                </div>
+                <div class="col-md-8">
+                    <label class="form-label fw-semibold">Número de documento *</label>
+                    <div class="d-flex gap-2 align-items-start">
+                        <div style="flex:1">
+                            <input type="text" name="numero_documento" id="numDocProv" class="form-control"
+                                   value="{{ proveedor.numero_documento if proveedor and proveedor.numero_documento else '' }}"
+                                   placeholder="11 dígitos"
+                                   maxlength="12" inputmode="numeric" required>
+                            <div class="campo-estado" id="estadoDocProv"></div>
+                        </div>
+                        <button type="button" class="btn-consultar" id="btnConsultarRucProv">
+                            <span class="spinner-mini" id="spinProv"></span>
+                            <i class="fa fa-search" id="iconoBtnProv"></i> Consultar
+                        </button>
+                    </div>
+                    <div class="resultado-caja" id="cajResProv">
+                        <div id="contResProv"></div>
+                    </div>
+                </div>
+            </div>
             <div class="mb-3">
                 <label class="form-label fw-semibold">Nombre empresa *</label>
-                <input type="text" name="nombre" class="form-control"
+                <input type="text" name="nombre" id="campoNombreProv" class="form-control"
                        value="{{ proveedor.nombre if proveedor else '' }}" required>
             </div>
             <div class="mb-3">
@@ -47,7 +109,7 @@
             </div>
             <div class="mb-4 mt-3">
                 <label class="form-label fw-semibold">Dirección</label>
-                <input type="text" name="direccion" class="form-control"
+                <input type="text" name="direccion" id="campoDireccionProv" class="form-control"
                        value="{{ proveedor.direccion if proveedor else '' }}" placeholder="Av. Industrial 123, Lima">
             </div>
             <div class="d-flex gap-2">
@@ -90,5 +152,133 @@ document.getElementById('formProveedor').addEventListener('submit', function(e) 
         tel.classList.add('is-invalid');
     }
 });
+</script>
+
+<script>
+/* ── Documento del proveedor (RUC / DNI / CE) ─────────── */
+const selDocProv   = document.getElementById('tipoDocProv');
+const numDocProv   = document.getElementById('numDocProv');
+const estadoDocProv = document.getElementById('estadoDocProv');
+const btnRucProv   = document.getElementById('btnConsultarRucProv');
+let provEnConsulta = false;
+
+/* Longitudes esperadas: RUC 11, DNI 8, CE 9-12 */
+function longitudDocProv(tipo) {
+    return tipo === 'RUC' ? 11 : (tipo === 'DNI' ? 8 : null);
+}
+
+function configurarDocProv() {
+    const t = selDocProv.value;
+    numDocProv.maxLength = t === 'DNI' ? 8 : 12;
+    numDocProv.placeholder = t === 'RUC' ? '11 dígitos'
+        : (t === 'DNI' ? '8 dígitos' : '9 a 12 letras y números');
+    /* El "Consultar" es solo para RUC: DNI y CE lo ocultan */
+    btnRucProv.style.display = t === 'RUC' ? '' : 'none';
+    document.getElementById('cajResProv').style.display = 'none';
+    validarDocProv();
+}
+
+function validarDocProv() {
+    const t = selDocProv.value;
+    const v = numDocProv.value;
+    if (t !== 'CE') numDocProv.value = v.replace(/\D/g, '');
+    const len = numDocProv.value.length;
+    btnRucProv.disabled = true;
+    let ok = false;
+    if (t === 'CE') {
+        ok = len >= 9 && len <= 12;
+    } else {
+        const max = longitudDocProv(t);
+        ok = len === max;
+    }
+    document.getElementById('cajResProv').style.display = 'none';
+
+    if (len === 0) {
+        estadoDocProv.textContent = '';
+        estadoDocProv.className = 'campo-estado';
+    } else if (ok) {
+        estadoDocProv.textContent = '✓ Documento completo';
+        estadoDocProv.className = 'campo-estado ok';
+        btnRucProv.disabled = false;
+    } else if (t === 'CE') {
+        estadoDocProv.textContent = 'Debe tener entre 9 y 12 letras y números';
+        estadoDocProv.className = 'campo-estado err';
+    } else {
+        estadoDocProv.textContent = `Faltan ${longitudDocProv(t) - len} dígito(s)`;
+        estadoDocProv.className = 'campo-estado err';
+    }
+}
+
+function mostrarErrorProv(msg) {
+    const caja = document.getElementById('cajResProv');
+    const cont = document.getElementById('contResProv');
+    caja.className = 'resultado-caja resultado-err';
+    cont.innerHTML = `<div class="d-flex align-items-center gap-2">
+        <span style="font-size:1.3rem">⚠️</span>
+        <span style="color:#c62828;font-size:0.9rem">${msg}</span>
+    </div>`;
+    caja.style.display = 'block';
+}
+
+function toTitleCaseProv(str) {
+    if (!str) return '';
+    return str.toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
+}
+
+/* ── Consulta RUC (patrón de cliente_form.html) ───────── */
+btnRucProv.addEventListener('click', async function() {
+    if (provEnConsulta) return;
+    const num = numDocProv.value.trim();
+    if (selDocProv.value !== 'RUC' || num.length !== 11) return;
+
+    provEnConsulta = true;
+    btnRucProv.disabled = true;
+    document.getElementById('spinProv').style.display = 'inline-block';
+    document.getElementById('iconoBtnProv').style.display = 'none';
+    document.getElementById('cajResProv').style.display = 'none';
+
+    try {
+        const resp = await fetch(`/api/consultar_ruc/${num}`,
+                                 { headers: { 'Accept': 'application/json' } });
+        const raw = await resp.text();
+        let data;
+        try { data = JSON.parse(raw); } catch (e) { data = null; }
+
+        if (!data) {
+            mostrarErrorProv('La API devolvió una respuesta inválida. Intenta de nuevo.');
+        } else {
+            const razon     = data.razonSocial || data.razon_social || data.nombre || '';
+            const direccion = data.direccion   || data.domicilioFiscal || '';
+
+            if (razon) {
+                document.getElementById('campoNombreProv').value = toTitleCaseProv(razon);
+                if (direccion) document.getElementById('campoDireccionProv').value = toTitleCaseProv(direccion);
+                const caja = document.getElementById('cajResProv');
+                caja.className = 'resultado-caja resultado-ok';
+                document.getElementById('contResProv').innerHTML = `
+                    <div class="d-flex align-items-center gap-2">
+                        <span style="font-size:1.4rem">✅</span>
+                        <span class="fw-bold" style="color:#2e7d32;font-size:1rem">RUC ENCONTRADO</span>
+                    </div>`;
+                caja.style.display = 'block';
+            } else if (data.message || data.error || data.msg) {
+                mostrarErrorProv(data.message || data.error || data.msg);
+            } else {
+                mostrarErrorProv('RUC NO ENCONTRADO');
+            }
+        }
+    } catch (err) {
+        mostrarErrorProv('Error de conexión: ' + err.message + '. Ingresa los datos manualmente.');
+    }
+
+    provEnConsulta = false;
+    document.getElementById('spinProv').style.display = 'none';
+    document.getElementById('iconoBtnProv').style.display = 'inline';
+    validarDocProv();
+});
+
+selDocProv.addEventListener('change', configurarDocProv);
+numDocProv.addEventListener('input', validarDocProv);
+window.addEventListener('DOMContentLoaded', configurarDocProv);
 </script>
 {% endblock %}
