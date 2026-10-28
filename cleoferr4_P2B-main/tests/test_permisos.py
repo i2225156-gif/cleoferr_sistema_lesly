@@ -178,10 +178,14 @@ def test_activas_sin_cambio():
 # ── 3. before_request del personal ───────────────────────────────
 def test_una_consulta_carga_permisos(dobles):
     caja = dobles(filas_auth=[
-        {'activo': True, 'permiso': 'ventas'},
-        {'activo': True, 'permiso': 'pedidos'},
-        {'activo': True, 'permiso': 'clientes'},
-        {'activo': True, 'permiso': 'alertas'},
+        {'activo': True, 'permiso': 'ventas',
+         'plantilla_sembrada': True},
+        {'activo': True, 'permiso': 'pedidos',
+         'plantilla_sembrada': True},
+        {'activo': True, 'permiso': 'clientes',
+         'plantilla_sembrada': True},
+        {'activo': True, 'permiso': 'alertas',
+         'plantilla_sembrada': True},
     ])
     with app.test_request_context('/pedidos'):
         _sesion(session)
@@ -189,6 +193,7 @@ def test_una_consulta_carga_permisos(dobles):
         assert len(caja['auth'].cur.consultas) == 1              # UNA consulta
         assert 'usuario_permiso' in caja['auth'].cur.ultimo_sql
         assert 'p.activo = TRUE' in caja['auth'].cur.ultimo_sql  # JOIN real
+        assert 'plantilla_sembrada' in caja['auth'].cur.ultimo_sql
         assert g.permisos == {'ventas', 'pedidos', 'clientes', 'alertas'}
     with app.test_request_context('/pedidos'):
         _sesion(session, rol='administrador', uid=1)
@@ -197,8 +202,10 @@ def test_una_consulta_carga_permisos(dobles):
 
 
 def test_vendedor_usa_exactamente_sus_filas(dobles):
-    caja = dobles(filas_auth=[{'activo': True, 'permiso': 'ventas'},
-                              {'activo': True, 'permiso': 'productos'}])
+    caja = dobles(filas_auth=[{'activo': True, 'permiso': 'ventas',
+                               'plantilla_sembrada': True},
+                              {'activo': True, 'permiso': 'productos',
+                               'plantilla_sembrada': True}])
     with app.test_request_context('/productos'):
         _sesion(session)
         assert modulo_app._cargar_permisos_personal() is None
@@ -206,12 +213,13 @@ def test_vendedor_usa_exactamente_sus_filas(dobles):
         assert g.permisos == {'ventas', 'productos'}
 
 
-def test_vendedor_tablas_vacias_usa_por_defecto(dobles, cliente):
-    # Estructura REAL: usuario_permiso, permiso y rol_permiso están
-    # VACÍAS -> el LEFT JOIN devuelve una fila [activo=True, permiso=
-    # None]. El vendedor NO debe quedarse sin acceso: POR_DEFECTO...
-    # (como ahora, antes de ejecutar auth_03_permisos.sql).
-    caja = dobles(filas_auth=[{'activo': True, 'permiso': None}])
+def test_vendedor_plantilla_vacia_usa_por_defecto(dobles, cliente):
+    # Estructura REAL + auth_03 SIN EJECUTAR: usuario_permiso, permiso y
+    # rol_permiso VACÍAS → el LEFT JOIN devuelve UNA fila [activo=True,
+    # permiso=None, plantilla_sembrada=False]. El vendedor NO queda sin
+    # acceso: POR_DEFECTO_VENDEDOR (estado actual, plantilla sin sembrar).
+    caja = dobles(filas_auth=[{'activo': True, 'permiso': None,
+                               'plantilla_sembrada': False}])
     with cliente.session_transaction() as s:
         _sesion(s)
     resp = cliente.get('/inicio_personal', follow_redirects=False)
@@ -220,8 +228,25 @@ def test_vendedor_tablas_vacias_usa_por_defecto(dobles, cliente):
     assert resp.headers['Location'].endswith('/ventas/nueva')
 
 
+def test_vendedor_plantilla_sembrada_sin_filas_queda_bloqueado(dobles,
+                                                               cliente):
+    # auth_03 YA APLICADO: rol_permiso del rol vendedor TIENE filas →
+    # un vendedor en CERO permisos queda SIN panel (decisión explícita
+    # de revocación total, no falla de siembra) → sin_permisos.html.
+    caja = dobles(filas_auth=[{'activo': True, 'permiso': None,
+                               'plantilla_sembrada': True}])
+    with cliente.session_transaction() as s:
+        _sesion(s)
+    resp = cliente.get('/inicio_personal', follow_redirects=True)
+    assert resp.status_code == 200
+    cuerpo = resp.get_data(as_text=True)
+    assert 'Sin permisos' in cuerpo
+    assert '/logout' in cuerpo
+
+
 def test_desactivado_limpia_sesion_y_manda_a_login(dobles, cliente):
-    caja = dobles(filas_auth=[{'activo': False, 'permiso': 'ventas'}])
+    caja = dobles(filas_auth=[{'activo': False, 'permiso': 'ventas',
+                               'plantilla_sembrada': True}])
     with cliente.session_transaction() as s:
         _sesion(s)
     resp = cliente.get('/productos', follow_redirects=False)
@@ -271,7 +296,8 @@ def test_rutas_ignoradas_ejecutan_cero_consultas(dobles, cliente):
 
 
 def test_ruta_compartida_del_personal_si_chequea(dobles, cliente):
-    caja = dobles(filas_auth=[{'activo': True, 'permiso': None}])
+    caja = dobles(filas_auth=[{'activo': True, 'permiso': None,
+                               'plantilla_sembrada': False}])
     with cliente.session_transaction() as s:
         _sesion(s)
     assert cliente.get('/cambiar_clave').status_code == 200     # personal
@@ -280,7 +306,8 @@ def test_ruta_compartida_del_personal_si_chequea(dobles, cliente):
 
 # ── 4. permiso_required ──────────────────────────────────────────
 def test_vendedor_sin_permiso_redirige_con_flash(dobles, cliente):
-    caja = dobles(filas_auth=[{'activo': True, 'permiso': 'ventas'}])
+    caja = dobles(filas_auth=[{'activo': True, 'permiso': 'ventas',
+                               'plantilla_sembrada': True}])
     with cliente.session_transaction() as s:
         _sesion(s)
     resp = cliente.get('/pedidos', follow_redirects=False)     # NO tiene
@@ -294,7 +321,8 @@ def test_vendedor_con_permiso_sigue_a_la_vista(dobles, cliente):
     # /productos/nuevo: before_request carga 'productos' (auth doble) y la
     # vista usa la conexión de TIENDA doble (2 SELECT: categoria, marca):
     # cero BD real.
-    caja = dobles(filas_auth=[{'activo': True, 'permiso': 'productos'}],
+    caja = dobles(filas_auth=[{'activo': True, 'permiso': 'productos',
+                               'plantilla_sembrada': True}],
                   filas_tienda=[])
     with cliente.session_transaction() as s:
         _sesion(s)
@@ -304,7 +332,8 @@ def test_vendedor_con_permiso_sigue_a_la_vista(dobles, cliente):
 
 
 def test_vendedor_ajax_recibe_403_json(dobles, cliente):
-    caja = dobles(filas_auth=[{'activo': True, 'permiso': 'ventas'}])
+    caja = dobles(filas_auth=[{'activo': True, 'permiso': 'ventas',
+                               'plantilla_sembrada': True}])
     with cliente.session_transaction() as s:
         _sesion(s, csrf='tokentest')
     resp = cliente.post(
@@ -343,11 +372,16 @@ def test_inicial_admin_al_dashboard(dobles, cliente):
 
 def test_inicial_vendedor_primera_permitida(dobles, cliente):
     dobles(filas_auth=[
-        {'activo': True, 'permiso': 'reportes'},
-        {'activo': True, 'permiso': 'alertas'},
-        {'activo': True, 'permiso': 'productos'},
-        {'activo': True, 'permiso': 'clientes'},
-        {'activo': True, 'permiso': 'pedidos'},
+        {'activo': True, 'permiso': 'reportes',
+         'plantilla_sembrada': True},
+        {'activo': True, 'permiso': 'alertas',
+         'plantilla_sembrada': True},
+        {'activo': True, 'permiso': 'productos',
+         'plantilla_sembrada': True},
+        {'activo': True, 'permiso': 'clientes',
+         'plantilla_sembrada': True},
+        {'activo': True, 'permiso': 'pedidos',
+         'plantilla_sembrada': True},
     ])
     with cliente.session_transaction() as s:
         _sesion(s)

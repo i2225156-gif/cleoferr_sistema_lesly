@@ -464,11 +464,15 @@ def _cargar_permisos_personal():
 
     Si la cuenta sigue activa carga g.permisos (administrador: todos;
     vendedor: sus filas de usuario_permiso JOIN permiso.nombre con
-    permiso.activo). Un vendedor SIN NINGUNA fila (tablas vacías antes
-    de aplicar auth_03) recibe POR_DEFECTO_VENDEDOR en vez de quedarse
-    sin acceso. Si fue DESACTIVADA o eliminada: session.clear(), flash
-    y a /login. Si la tabla aún no existe: error al log y también los
-    por defecto, sin bloquear la petición.
+    permiso.activo). Regla de cero filas para el vendedor:
+      * si rol_permiso del rol vendedor YA está sembrada (el SQL
+        auth_03 fue aplicado) → SIN permisos (queda en sin_permisos.html):
+        así la revocación total del panel no se autoanula;
+      * si la plantilla está VACÍA (SQL sin ejecutar, como al inicio)
+        → POR_DEFECTO_VENDEDOR.
+    Los ERRORES de consulta (tabla inexistente/conexión) SIEMPRE caen a
+    POR_DEFECTO_VENDEDOR sin 500. Si fue DESACTIVADA o eliminada:
+    session.clear(), flash y a /login.
     """
     rol = session.get('rol')
     if rol not in ('administrador', 'vendedor'):
@@ -482,10 +486,15 @@ def _cargar_permisos_personal():
         conn   = get_connection_auth()
         cursor = conn.cursor(dictionary=True)
         # Una sola consulta: activo del usuario + nombres de sus
-        # permisos ACTIVOS en filas (administrador: sin JOIN útil,
-        # pero sin penalizar: la misma consulta para todo el personal).
+        # permisos ACTIVOS en filas + la bandera de si la plantilla del
+        # rol vendedor ya está sembrada (misma ida a la BD).
         cursor.execute("""
-            SELECT u.activo AS activo, p.nombre AS permiso
+            SELECT u.activo AS activo, p.nombre AS permiso,
+                   EXISTS (SELECT 1
+                             FROM rol_permiso rp
+                             JOIN rol r ON r.id_rol = rp.id_rol
+                            WHERE LOWER(TRIM(r.nombre)) = 'vendedor')
+                       AS plantilla_sembrada
               FROM usuario u
          LEFT JOIN usuario_permiso up ON up.id_usuario = u.id_usuario
          LEFT JOIN permiso p ON p.id_permiso = up.id_permiso
@@ -506,10 +515,13 @@ def _cargar_permisos_personal():
             g.permisos = set(permisos.CATALOGO)
         else:
             g.permisos = {f['permiso'] for f in filas if f['permiso']}
-            if not g.permisos:
-                # Tablas recién creadas y vacías (auth_03 recién aplica o
-                # sin aplicar): al vendedor no se le dejan CERO módulos,
-                # recibe la plantilla por defecto.
+            # Plantilla del rol vendedor YA sembrada y SIN filas:
+            # quedar SIN permisos es la decisión explícita del panel
+            # (revocación total), no falla de siembra.
+            plantilla_sembrada = bool(filas[0]['plantilla_sembrada'])
+            if not g.permisos and not plantilla_sembrada:
+                # auth_03 sin ejecutar (plantilla vacía): no bloquear al
+                # vendedor con cero módulos; usa los por defecto.
                 g.permisos = set(permisos.POR_DEFECTO_VENDEDOR)
     except _pg_errores.UndefinedTable:
         # Migración AUTH-03 sin aplicar: no bloquear al personal.
