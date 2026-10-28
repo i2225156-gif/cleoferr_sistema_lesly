@@ -463,10 +463,12 @@ def _cargar_permisos_personal():
     """Solo personal: UNA consulta por petición (activo + permisos).
 
     Si la cuenta sigue activa carga g.permisos (administrador: todos;
-    vendedor: los de usuario_permiso). Si fue DESACTIVADA o eliminada:
-    session.clear(), flash y a /login. Si la tabla aún no existe
-    (migración auth_03 sin aplicar) se registra el error y se usan los
-    permisos POR_DEFECTO_VENDEDOR, sin bloquear la petición.
+    vendedor: sus filas de usuario_permiso JOIN permiso.nombre con
+    permiso.activo). Un vendedor SIN NINGUNA fila (tablas vacías antes
+    de aplicar auth_03) recibe POR_DEFECTO_VENDEDOR en vez de quedarse
+    sin acceso. Si fue DESACTIVADA o eliminada: session.clear(), flash
+    y a /login. Si la tabla aún no existe: error al log y también los
+    por defecto, sin bloquear la petición.
     """
     rol = session.get('rol')
     if rol not in ('administrador', 'vendedor'):
@@ -479,12 +481,15 @@ def _cargar_permisos_personal():
     try:
         conn   = get_connection_auth()
         cursor = conn.cursor(dictionary=True)
-        # Una sola consulta: activo del usuario + todos sus permisos en
-        # filas (LEFT JOIN: un usuario sin permisos sigue respondiendo).
+        # Una sola consulta: activo del usuario + nombres de sus
+        # permisos ACTIVOS en filas (administrador: sin JOIN útil,
+        # pero sin penalizar: la misma consulta para todo el personal).
         cursor.execute("""
-            SELECT u.activo AS activo, p.permiso AS permiso
+            SELECT u.activo AS activo, p.nombre AS permiso
               FROM usuario u
-         LEFT JOIN usuario_permiso p ON p.id_usuario = u.id_usuario
+         LEFT JOIN usuario_permiso up ON up.id_usuario = u.id_usuario
+         LEFT JOIN permiso p ON p.id_permiso = up.id_permiso
+                             AND p.activo = TRUE
              WHERE u.id_usuario = %s
         """, (session['usuario_id'],))
         filas = cursor.fetchall()
@@ -501,6 +506,11 @@ def _cargar_permisos_personal():
             g.permisos = set(permisos.CATALOGO)
         else:
             g.permisos = {f['permiso'] for f in filas if f['permiso']}
+            if not g.permisos:
+                # Tablas recién creadas y vacías (auth_03 recién aplica o
+                # sin aplicar): al vendedor no se le dejan CERO módulos,
+                # recibe la plantilla por defecto.
+                g.permisos = set(permisos.POR_DEFECTO_VENDEDOR)
     except _pg_errores.UndefinedTable:
         # Migración AUTH-03 sin aplicar: no bloquear al personal.
         app.logger.error(

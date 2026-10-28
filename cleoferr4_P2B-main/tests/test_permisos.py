@@ -34,11 +34,14 @@ from services import permisos
 
 # ── Dobles de conexión (cero BD real) ────────────────────────────
 class CursorDoble:
-    def __init__(self, filas=None, error=None):
+    def __init__(self, filas=None, error=None, rowcount=None):
         self.filas = list(filas or [])
         self.error = error
         self.consultas = []
         self.ultimo_sql = ''
+        # rowcount fijo (SEND/DML): None equivale a 0 salvo que el test
+        # lo configure al construir el doble.
+        self.rowcount = 0 if rowcount is None else rowcount
 
     def execute(self, sql, params=None):
         self.consultas.append((sql, params))
@@ -54,8 +57,8 @@ class CursorDoble:
 
 
 class ConnDoble:
-    def __init__(self, filas=None, error=None):
-        self.cur = CursorDoble(filas, error)
+    def __init__(self, filas=None, error=None, rowcount=None):
+        self.cur = CursorDoble(filas, error, rowcount)
         self.cerrada = False
 
     def cursor(self, dictionary=False, **kwargs):
@@ -119,13 +122,28 @@ def test_por_defecto_vendedor():
 
 
 def test_sql_del_auth03_idempotente_y_consistente():
+    # auth_03 no CREO tablas: usuario_permiso/permiso/rol_permiso ya
+    # existen (verificado con information_schema); siembra en 3 pasos.
     sql = io.open('db/auth_03_permisos.sql', encoding='utf-8').read()
     assert 'EJECUTAR EN EL PROYECTO AUTH, NO EN TIENDA' in sql
+    # 1) catálogo de permiso con activo=TRUE, idempotente
     for clave in permisos.CATALOGO:
-        assert "'%s'" % clave in sql, clave        # el CHECK usa el catálogo
-    assert 'ON CONFLICT (id_usuario, permiso) DO NOTHING' in sql
-    assert 'ON DELETE CASCADE' in sql
-    assert 'CREATE TABLE IF NOT EXISTS' in sql     # idempotente
+        assert "('%s')" % clave in sql, clave
+    assert 'activo' in sql and 'TRUE' in sql
+    # 2) plantilla del rol vendedor en rol_permiso
+    assert 'rol_permiso' in sql
+    assert "LOWER(TRIM(r.nombre)) = 'vendedor'" in sql
+    for semilla in ('ventas', 'pedidos', 'clientes', 'alertas'):
+        assert "('%s')" % semilla in sql
+    # 3) usuario_permiso: copia con auditoría; asignado_por NULL porque
+    #    la columna admite NULL (verificado), fecha_asignacion now().
+    assert 'usuario_permiso' in sql
+    assert 'asignado_por' in sql and 'fecha_asignacion' in sql
+    assert 'now()' in sql
+    assert 'NULL' in sql
+    # idempotencia: sin NOT EXISTS ni falla (al menos 2 apariciones)
+    assert sql.count('NOT EXISTS') >= 2
+    assert 'ORDER IMPORTANTE' in sql.upper() or 'ORDEN IMPORTANTE' in sql.upper()
 
 
 # ── 2. Tabla ruta → permiso desplegada de verdad ─────────────────
@@ -170,11 +188,36 @@ def test_una_consulta_carga_permisos(dobles):
         assert modulo_app._cargar_permisos_personal() is None
         assert len(caja['auth'].cur.consultas) == 1              # UNA consulta
         assert 'usuario_permiso' in caja['auth'].cur.ultimo_sql
+        assert 'p.activo = TRUE' in caja['auth'].cur.ultimo_sql  # JOIN real
         assert g.permisos == {'ventas', 'pedidos', 'clientes', 'alertas'}
     with app.test_request_context('/pedidos'):
         _sesion(session, rol='administrador', uid=1)
         assert modulo_app._cargar_permisos_personal() is None
         assert g.permisos == set(permisos.CATALOGO)              # admin: todo
+
+
+def test_vendedor_usa_exactamente_sus_filas(dobles):
+    caja = dobles(filas_auth=[{'activo': True, 'permiso': 'ventas'},
+                              {'activo': True, 'permiso': 'productos'}])
+    with app.test_request_context('/productos'):
+        _sesion(session)
+        assert modulo_app._cargar_permisos_personal() is None
+        # Sus filas EXACTAS (no plantilla, no todos).
+        assert g.permisos == {'ventas', 'productos'}
+
+
+def test_vendedor_tablas_vacias_usa_por_defecto(dobles, cliente):
+    # Estructura REAL: usuario_permiso, permiso y rol_permiso están
+    # VACÍAS -> el LEFT JOIN devuelve una fila [activo=True, permiso=
+    # None]. El vendedor NO debe quedarse sin acceso: POR_DEFECTO...
+    # (como ahora, antes de ejecutar auth_03_permisos.sql).
+    caja = dobles(filas_auth=[{'activo': True, 'permiso': None}])
+    with cliente.session_transaction() as s:
+        _sesion(s)
+    resp = cliente.get('/inicio_personal', follow_redirects=False)
+    assert resp.status_code == 302
+    # La plantilla incluye 'ventas': aterriza en el POS.
+    assert resp.headers['Location'].endswith('/ventas/nueva')
 
 
 def test_desactivado_limpia_sesion_y_manda_a_login(dobles, cliente):
@@ -319,15 +362,26 @@ def test_inicial_vendedor_primera_permitida(dobles, cliente):
     assert resp.headers['Location'].endswith('/ventas/nueva')
 
 
-def test_inicial_vendedor_sin_nada_pagina_simple(dobles, cliente):
-    dobles(filas_auth=[{'activo': True, 'permiso': None}])       # 0 permisos
-    with cliente.session_transaction() as s:
-        _sesion(s)
-    resp = cliente.get('/inicio_personal')
-    assert resp.status_code == 200
-    html = resp.get_data(as_text=True)
+def test_plantilla_sin_permisos_existe_con_cerrar_sesion():
+    # La página sigue existiendo como camino defensivo; con las tablas
+    # vacías el before_request ya aplica POR_DEFECTO_VENDEDOR.
+    with app.test_request_context('/x'):
+        html = render_template('sin_permisos.html')
     assert 'Sin permisos' in html
-    assert '/logout' in html                          # Cerrar sesión
+    assert '/logout' in html                      # Cerrar sesión
+
+
+def test_vendedor_forzado_sin_permisos_ve_la_pagina():
+    # caso forzado (sin defaults aplicados)
+    with app.test_request_context('/inicio_personal'):
+        g.permisos = set()
+        session['usuario_id'] = 7
+        session['rol'] = 'vendedor'
+        resp = app.make_response(app.view_functions['inicio_personal']())
+        assert resp.status_code == 200
+        html = resp.get_data(as_text=True)
+        assert 'Sin permisos' in html
+        assert '/logout' in html
 
 
 def test_inicial_anonimo_al_login(cliente):
@@ -391,3 +445,39 @@ def test_context_processor_registrado():
         html = render_template_string("{{ tiene_permiso('ventas') }}-"
                                       "{{ tiene_permiso('productos') }}")
     assert html == 'True-False'
+
+
+# ── 7. Helpers de auditoría (dar/quitar) sobre la estructura REAL ──
+def test_dar_permiso_inserta_con_auditoria():
+    conn = ConnDoble(rowcount=1)      # una fila INSERTADA
+    hecho = permisos.dar_permiso(conn, id_admin=3, id_usuario=9,
+                                 clave='productos')
+    assert hecho is True
+    sql, params = conn.cur.consultas[0]
+    assert 'INSERT INTO usuario_permiso' in sql
+    assert 'asignado_por' in sql and 'fecha_asignacion' in sql
+    assert 'now()' in sql.lower()
+    # Idempotente + auditable: sin duplicar y con responsable+momento.
+    assert 'ON CONFLICT (id_usuario, id_permiso) DO NOTHING' in sql
+    assert 'p.activo = TRUE' in sql                  # solo permisos activos
+    assert params == (9, 3, 'productos')             # (usuario, admin, clave)
+
+
+def test_dar_permiso_clave_inexistente_o_inactiva_no_inserta():
+    conn = ConnDoble(rowcount=0)      # permiso inexistente o inactivo
+    assert permisos.dar_permiso(conn, None, 9, 'relampago') is False
+
+
+def test_quitar_permiso_borra_la_fila():
+    conn = ConnDoble(rowcount=1)      # una fila BORRADA
+    hecho = permisos.quitar_permiso(conn, 9, 'ventas')
+    assert hecho is True
+    sql, params = conn.cur.consultas[0]
+    assert 'DELETE FROM usuario_permiso' in sql
+    assert 'USING permiso' in sql                     # por nombre, no id
+    assert params == (9, 'ventas')
+
+
+def test_quitar_permiso_sin_fila_no_borra_nada():
+    conn = ConnDoble(rowcount=0)
+    assert permisos.quitar_permiso(conn, 9, 'compras') is False

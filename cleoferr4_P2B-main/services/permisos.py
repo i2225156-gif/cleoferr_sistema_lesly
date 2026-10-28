@@ -1,13 +1,27 @@
 """Catálogo de permisos por módulo del personal (TAREA permisos vendedores).
 
 El ADMINISTRADOR tiene SIEMPRE todos los módulos (se impone en la
-aplicación, no hay filas para él). El VENDEDOR solo usa lo registrado en
-usuario_permiso (BD Auth); si la migración auth_03_permisos.sql aún no
-fue aplicada (tabla inexistente), la app cae a POR_DEFECTO_VENDEDOR sin
-romper la petición.
+aplicación, no hay filas para él). El VENDEDOR usa lo registrado en
+usuario_permiso de la BD Auth; si NO TIENE NINGUNA fila (tablas vacías
+antes de aplicar auth_03_permisos.sql), se aplican POR_DEFECTO_VENDEDOR
+y si la propia tabla no existe se registra el error y también cae a los
+por defecto.
 
-'compras' existe en el catálogo para el módulo futuro: hoy no tiene
-ninguna ruta asignada.
+Estructura REAL verificada con information_schema (proyecto AUTH):
+  permiso(id_permiso, nombre UNIQUE, activo)         — id_permiso serial
+  rol_permiso(id_rol, id_permiso)                    — plantilla del rol
+  usuario_permiso(id_usuario, id_permiso,            — asignado a mano
+                  asignado_por, fecha_asignacion)
+Las claves de CATALOGO son los NOMBRES de permiso (no ids): la app
+se une por permiso.nombre. 'compras' existe en el catálogo para el
+módulo futuro: hoy no tiene ninguna ruta asignada.
+
+Auditoría (para el panel del administrador, tarea siguiente):
+  * DAR un permiso = INSERT con asignado_por = id del administrador de
+    la sesión y fecha_asignacion = now()  ->  dar_permiso().
+  * QUITAR un permiso = DELETE de la fila      ->  quitar_permiso().
+Ambos son helpers SIN pantallas (reciben la conexión; el que llama
+hace commit); los paneles los usarán en la gestión de usuarios.
 """
 
 # Clave de módulo → etiqueta visible en gestión/auditoría.
@@ -24,9 +38,46 @@ CATALOGO = {
     'compras': 'Compras',
 }
 
-# Semilla de auth_03_permisos.sql: los vendedores existentes arrancan con
-# estos módulos (CROSS JOIN ... ON CONFLICT DO NOTHING).
+# Semilla / plantilla del rol vendedor (auth_03_permisos.sql siembra
+# rol_permiso con estos cuatro): vendedor SIN filas arranca con ellos.
 POR_DEFECTO_VENDEDOR = ('ventas', 'pedidos', 'clientes', 'alertas')
+
+
+# ── Helpers de gestión (SIN pantallas; el panel los llama) ────────
+def dar_permiso(conn, id_admin, id_usuario, clave):
+    """Concede un permiso con auditoría: asignado_por + fecha_asignacion.
+
+    Inserta SOLO si la clave está activa en permiso (nombre). Idempotente:
+    ON CONFLICT (id_usuario, id_permiso) DO NOTHING no duplica. NO comitea
+    (el llamador dueño de la transacción decide). Devuelve True si se
+    insertó una fila nueva.
+    """
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("""
+        INSERT INTO usuario_permiso
+               (id_usuario, id_permiso, asignado_por, fecha_asignacion)
+        SELECT %s, p.id_permiso, %s, now()
+          FROM permiso p
+         WHERE p.nombre = %s AND p.activo = TRUE
+      ON CONFLICT (id_usuario, id_permiso) DO NOTHING
+    """, (id_usuario, id_admin, clave))
+    return bool(cursor.rowcount)
+
+
+def quitar_permiso(conn, id_usuario, clave):
+    """Revoca un permiso: el borrado de la fila ES la revocación.
+
+    NO comitea (el llamador decide). Devuelve True si se borró algo.
+    """
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("""
+        DELETE FROM usuario_permiso up
+         USING permiso p
+         WHERE up.id_permiso = p.id_permiso
+           AND up.id_usuario = %s
+           AND p.nombre = %s
+    """, (id_usuario, clave))
+    return bool(cursor.rowcount)
 
 # ── Tabla ruta → permiso (documentado y verificado por tests). ──────
 # Claves: reglas EXACTAS como aparecen en app.url_map. admin_required
