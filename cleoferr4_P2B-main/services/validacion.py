@@ -64,13 +64,16 @@ def correo(valor, maximo=None):
 
 
 def numero(nombre_campo, valor, minimo=0):
-    """Decimal requerido; no numérico o por debajo del mínimo se rechaza."""
+    """Decimal requerido; no numérico, no finito o por debajo del
+    mínimo se rechaza."""
     limpio = texto(valor)
     if limpio is None:
         return None, f'El campo «{nombre_campo}» es obligatorio.'
     try:
         n = Decimal(limpio)
     except InvalidOperation:
+        return None, f'El campo «{nombre_campo}» debe ser un número.'
+    if not n.is_finite():
         return None, f'El campo «{nombre_campo}» debe ser un número.'
     if n < minimo:
         return None, f'El campo «{nombre_campo}» no puede ser negativo.'
@@ -82,6 +85,8 @@ def entero(nombre_campo, valor, minimo=0):
     limpio = texto(valor)
     if limpio is None:
         return None, f'El campo «{nombre_campo}» es obligatorio.'
+    if limpio.lower().lstrip('+-') in ('nan', 'snan', 'inf', 'infinity'):
+        return None, f'El campo «{nombre_campo}» debe ser un número entero.'
     try:
         n = int(limpio)
     except ValueError:
