@@ -13,7 +13,7 @@ import urllib.request
 import urllib.error
 # Intento seguro de importar dependencias externas; si faltan, mostrar instrucciones claras y salir.
 try:
-    from flask import Flask, render_template, request, redirect, url_for, session, flash, abort
+    from flask import Flask, render_template, request, redirect, url_for, session, flash, abort, g
     from flask_bcrypt import Bcrypt
     from functools import wraps
     from werkzeug.utils import secure_filename   # ← NUEVO
@@ -32,6 +32,7 @@ from db import db
 from db_supabase import get_connection_auth, get_connection_tienda
 from psycopg2 import errors as _pg_errores
 from services import captcha
+from services import permisos
 from services.comprobantes import (EMISOR, UMBRAL_BOLETA_SIN_DOC,
                                     boleta_necesita_documento,
                                     ruc_valido_para_factura,
@@ -358,21 +359,162 @@ def admin_required(f):
                 return {'ok': False,
                         'mensaje': 'No tienes permisos para esta acción.'}, 403
             flash("Acceso denegado.", "danger")
-            return redirect(url_for("productos"))
+            return redirect(url_for("inicio_personal"))
         return f(*args, **kwargs)
     return decorated_function
 
-def escritura_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if session.get("rol") not in ("administrador", "vendedor"):
+
+# ── Permisos por módulo (solo personal: administrador/vendedor) ────
+# g.permisos lo carga before_request (_cargar_permisos_personal: UNA
+# consulta por petición). El administrador pasa SIEMPRE; el vendedor
+# necesita el permiso del módulo (services/permisos.py).
+
+# Aterrizaje del vendedor en /inicio_personal: la PRIMERA ruta cuyo
+# permiso tenga el usuario.
+ORDEN_INICIO_VENDEDOR = (
+    ('ventas',     'venta_nueva_form'),
+    ('pedidos',    'pedidos'),
+    ('productos',  'productos'),
+    ('clientes',   'clientes'),
+    ('inventario', 'inventario'),
+    ('alertas',    'alertas'),
+    ('reportes',   'reportes'),
+)
+
+
+def _permisos_staff():
+    """Permisos de la sesión; vacío si before_request no los cargó."""
+    return getattr(g, 'permisos', set())
+
+
+def tiene_permiso(clave):
+    """¿La sesión actual puede usar este módulo? (plantillas y vistas)."""
+    if session.get('rol') == 'administrador':
+        return True
+    return clave in _permisos_staff()
+
+
+@app.context_processor
+def _ctx_permisos():
+    return {'tiene_permiso': tiene_permiso}
+
+
+def permiso_required(clave):
+    """Sustituye a escritura_required: módulo exacto por usuario.
+
+    El administrador accede siempre. Un vendedor SIN el permiso recibe
+    403 JSON si es AJAX (contrato fetch) o flash + redirección a su
+    landing (/inicio_personal) si no.
+    """
+    def decorador(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            rol = session.get('rol')
+            if rol == 'administrador' or clave in _permisos_staff():
+                return f(*args, **kwargs)
             if _es_ajax():
                 return {'ok': False,
                         'mensaje': 'No tienes permisos para esta acción.'}, 403
             flash("No tienes permisos para realizar esta acción.", "danger")
-            return redirect(url_for("productos"))
-        return f(*args, **kwargs)
-    return decorated_function
+            return redirect(url_for('inicio_personal'))
+        decorated_function._permiso_requerido = clave   # introspección/tests
+        return decorated_function
+    return decorador
+
+
+@app.route('/inicio_personal')
+@login_required
+def inicio_personal():
+    """Pantalla inicial del personal según su rol y permisos reales.
+
+    Administrador → /admin/dashboard. Vendedor → la primera ruta
+    permitida (ventas > pedidos > productos > clientes > inventario >
+    alertas > reportes). Si no tiene NINGUNA: página simple con la
+    opción de cerrar sesión.
+    """
+    rol = session.get('rol')
+    if rol == 'cliente':
+        return redirect(url_for('catalogo_cliente'))
+    if rol == 'administrador':
+        return redirect(url_for('admin_dashboard'))
+    if rol == 'vendedor':
+        for clave, endpoint in ORDEN_INICIO_VENDEDOR:
+            if clave in _permisos_staff():
+                return redirect(url_for(endpoint))
+    return render_template('sin_permisos.html')
+
+
+# Peticiones del personal que NO necesitan g.permisos: estáticos,
+# login/logout y TODAS las de clientes (catálogo, carrito, pedidos
+# propios, registro/OTP, recuperación, privacidad...): sin consulta a
+# la BD Auth ni chequeo de cuenta en esas rutas.
+_RUTAS_SIN_PERMISOS = (
+    '/static/', '/login', '/logout',
+    '/login_cliente', '/registro_cliente', '/verificar_registro',
+    '/recuperar_contrasena', '/restablecer_contrasena', '/privacidad',
+    '/catalogo', '/carrito', '/mis_pedidos', '/mis_comprobantes',
+    '/mi_comprobante', '/pedido_aceptado', '/pago/simulado',
+    '/webhooks/pago',
+)
+
+
+@app.before_request
+def _cargar_permisos_personal():
+    """Solo personal: UNA consulta por petición (activo + permisos).
+
+    Si la cuenta sigue activa carga g.permisos (administrador: todos;
+    vendedor: los de usuario_permiso). Si fue DESACTIVADA o eliminada:
+    session.clear(), flash y a /login. Si la tabla aún no existe
+    (migración auth_03 sin aplicar) se registra el error y se usan los
+    permisos POR_DEFECTO_VENDEDOR, sin bloquear la petición.
+    """
+    rol = session.get('rol')
+    if rol not in ('administrador', 'vendedor'):
+        return None
+    if 'usuario_id' not in session:
+        return None
+    if any(request.path.startswith(p) for p in _RUTAS_SIN_PERMISOS):
+        return None
+    conn = None
+    try:
+        conn   = get_connection_auth()
+        cursor = conn.cursor(dictionary=True)
+        # Una sola consulta: activo del usuario + todos sus permisos en
+        # filas (LEFT JOIN: un usuario sin permisos sigue respondiendo).
+        cursor.execute("""
+            SELECT u.activo AS activo, p.permiso AS permiso
+              FROM usuario u
+         LEFT JOIN usuario_permiso p ON p.id_usuario = u.id_usuario
+             WHERE u.id_usuario = %s
+        """, (session['usuario_id'],))
+        filas = cursor.fetchall()
+        if not filas:
+            # La cuenta ya no existe en la BD Auth: igual de grave.
+            session.clear()
+            flash('Tu cuenta ya no está disponible. Contacta al administrador.', 'danger')
+            return redirect(url_for('login'))
+        if not filas[0]['activo']:
+            session.clear()
+            flash('Tu cuenta fue desactivada. Contacta al administrador.', 'danger')
+            return redirect(url_for('login'))
+        if rol == 'administrador':
+            g.permisos = set(permisos.CATALOGO)
+        else:
+            g.permisos = {f['permiso'] for f in filas if f['permiso']}
+    except _pg_errores.UndefinedTable:
+        # Migración AUTH-03 sin aplicar: no bloquear al personal.
+        app.logger.error(
+            'Tabla usuario_permiso inexistente (auth_03_permisos.sql sin '
+            'aplicar): se usan los permisos por defecto del vendedor.')
+        g.permisos = set(permisos.POR_DEFECTO_VENDEDOR)
+    except Exception:
+        app.logger.exception('No se pudieron cargar los permisos del '
+                             'personal; se usan los por defecto.')
+        g.permisos = set(permisos.POR_DEFECTO_VENDEDOR)
+    finally:
+        if conn is not None:
+            conn.close()
+    return None
 
 
 # ── Auth ─────────────────────────────────────────────────────
@@ -493,7 +635,7 @@ def login():
         session['usuario_id'] = usuario['id_usuario']
         session['rol']        = usuario['rol']
         session['nombre']     = usuario['nombres']
-        return redirect(url_for('productos'))
+        return redirect(url_for('inicio_personal'))
     # Botón WhatsApp para recuperar credenciales (personal administrativo)
     msg_admin = quote(
         "Hola Soporte de Inversiones CLEOFERR, soy del personal ADMINISTRATIVO "
@@ -574,6 +716,7 @@ def logout():
 
 @app.route('/productos')
 @login_required
+@permiso_required('productos')
 def productos():
     if session.get('rol') == 'cliente':
         return redirect(url_for('catalogo_cliente'))
@@ -663,7 +806,7 @@ def productos():
 
 @app.route('/productos/detalle/<int:id>')
 @login_required
-@escritura_required
+@permiso_required('productos')
 def producto_detalle(id):
     producto = db.get_or_404(Producto, id)
     conn   = get_connection_tienda()
@@ -698,7 +841,7 @@ def producto_detalle(id):
 
 @app.route('/reportes/pedidos/exportar')
 @login_required
-@escritura_required
+@permiso_required('reportes')
 def exportar_pedidos_excel():
     """Exporta todos los pedidos a un archivo Excel."""
     try:
@@ -858,7 +1001,7 @@ def _excel_response(rows, filename, sheet_name='Datos'):
 
 @app.route('/reportes/productos/exportar')
 @login_required
-@escritura_required
+@permiso_required('reportes')
 def exportar_productos_excel():
     conn = get_connection_tienda(); cursor = conn.cursor(dictionary=True)
     try:
@@ -880,7 +1023,7 @@ def exportar_productos_excel():
 
 @app.route('/reportes/clientes/exportar')
 @login_required
-@escritura_required
+@permiso_required('reportes')
 def exportar_clientes_excel():
     conn = get_connection_auth(); cursor = conn.cursor(dictionary=True)
     try:
@@ -899,7 +1042,7 @@ def exportar_clientes_excel():
 
 @app.route('/reportes/proveedores/exportar')
 @login_required
-@escritura_required
+@permiso_required('reportes')
 def exportar_proveedores_excel():
     conn = get_connection_tienda(); cursor = conn.cursor(dictionary=True)
     try:
@@ -918,7 +1061,7 @@ def exportar_proveedores_excel():
 
 @app.route('/reportes/inventario/exportar')
 @login_required
-@escritura_required
+@permiso_required('reportes')
 def exportar_inventario_excel():
     conn = get_connection_tienda(); cursor = conn.cursor(dictionary=True)
     try:
@@ -968,7 +1111,7 @@ def exportar_inventario_excel():
 
 @app.route('/reportes/dia/exportar')
 @login_required
-@escritura_required
+@permiso_required('reportes')
 def exportar_ventas_dia_excel():
     conn = get_connection_tienda(); cursor = conn.cursor(dictionary=True)
     try:
@@ -1013,7 +1156,7 @@ def exportar_ventas_dia_excel():
 
 @app.route('/reportes/exportar')
 @login_required
-@escritura_required
+@permiso_required('reportes')
 def exportar_reportes_excel():
     return exportar_ventas_dia_excel()
 
@@ -1021,7 +1164,7 @@ def exportar_reportes_excel():
 
 @app.route('/productos/nuevo')
 @login_required
-@escritura_required
+@permiso_required('productos')
 def nuevo_producto():
     conn   = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
@@ -1105,7 +1248,7 @@ def _validar_producto(cursor):
 
 @app.route('/productos/guardar', methods=['POST'])
 @login_required
-@escritura_required
+@permiso_required('productos')
 def guardar_producto():
     conn = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
@@ -1139,7 +1282,7 @@ def guardar_producto():
 
 @app.route('/productos/editar/<int:id>')
 @login_required
-@escritura_required
+@permiso_required('productos')
 def editar_producto(id):
     producto = db.get_or_404(Producto, id)
     conn   = get_connection_tienda()
@@ -1154,7 +1297,7 @@ def editar_producto(id):
 
 @app.route('/productos/actualizar/<int:id>', methods=['POST'])
 @login_required
-@escritura_required
+@permiso_required('productos')
 def actualizar_producto(id):
     conn = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
@@ -1209,7 +1352,7 @@ def actualizar_producto(id):
 # historial; la eliminación física sigue bloqueada por historial.
 @app.route('/productos/desactivar/<int:id>', methods=['POST'])
 @login_required
-@escritura_required
+@permiso_required('productos')
 def desactivar_producto(id):
     conn = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
@@ -1292,7 +1435,7 @@ def catalogo_cliente():
 # ── Gestión de Clientes ───────────────────────────────────────
 @app.route('/clientes')
 @login_required
-@escritura_required
+@permiso_required('clientes')
 def clientes():
     conn   = get_connection_auth()
     cursor = conn.cursor(dictionary=True)
@@ -1317,7 +1460,7 @@ def clientes():
 
 @app.route('/clientes/nuevo', methods=['GET', 'POST'])
 @login_required
-@escritura_required
+@permiso_required('clientes')
 def nuevo_cliente():
     if request.method == 'POST':
         # FASE 2: validación de servidor con el módulo común — nombre de
@@ -1389,7 +1532,7 @@ def nuevo_cliente():
 
 @app.route('/clientes/editar/<int:id>', methods=['GET', 'POST'])
 @login_required
-@escritura_required
+@permiso_required('clientes')
 def editar_cliente(id):
     conn   = get_connection_auth()
     cursor = conn.cursor(dictionary=True)
@@ -1535,7 +1678,7 @@ def eliminar_cliente(id):
 #  frontend, nunca con token expuesto.)
 @app.route('/clientes/registrar_pos', methods=['POST'])
 @login_required
-@escritura_required
+@permiso_required('ventas')
 def registrar_pos():
     data = request.get_json(silent=True) or {}
     tipo = (data.get('tipo') or 'boleta').strip().lower()
@@ -1627,7 +1770,7 @@ def registrar_pos():
 # ── Inventario ────────────────────────────────────────────────
 @app.route('/inventario')
 @login_required
-@escritura_required
+@permiso_required('inventario')
 def inventario():
     # Consulta 1 (Tienda): movimientos + producto + proveedor
     conn   = get_connection_tienda()
@@ -1683,7 +1826,7 @@ def inventario():
 
 @app.route('/inventario/registrar', methods=['POST'])
 @login_required
-@escritura_required
+@permiso_required('inventario')
 def registrar_movimiento():
     # FASE 2: validación de servidor con el módulo común — nada de 500
     # por entradas malformadas ni flashes con texto crudo de la BD.
@@ -1788,7 +1931,7 @@ def registrar_movimiento():
 # ── Proveedores ───────────────────────────────────────────────
 @app.route('/proveedores')
 @login_required
-@escritura_required
+@permiso_required('proveedores')
 def proveedores():
     conn   = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
@@ -1808,7 +1951,7 @@ def proveedores():
 
 @app.route('/proveedores/nuevo', methods=['GET', 'POST'])
 @login_required
-@escritura_required
+@permiso_required('proveedores')
 def nuevo_proveedor():
     if request.method == 'POST':
         # FASE 2: razón social (admite dígitos: 'Ferretería Los 2 Amigos'),
@@ -1887,7 +2030,7 @@ def nuevo_proveedor():
 
 @app.route('/proveedores/editar/<int:id>', methods=['GET', 'POST'])
 @login_required
-@escritura_required
+@permiso_required('proveedores')
 def editar_proveedor(id):
     conn   = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
@@ -2013,7 +2156,7 @@ def _filtros_sin_pagina():
 # ── Pedidos ─────────────────────────────────────────────────
 @app.route('/pedidos')
 @login_required
-@escritura_required
+@permiso_required('pedidos')
 def pedidos():
     conn = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
@@ -2158,7 +2301,7 @@ def pedidos():
 
 @app.route('/ventas/nueva', methods=['GET'])
 @login_required
-@escritura_required
+@permiso_required('ventas')
 def venta_nueva_form():
     clientes  = []
     productos = []
@@ -2195,7 +2338,7 @@ def venta_nueva_form():
 
 @app.route('/ventas/nueva', methods=['POST'])
 @login_required
-@escritura_required
+@permiso_required('ventas')
 def venta_nueva_guardar():
     # Protección anti doble cobro: el token se genera en cada GET y se consume
     # con la primera venta. Si se re-envía el mismo formulario (doble clic,
@@ -2372,7 +2515,7 @@ UMBRAL_DIFERENCIA_CAJA = 20.0
 
 @app.route('/caja')
 @login_required
-@escritura_required
+@permiso_required('ventas')
 def caja():
     """Panel de caja: estado actual, movimientos del turno, resumen por método
     de pago e historial de cierres.
@@ -2493,7 +2636,7 @@ def caja():
 
 @app.route('/caja/abrir', methods=['POST'])
 @login_required
-@escritura_required
+@permiso_required('ventas')
 def caja_abrir():
     """Abre una caja con un monto inicial (solo puede haber UNA abierta)."""
     try:
@@ -2539,7 +2682,7 @@ def caja_abrir():
 
 @app.route('/caja/egreso', methods=['POST'])
 @login_required
-@escritura_required
+@permiso_required('ventas')
 def caja_egreso():
     """Registra un EGRESO (gasto/salida de efectivo) de la caja abierta.
     Descuenta del efectivo esperado del cierre. (Integrado desde origin/Lesly.)"""
@@ -2581,7 +2724,7 @@ def caja_egreso():
 
 @app.route('/caja/cerrar', methods=['POST'])
 @login_required
-@escritura_required
+@permiso_required('ventas')
 def caja_cerrar():
     """Cierra la caja abierta: calcula el EFECTIVO esperado
     (fondo + ventas en efectivo − egresos) y registra la diferencia.
@@ -2680,7 +2823,7 @@ def caja_cerrar():
 
 @app.route('/pedidos/detalle/<int:id>')
 @login_required
-@escritura_required
+@permiso_required('pedidos')
 def pedido_detalle(id):
     conn   = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
@@ -2766,7 +2909,7 @@ def pedido_detalle(id):
 
 @app.route('/ventas/<int:id_venta>/comprobante')
 @login_required
-@escritura_required   # mismo control que ventas/caja: solo administrador y vendedor
+@permiso_required('ventas')   # vendedor necesita el permiso 'ventas'
 def comprobante_venta(id_venta):
     """Muestra el comprobante (boleta/factura SIMULADA) de una venta.
 
@@ -2990,7 +3133,7 @@ SQL_MOVIMIENTOS_30DIAS = """
 
 @app.route('/reportes')
 @login_required
-@escritura_required
+@permiso_required('reportes')
 def reportes():
     conn = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
@@ -3119,7 +3262,7 @@ def reportes():
 # ── Alertas ─────────────────────────────────────────────────
 @app.route('/alertas')
 @login_required
-@escritura_required
+@permiso_required('alertas')
 def alertas():
     conn = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
@@ -3216,7 +3359,7 @@ def alertas():
 
 @app.route('/alertas/resolver/<int:id>', methods=['POST'])
 @login_required
-@escritura_required
+@permiso_required('alertas')
 def alertas_resolver(id):
     conn = get_connection_tienda()
     cursor = conn.cursor()
@@ -3341,7 +3484,7 @@ def _precio_fijo_invalido(prod, datos):
 
 @app.route('/admin/ofertas')
 @login_required
-@escritura_required
+@permiso_required('ofertas')
 def admin_ofertas():
     """Listado de ofertas con estado: vigente / futura / vencida / inactiva."""
     conn = get_connection_tienda()
@@ -3381,7 +3524,7 @@ def admin_ofertas():
 
 @app.route('/admin/ofertas/nueva', methods=['POST'])
 @login_required
-@escritura_required
+@permiso_required('ofertas')
 def admin_ofertas_nueva():
     datos, error = _validar_form_oferta()
     if error:
@@ -3421,7 +3564,7 @@ def admin_ofertas_nueva():
 
 @app.route('/admin/ofertas/editar/<int:id>', methods=['POST'])
 @login_required
-@escritura_required
+@permiso_required('ofertas')
 def admin_ofertas_editar(id):
     datos, error = _validar_form_oferta()
     if error:
@@ -3512,14 +3655,14 @@ def _toggle_oferta(id, activa):
 
 @app.route('/admin/ofertas/activar/<int:id>', methods=['POST'])
 @login_required
-@escritura_required
+@permiso_required('ofertas')
 def admin_ofertas_activar(id):
     return _toggle_oferta(id, True)
 
 
 @app.route('/admin/ofertas/desactivar/<int:id>', methods=['POST'])
 @login_required
-@escritura_required
+@permiso_required('ofertas')
 def admin_ofertas_desactivar(id):
     return _toggle_oferta(id, False)
 
@@ -3632,7 +3775,7 @@ def cambiar_clave():
     if rol not in ('cliente', 'administrador', 'vendedor'):
         abort(403)
     es_cliente = rol == 'cliente'
-    destino = 'perfil' if es_cliente else 'productos'
+    destino = 'perfil' if es_cliente else 'inicio_personal'
     if request.method == 'POST':
         actual    = request.form.get('actual', '')
         nueva     = request.form.get('nueva', '')
@@ -4397,7 +4540,7 @@ TRANSICIONES_PEDIDO = {
 
 @app.route('/pedidos/<int:id>/estado', methods=['POST'])
 @login_required
-@escritura_required
+@permiso_required('pedidos')
 def pedido_cambiar_estado(id):
     """Vendedor/Admin cambia el estado (fase) de un pedido.
 

@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sin permisos – Cleoferr</title>
+  <style>
+    /* Página de emergencia del personal sin módulos: autosuficiente,
+       sin dependencias de CDN porque no están garantizadas aquí. */
+    body { font-family: system-ui, Arial, sans-serif; background: #f6f7fb;
+           display: flex; align-items: center; justify-content: center;
+           min-height: 100vh; margin: 0; }
+    .tarjeta { background: #fff; border-radius: 12px;
+               box-shadow: 0 8px 30px rgba(0,0,0,.12);
+               max-width: 420px; padding: 40px 32px; text-align: center; }
+    .tarjeta h1 { font-size: 1.3rem; color: #1a1a2e; margin: 0 0 8px; }
+    .tarjeta p { color: #666; font-size: .95rem; margin: 0 0 24px; }
+    .salir { display: inline-block; background: #1a1a2e; color: #fff;
+             padding: 10px 22px; border-radius: 8px;
+             text-decoration: none; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <div class="tarjeta">
+    <h1>Sin permisos asignados</h1>
+    <p>Tu cuenta no tiene módulos habilitados en el sistema.
+       Contacta al administrador para que te asigne los tuyos.</p>
+    <a class="salir" href="/logout">Cerrar sesión</a>
+  </div>
+</body>
+</html>
