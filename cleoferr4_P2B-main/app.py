@@ -5,6 +5,9 @@ import secrets
 import hmac
 import hashlib
 import json
+import logging
+import re
+import traceback
 # A�'ADIR despuǸs de: import uuid
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -96,6 +99,49 @@ app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024   # 5 MB máximo
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 
+# ── Privacidad en logs ─────────────────────────────────────────
+# Los logs NUNCA llevan datos personales (correos, DNI, RUC, teléfonos
+# ni nombres): solo identificadores. _sin_pii y la fábrica de registros
+# son la última barrera: enmascaran lo que pueda colarse en el texto de
+# una excepción (psycopg2 repite el dato que violó una restricción).
+_RE_CORREO = re.compile(r'[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}')
+_RE_NUMERO = re.compile(r'\b\d{6,}\b')
+
+
+def _sin_pii(valor):
+    """Enmascara correos y números de documento/teléfono de un texto."""
+    texto = str(valor)
+    texto = _RE_CORREO.sub('[correo]', texto)
+    return _RE_NUMERO.sub('[documento]', texto)
+
+
+def _enmascarar_registro(record):
+    """Deja el registro sin datos personales (mensaje, argumentos y traceback)."""
+    if isinstance(record.msg, str):
+        record.msg = _sin_pii(record.msg)
+    if isinstance(record.args, tuple):
+        record.args = tuple(_sin_pii(a) if isinstance(a, (str, BaseException)) else a
+                            for a in record.args)
+    elif isinstance(record.args, dict):
+        record.args = {k: (_sin_pii(v) if isinstance(v, (str, BaseException)) else v)
+                       for k, v in record.args.items()}
+    if record.exc_info and not record.exc_text:
+        record.exc_text = _sin_pii(
+            ''.join(traceback.format_exception(*record.exc_info)))
+    return record
+
+
+_FACTORIA_ORIGINAL = logging.getLogRecordFactory()
+
+
+def _fabrica_sin_pii(*args, **kwargs):
+    """Fábrica global de registros: ningún logger puede saltarse el filtro."""
+    return _enmascarar_registro(_FACTORIA_ORIGINAL(*args, **kwargs))
+
+
+logging.setLogRecordFactory(_fabrica_sin_pii)
+
+
 # ── Cabeceras de seguridad en TODAS las respuestas ──────────────
 # Sin Content-Security-Policy a propósito: rompería los scripts en
 # línea y las CDN del frontend (decisión del alcance del proyecto).
@@ -180,18 +226,21 @@ def enviar_correo(destino, asunto, cuerpo_html, cuerpo_texto=None):
                 server.ehlo()
             server.login(smtp_user, smtp_pass)
             server.sendmail(smtp_user, [destino], msg.as_string())
-            app.logger.info(f"Correo enviado a {destino} por {modo}:{puerto} ({asunto})")
+            # Ni el destinatario ni el asunto (que puede traer el código OTP)
+            app.logger.info("Correo enviado por %s:%s (sin datos del destinatario)",
+                            modo, puerto)
             return None
         except smtplib.SMTPAuthenticationError as e:
             app.logger.error(
                 "Gmail rechazo las credenciales SMTP. Revisa que SMTP_USER sea la "
                 "cuenta completa y que SMTP_PASS sea una contrasena de APLICACION "
-                f"(16 caracteres) con verificacion en 2 pasos activa. Detalle: {e}"
-            )
+                "(16 caracteres) con verificacion en 2 pasos activa. Detalle: %s",
+                _sin_pii(e))
             return 'smtp_auth'
         except Exception as e:
             ultimo_error = e
-            app.logger.warning(f"Fallo envio por {modo}:{puerto} -> {e}")
+            app.logger.warning("Fallo envio por %s:%s -> %s",
+                               modo, puerto, _sin_pii(e))
         finally:
             if server is not None:
                 try:
@@ -199,7 +248,8 @@ def enviar_correo(destino, asunto, cuerpo_html, cuerpo_texto=None):
                 except Exception:
                     pass
 
-    app.logger.error(f"No se pudo enviar el correo a {destino}. Ultimo error: {ultimo_error}")
+    app.logger.error("No se pudo enviar el correo por SMTP. Ultimo error: %s",
+                     _sin_pii(ultimo_error))
     return 'smtp_conexion'
 
 
@@ -2311,7 +2361,7 @@ def pedidos():
                 ped['url_whatsapp_pedido'] = None
             pedidos.append(ped)
     except Exception as e:
-        print(f"ERROR en /pedidos: {e}")
+        app.logger.exception("Error en /pedidos: %s", _sin_pii(e))
         pedidos = []
     finally:
         conn.close()
@@ -3995,6 +4045,7 @@ def registro_cliente():
     hash_pw     = bcrypt.generate_password_hash(contrasena).decode('utf-8')
     codigo_hash = bcrypt.generate_password_hash(codigo).decode('utf-8')
 
+    id_cliente = None
     conn   = get_connection_auth()
     cursor = conn.cursor(dictionary=True)
     try:
@@ -4044,11 +4095,12 @@ def registro_cliente():
 
             if cuenta_usable:
                 # Bloqueo legitimo: ya hay una cuenta verificada y con clave.
-                # Se registra el id en el log para poder ubicarla en la BD.
+                # Se registra el id en el log para poder ubicarla en la BD:
+                # NUNCA el correo (regla de no datos personales en logs).
                 app.logger.warning(
-                    "Registro bloqueado: el correo %s ya existe como id_cliente=%s "
+                    "Registro bloqueado: la cuenta ya existe como id_cliente=%s "
                     "en la BD Auth (proyecto DATABASE_URI_AUTH).",
-                    correo, existente['id_cliente']
+                    existente['id_cliente']
                 )
                 return render_template(
                     'login_cliente.html',
@@ -4116,7 +4168,7 @@ def registro_cliente():
         conn.commit()
     except Exception as e:
         conn.rollback()
-        app.logger.exception("Error en registro_cliente")
+        app.logger.exception("Error en registro_cliente (id_cliente=%s)", id_cliente)
         return _login_cliente(
                                error='No se pudo iniciar el registro. Intenta de nuevo.',
                                registro_activo=True)
@@ -4177,6 +4229,7 @@ def verificar_registro():
                                error='Sesion expirada. Por favor registrate de nuevo.',
                                registro_activo=True)
 
+    id_cliente = None
     conn   = get_connection_auth()
     cursor = conn.cursor(dictionary=True)
     try:
@@ -4251,7 +4304,7 @@ def verificar_registro():
                                success='Cuenta creada y verificada. Ya puedes iniciar sesion.')
     except Exception as e:
         conn.rollback()
-        app.logger.exception(f"Error en verificar_registro ({correo}): {e}")
+        app.logger.exception("Error en verificar_registro (id_cliente=%s)", id_cliente)
         return _login_cliente(
                                error='Error al verificar el codigo. Intenta de nuevo.',
                                registro_activo=True)
@@ -4285,6 +4338,7 @@ def recuperar_contrasena():
         return render_template('recuperar_contrasena.html',
                                error='Ingresa tu correo electrónico.')
 
+    id_usuario = id_cliente = None
     conn   = get_connection_auth()
     cursor = conn.cursor(dictionary=True)
     try:
@@ -4316,7 +4370,8 @@ def recuperar_contrasena():
         conn.commit()
     except Exception as e:
         conn.rollback()
-        app.logger.error(f"Error en recuperar_contrasena: {e}")
+        app.logger.exception("Error en recuperar_contrasena (id_usuario=%s, id_cliente=%s)",
+                             id_usuario, id_cliente)
         return render_template('recuperar_contrasena.html',
                                error='No se pudo procesar la solicitud. Intenta de nuevo.')
     finally:
@@ -4370,6 +4425,7 @@ def restablecer_contrasena():
     if len(nueva) < 6:
         return _reenviar_con_error('La contraseña debe tener al menos 6 caracteres.')
 
+    id_usuario = id_cliente = None
     conn   = get_connection_auth()
     cursor = conn.cursor(dictionary=True)
     try:
@@ -4446,7 +4502,8 @@ def restablecer_contrasena():
                                success='Contraseña actualizada. Inicia sesión con tu nueva clave.')
     except Exception as e:
         conn.rollback()
-        app.logger.error(f"Error en restablecer_contrasena: {e}")
+        app.logger.exception("Error en restablecer_contrasena (id_usuario=%s, id_cliente=%s)",
+                             id_usuario, id_cliente)
         return _reenviar_con_error('Error al actualizar la contraseña. Intenta de nuevo.')
     finally:
         conn.close()
