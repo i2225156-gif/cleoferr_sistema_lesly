@@ -4522,27 +4522,43 @@ def mis_pedidos():
 @app.route('/pedido_aceptado')
 @login_required
 def pedido_aceptado():
-    """Página de confirmación con fases del pedido para el cliente."""
-    if session.get('rol') != 'cliente':
-        return redirect(url_for('pedidos'))
-    id_pedido = request.args.get('id', '')
+    """Confirmación del pedido: el cliente solo ve SUS ventas.
+
+    Una venta ajena responde EXACTAMENTE igual que una inexistente (404),
+    sin revelar si el id existe. El staff (administrador o vendedor)
+    conserva el acceso a cualquier venta.
+    """
+    id_pedido = (request.args.get('id') or '').strip()
     estado    = 'pendiente'
     if id_pedido:
-        conn   = get_connection_tienda()
-        cursor = conn.cursor(dictionary=True)
         try:
-            cursor.execute("""
+            id_venta = int(id_pedido)
+        except (TypeError, ValueError):
+            abort(404)
+        if not 0 < id_venta <= 9223372036854775807:
+            abort(404)
+        sql = """
             SELECT ev.nombre AS estado FROM venta v
             LEFT JOIN estado_venta ev ON v.id_estado_venta = ev.id_estado_venta
             WHERE v.id_venta = %s
-        """, (id_pedido,))
+        """
+        params = [id_venta]
+        if session.get('rol') not in ('administrador', 'vendedor'):
+            sql += " AND v.id_cliente = %s"
+            params.append(session.get('usuario_id'))
+        row = None
+        conn   = get_connection_tienda()
+        cursor = conn.cursor(dictionary=True)
+        try:
+            cursor.execute(sql, tuple(params))
             row = cursor.fetchone()
-            if row:
-                estado = row.get('estado', 'pendiente')
         except Exception:
             app.logger.exception("Error consultando estado del pedido id=%s", id_pedido)
         finally:
             conn.close()
+        if not row:
+            abort(404)
+        estado = row.get('estado') or 'pendiente'
     return render_template('pedido_aceptado.html', id_pedido=id_pedido, estado=estado)
 
 
