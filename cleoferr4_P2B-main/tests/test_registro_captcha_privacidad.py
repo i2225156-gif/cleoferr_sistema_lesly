@@ -324,3 +324,70 @@ def test_privacidad_es_publica_y_completa():
     assert 'ARCO' in html
     assert '[correo de contacto]' in html
     assert 'Versión 1.0' in html or 'versión 1.0' in html
+
+
+# ── error «correo ya existe»: enlaces reales, no HTML escapado ──
+
+def _post_correo_existente(fx):
+    """Fila existente ACTIVA con clave: registro_cliente debe rechazar y
+    renderizar la pestaña de registro con el aviso."""
+    fx['conn'].cur.respuestas = _respuestas_bd(
+        existente={'id_cliente': 77, 'activo': True, 'contrasena': 'hash'})
+    return _post(fx, _datos_registro(
+        captcha_respuesta=_resolver_captcha(fx['c'])))
+
+
+def test_error_correo_existente_muestra_enlace_recuperar(fx):
+    html = _post_correo_existente(fx)
+    assert 'Este correo ya tiene una cuenta activa' in html
+    assert 'href="/recuperar_contrasena"' in html
+    assert '¿Olvidaste tu contraseña?' in html
+
+
+def test_error_correo_existente_no_muestra_html_escapado(fx):
+    html = _post_correo_existente(fx)
+    assert '&lt;a' not in html
+    assert '&lt;/a' not in html
+
+
+def test_error_correo_existente_enlaza_a_pestana_login_no_a_login(fx):
+    html = _post_correo_existente(fx)
+    assert 'href="#tab-login"' in html
+    assert "cambiarTab('login')" in html
+    assert 'href="/login"' not in html
+
+
+# ── pestaña «Iniciar Sesión»: enlace de contraseña y autocomplete ─
+
+def _inputs(html, name):
+    patron = r'<input[^>]*name="%s"[^>]*>' % re.escape(name)
+    return re.findall(patron, html, re.S)
+
+
+def test_frase_olvidaste_contrasena_en_pestana_login(fx):
+    html = fx['c'].get('/login_cliente').get_data(as_text=True)
+    bloque = html[html.index('id="tab-login"'):html.index('id="tab-registro"')]
+    assert '¿Olvidaste tu contraseña?' in bloque
+    assert bloque.index('¿Olvidaste tu contraseña?') < \
+        bloque.index('Ingresar al Catálogo')
+
+
+def test_autocomplete_documento_apagado(fx):
+    html = fx['c'].get('/login_cliente').get_data(as_text=True)
+    documentos = _inputs(html, 'nro_documento')
+    assert len(documentos) == 1
+    assert 'autocomplete="off"' in documentos[0]
+
+
+def test_autocomplete_tokens_correctos(fx):
+    html = fx['c'].get('/login_cliente').get_data(as_text=True)
+    assert all('autocomplete="email"' in i for i in _inputs(html, 'correo'))
+    assert 'autocomplete="given-name"' in _inputs(html, 'nombre')[0]
+    assert 'autocomplete="family-name"' in _inputs(html, 'apellido')[0]
+    assert 'autocomplete="tel"' in _inputs(html, 'telefono')[0]
+    assert 'autocomplete="street-address"' in _inputs(html, 'direccion')[0]
+    contrasenas = _inputs(html, 'contrasena')
+    assert any('autocomplete="current-password"' in i for i in contrasenas)
+    assert any('autocomplete="new-password"' in i for i in contrasenas)
+    assert 'autocomplete="new-password"' in _inputs(html, 'confirmar')[0]
+

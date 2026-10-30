@@ -4052,8 +4052,9 @@ def registro_cliente():
                 )
                 return render_template(
                     'login_cliente.html',
-                    error=('Este correo ya tiene una cuenta activa. Inicia sesion o usa '
-                           '"Olvide mi contrasena".'),
+                    error=('Este correo ya tiene una cuenta activa. Inicia sesión '
+                           'o recupera tu contraseña.'),
+                    error_tipo='correo_existente',
                     registro_activo=True)
 
             # Cuenta pendiente de verificar, o creada por el area administrativa
