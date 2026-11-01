@@ -53,6 +53,16 @@ def fx(monkeypatch):
         RETURNING id_usuario
     """, (f"vend-pos-{suf}@invalido",))
     id_vendedor = cur_a.fetchone()['id_usuario']
+    # Permiso por módulo: el POS exige 'ventas'. La plantilla del rol
+    # vendedor ya está sembrada en la BD Auth, así que sin fila propia el
+    # before_request deja al vendedor SIN permisos; se le asigna la fila
+    # dentro de la transacción (rollback al final, nada persiste).
+    cur_a.execute("""
+        INSERT INTO usuario_permiso (id_usuario, id_permiso, fecha_asignacion)
+        SELECT %s, p.id_permiso, NOW()
+          FROM permiso p
+         WHERE p.nombre = 'ventas' AND p.activo = TRUE
+    """, (id_vendedor,))
     cur_a.execute("""
         INSERT INTO cliente (nombre, apellido, email, telefono, direccion,
                              contrasena, activo, id_tipo_documento, nro_documento)

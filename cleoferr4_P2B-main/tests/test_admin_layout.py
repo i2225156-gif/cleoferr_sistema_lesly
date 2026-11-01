@@ -5,8 +5,11 @@ admin_pagos_simulados/admin_reservas (C2c, rutas solo admin),
 clientes/cliente_form/proveedores/proveedor_form/reportes (C2d) y
 caja/venta_form (C2e: POS con sidebar_colapsado, caja con sidebar fijo).
 
-Contra la BD real con conexión proxied (rollback): nada persiste. Por
-plantilla migrada verifica: 200 para admin y vendedor (donde el rol lo
+Contra la BD real con conexión proxied (rollback): nada persiste. Los
+permisos por módulo del vendedor se inyectan con un doble de la conexión
+AUTH (patrón de tests/test_permisos.py), no se leen de la BD Auth: el
+vendedor de prueba tiene los módulos que cada pantalla exige.
+Por plantilla migrada verifica: 200 para admin y vendedor (donde el rol lo
 permite), sidebar presente, ítem activo correcto, ítems solo-admin
 ocultos al vendedor (el permiso real se valida en el backend), navbar
 viejo ausente en admin y presente en páginas no-admin, y lo restaurado
@@ -42,6 +45,67 @@ class ConnProxy:
         pass
 
 
+class ConnPermisos:
+    """Doble de la conexión AUTH (patrón de tests/test_permisos.py).
+
+    La consulta de permisos del before_request se sirve con filas
+    inyectadas (los módulos del vendedor de prueba: determinista, sin
+    leer la BD Auth); cualquier otra consulta de esa BD (clientes,
+    usuarios) se delega a la conexión real.
+    """
+
+    def __init__(self, claves, real):
+        self.claves = list(claves)
+        self.real = real
+        self.filas = []
+        self.cur_real = None
+
+    def cursor(self, dictionary=False, **kwargs):
+        self.cur_real = (self.real.cursor(dictionary=dictionary, **kwargs)
+                         if self.real is not None else None)
+        return self
+
+    def execute(self, sql, params=None):
+        if 'usuario_permiso' in sql:
+            self.cur_real = None
+            if self.claves:
+                self.filas = [{'activo': True, 'permiso': c,
+                               'plantilla_sembrada': True}
+                              for c in self.claves]
+            else:
+                # plantilla sembrada y cero módulos: una fila con NULL
+                self.filas = [{'activo': True, 'permiso': None,
+                               'plantilla_sembrada': True}]
+        elif self.cur_real is not None:
+            self.cur_real.execute(sql, params)
+
+    def fetchall(self):
+        if self.cur_real is not None:
+            return self.cur_real.fetchall()
+        return self.filas
+
+    def fetchone(self):
+        if self.cur_real is not None:
+            return self.cur_real.fetchone()
+        return self.filas[0] if self.filas else None
+
+    def commit(self):
+        pass
+
+    def rollback(self):
+        pass
+
+    def close(self):
+        pass
+
+
+# Módulos que el vendedor de prueba tiene: los que exigen las pantallas
+# que este archivo visita (el backend los valida uno a uno).
+PERMISOS_VENDEDOR_PRUEBA = ('ventas', 'pedidos', 'clientes', 'alertas',
+                            'productos', 'ofertas', 'proveedores',
+                            'inventario', 'reportes')
+
+
 def _sesion(rol, uid):
     c = app.test_client()
     with c.session_transaction() as s:
@@ -73,8 +137,13 @@ def fx(monkeypatch):
         "INSERT INTO detalle_venta (id_venta, id_producto, cantidad, precio_unitario)"
         " VALUES (%s, %s, 1, 5.00)", (id_venta, id_producto))
     monkeypatch.setattr(modulo_app, 'get_connection_tienda', lambda: proxy)
+    conn_a = db_supabase.get_connection_auth()
+    monkeypatch.setattr(
+        modulo_app, 'get_connection_auth',
+        lambda: ConnPermisos(PERMISOS_VENDEDOR_PRUEBA, conn_a))
     yield {'cur': cur, 'proxy': proxy, 'id_venta': id_venta,
            'admin': _sesion('administrador', 7), 'vendedor': _sesion('vendedor', 8)}
+    conn_a.close()
     proxy.rollback()
     raw.close()
 
@@ -345,6 +414,21 @@ def test_reportes_vendedor_sin_items_solo_admin(fx):
     assert '/admin/dashboard' not in html
     assert '/admin/pagos_simulados' not in html
     assert '/admin/reservas' not in html
+
+
+# ── Permisos por módulo: el vendedor SIN el módulo no entra ─────────
+
+def test_vendedor_sin_el_modulo_no_entra_a_la_pantalla(fx, monkeypatch):
+    """El permiso se sigue validando en el backend: un vendedor SIN el
+    módulo es rechazado (flash + /inicio_personal), no entra a la vista."""
+    monkeypatch.setattr(
+        modulo_app, 'get_connection_auth',
+        lambda: ConnPermisos(('ventas', 'pedidos'), None))
+    r = fx['vendedor'].get('/productos')
+    assert r.status_code == 302
+    assert r.headers['Location'].endswith('/inicio_personal')
+    with fx['vendedor'].session_transaction() as s:
+        assert 'permisos' in str(s.get('_flashes'))
 
 
 # ── C2e: POS (venta_form) con sidebar colapsado; caja y resto fijos ─

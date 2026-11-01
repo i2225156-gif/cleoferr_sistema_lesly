@@ -1,6 +1,9 @@
 """Fase 2.3 (pieza 6): reportes y KPIs con importe NETO (dcto congelado).
 
 Contra la BD real dentro de transacciones con rollback: nada persiste.
+Los permisos por módulo del vendedor se inyectan con un doble de la
+conexión AUTH (patrón de tests/test_permisos.py), no se leen de la BD
+Auth: el vendedor de prueba tiene los módulos que exigen las pantallas.
 Fixture central: venta sintética de 3 × S/ 9.99 con dcto congelado 1.50
 (neto 25.47 == pago.monto confirmado). Un test por sitio verifica que
 lo mostrado/cobrado es el NETO. No toca SQL_MOVIMIENTOS_30DIAS (valora
@@ -40,6 +43,64 @@ class ConnProxy:
 
     def close(self):
         pass
+
+
+class ConnPermisos:
+    """Doble de la conexión AUTH (patrón de tests/test_permisos.py).
+
+    La consulta de permisos del before_request se sirve con filas
+    inyectadas (los módulos del vendedor de prueba: determinista, sin
+    leer la BD Auth); cualquier otra consulta de esa BD (nombres de
+    clientes) se delega a la conexión real.
+    """
+
+    def __init__(self, claves, real):
+        self.claves = list(claves)
+        self.real = real
+        self.filas = []
+        self.cur_real = None
+
+    def cursor(self, dictionary=False, **kwargs):
+        self.cur_real = (self.real.cursor(dictionary=dictionary, **kwargs)
+                         if self.real is not None else None)
+        return self
+
+    def execute(self, sql, params=None):
+        if 'usuario_permiso' in sql:
+            self.cur_real = None
+            if self.claves:
+                self.filas = [{'activo': True, 'permiso': c,
+                               'plantilla_sembrada': True}
+                              for c in self.claves]
+            else:
+                self.filas = [{'activo': True, 'permiso': None,
+                               'plantilla_sembrada': True}]
+        elif self.cur_real is not None:
+            self.cur_real.execute(sql, params)
+
+    def fetchall(self):
+        if self.cur_real is not None:
+            return self.cur_real.fetchall()
+        return self.filas
+
+    def fetchone(self):
+        if self.cur_real is not None:
+            return self.cur_real.fetchone()
+        return self.filas[0] if self.filas else None
+
+    def commit(self):
+        pass
+
+    def rollback(self):
+        pass
+
+    def close(self):
+        pass
+
+
+# Módulos del vendedor de prueba: los que exigen /pedidos y /reportes.
+PERMISOS_VENDEDOR_PRUEBA = ('ventas', 'pedidos', 'clientes', 'alertas',
+                            'reportes')
 
 
 def _sesion(rol, uid):
@@ -92,10 +153,15 @@ def fx(monkeypatch):
                 NULL, 'confirmado', 25.47, %s, 'simulada')
     """, (id_venta, f"sim_test_{_uuid.uuid4().hex[:8]}"))
     monkeypatch.setattr(modulo_app, 'get_connection_tienda', lambda: proxy)
+    conn_a = db_supabase.get_connection_auth()
+    monkeypatch.setattr(
+        modulo_app, 'get_connection_auth',
+        lambda: ConnPermisos(PERMISOS_VENDEDOR_PRUEBA, conn_a))
     yield {'cur': cur, 'proxy': proxy, 'id_venta': id_venta,
            'id_producto': id_producto,
            'vendedor': _sesion('vendedor', 8), 'admin': _sesion('administrador', 7),
            'cliente': _sesion('cliente', 11)}
+    conn_a.close()
     proxy.rollback()
     raw.close()
 
