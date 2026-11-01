@@ -83,7 +83,9 @@ def fx(monkeypatch):
     capturas = []
 
     def _correo_mock(destino, asunto, cuerpo_html, cuerpo_texto=None):
-        capturas.append({'destino': destino, 'asunto': asunto})
+        capturas.append({'destino': destino, 'asunto': asunto,
+                         'cuerpo_html': cuerpo_html,
+                         'cuerpo_texto': cuerpo_texto or ''})
         return 'ok'
 
     monkeypatch.setattr(modulo_app, 'enviar_correo', _correo_mock)
@@ -107,9 +109,10 @@ def _post(c, ruta, **campos):
 
 
 def _codigo_de(fx):
+    """El OTP viaja en el CUERPO del correo, nunca en el asunto."""
     assert fx['capturas'], 'el mock del correo no capturó nada'
-    m = re.search(r'\b(\d{6})\b', fx['capturas'][-1]['asunto'])
-    assert m, fx['capturas'][-1]['asunto']
+    m = re.search(r'\b(\d{6})\b', fx['capturas'][-1]['cuerpo_texto'])
+    assert m, fx['capturas'][-1]['cuerpo_texto']
     return m.group(1)
 
 

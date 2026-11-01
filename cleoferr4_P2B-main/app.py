@@ -4379,7 +4379,7 @@ def recuperar_contrasena():
 
     resultado = enviar_correo(
         correo,
-        f'Tu código para recuperar tu contraseña CLEOFERR: {codigo}',
+        'Tu código de verificación - Inversiones Cleoferr',
         _correo_html_codigo(nombre, codigo, 'Tu código para restablecer tu contraseña es:'),
         f"Hola {nombre},\n\nTu código para recuperar tu contraseña es: {codigo}\n\nVálido por 10 minutos."
     )
