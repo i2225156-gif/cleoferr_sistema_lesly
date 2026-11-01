@@ -7,6 +7,10 @@
   runtime con la misma consulta (los tests no dependen de las ventas
   reales del rango).
 - La venta PENDIENTE y la venta fuera del rango no cuentan.
+- Los permisos por módulo del vendedor se inyectan con un doble de la
+  conexión AUTH (patrón de tests/test_permisos.py): el vendedor de prueba
+  tiene 'reportes' y hay un test aparte que demuestra el rechazo (302 a
+  /inicio_personal) de quien no lo tiene.
 """
 from datetime import date
 import html as _html
@@ -42,6 +46,65 @@ class ConnProxy:
 
     def close(self):
         pass
+
+
+class ConnPermisos:
+    """Doble de la conexión AUTH (patrón de tests/test_permisos.py).
+
+    La consulta de permisos del before_request se sirve con filas
+    inyectadas (los módulos del vendedor de prueba: determinista, sin
+    leer la BD Auth); cualquier otra consulta de esa BD se delega a la
+    conexión real.
+    """
+
+    def __init__(self, claves, real):
+        self.claves = list(claves)
+        self.real = real
+        self.filas = []
+        self.cur_real = None
+
+    def cursor(self, dictionary=False, **kwargs):
+        self.cur_real = (self.real.cursor(dictionary=dictionary, **kwargs)
+                         if self.real is not None else None)
+        return self
+
+    def execute(self, sql, params=None):
+        if 'usuario_permiso' in sql:
+            self.cur_real = None
+            if self.claves:
+                self.filas = [{'activo': True, 'permiso': c,
+                               'plantilla_sembrada': True}
+                              for c in self.claves]
+            else:
+                self.filas = [{'activo': True, 'permiso': None,
+                               'plantilla_sembrada': True}]
+        elif self.cur_real is not None:
+            self.cur_real.execute(sql, params)
+
+    def fetchall(self):
+        if self.cur_real is not None:
+            return self.cur_real.fetchall()
+        return self.filas
+
+    def fetchone(self):
+        if self.cur_real is not None:
+            return self.cur_real.fetchone()
+        return self.filas[0] if self.filas else None
+
+    def commit(self):
+        pass
+
+    def rollback(self):
+        pass
+
+    def close(self):
+        pass
+
+
+# Módulos del vendedor de prueba: la plantilla del rol más 'reportes'
+# (la pantalla que este archivo visita).
+PERMISOS_VENDEDOR_PRUEBA = ('ventas', 'pedidos', 'clientes', 'alertas',
+                            'reportes')
 
 
 def _vendedor():
@@ -105,7 +168,12 @@ def fx(monkeypatch):
            [(ids[f'{MARCA}-C'], 1, 5.00)])
 
     monkeypatch.setattr(modulo_app, 'get_connection_tienda', lambda: proxy)
+    conn_a = db_supabase.get_connection_auth()
+    monkeypatch.setattr(
+        modulo_app, 'get_connection_auth',
+        lambda: ConnPermisos(PERMISOS_VENDEDOR_PRUEBA, conn_a))
     yield {'c': _vendedor(), 'cur': cur, 'ids': ids}
+    conn_a.close()
     proxy.rollback()
     raw.close()
 
@@ -194,3 +262,14 @@ def test_rango_invertido_avisa(fx):
                        ).get_data(as_text=True)
     assert 'Rango inválido' in html
     assert f'{MARCA}-C' in html      # rango ignorado: historial completo
+
+
+def test_vendedor_sin_el_modulo_reportes_no_entra(fx, monkeypatch):
+    """El permiso se sigue validando en el backend: un vendedor SIN el
+    módulo 'reportes' recibe 302 a /inicio_personal, no la pantalla."""
+    monkeypatch.setattr(
+        modulo_app, 'get_connection_auth',
+        lambda: ConnPermisos(('ventas', 'pedidos'), None))
+    r = fx['c'].get('/reportes')
+    assert r.status_code == 302
+    assert r.headers['Location'].endswith('/inicio_personal')
