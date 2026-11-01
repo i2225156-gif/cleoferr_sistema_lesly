@@ -74,3 +74,16 @@ def test_el_reporte_por_rango_apunta_a_una_ruta_real():
     for plantilla in ('reportes.html', 'reportes_rango.html'):
         fuente = (RAIZ / plantilla).read_text(encoding='utf-8')
         assert 'action="/reportes/generar"' in fuente, plantilla
+
+
+def test_el_boton_exportar_del_reporte_por_rango_apunta_a_una_ruta_real():
+    """El boton «Exportar» del reporte por rango apunta a la ruta real del
+    export y lleva el MISMO filtro (tipo, desde y hasta)."""
+    reglas = {str(regla.rule) for regla in app.url_map.iter_rules()}
+    assert '/reportes/rango/exportar' in reglas
+    fuente = (RAIZ / 'reportes_rango.html').read_text(encoding='utf-8')
+    assert '/reportes/rango/exportar' in fuente
+    assert 'Exportar' in fuente
+    # el enlace lleva el filtro completo
+    for parte in ('tipo=', 'desde=', 'hasta='):
+        assert parte in fuente, parte

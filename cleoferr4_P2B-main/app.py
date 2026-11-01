@@ -3374,6 +3374,38 @@ def reportes_generar():
         filtros_qs=_filtros_sin_pagina())
 
 
+@app.route('/reportes/rango/exportar')
+@login_required
+@permiso_required('reportes')
+def reportes_rango_exportar():
+    """Exporta a Excel el reporte por rango con el MISMO filtro de
+    /reportes/generar.
+
+    Sin paginar (TODAS las filas del filtro), las fechas en hora Lima
+    (SQL_PARED_LIMA, dentro de services.reportes) y el nombre del
+    archivo con el tipo y el rango.
+    """
+    tipo = (request.args.get('tipo') or '').strip().lower()
+    if tipo not in TIPOS_REPORTE:
+        tipo = 'ventas'
+    conn = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute(f"SELECT {SQL_HOY_LIMA} AS hoy")
+        fila = cursor.fetchone()
+        hoy = fila['hoy'] if fila else None
+        desde, hasta, _aviso = validar_rango_fechas(
+            request.args.get('desde'), request.args.get('hasta'), hoy=hoy)
+        datos = reporte(tipo, cursor, desde, hasta, pagina=None)
+    finally:
+        conn.close()
+    filas = [{h: valor for h, valor in zip(datos['headers'], fila)}
+             for fila in datos['filas']]
+    nombre = (f'reporte_{tipo}_{desde.strftime("%Y-%m-%d")}'
+              f'_{hasta.strftime("%Y-%m-%d")}.xlsx')
+    return _excel_response(filas, nombre, NOMBRES_TIPO.get(tipo, tipo))
+
+
 # ── Alertas ─────────────────────────────────────────────────
 # La tabla `alerta` no tiene columna de referencia: la referencia que
 # permite no recrear una alerta ya «enterada» (nivel de stock o fecha de

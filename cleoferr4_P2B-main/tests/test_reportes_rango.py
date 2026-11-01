@@ -16,6 +16,7 @@ el rango (la BD real tambien tiene ventas).
 """
 import re
 import uuid as _uuid
+import html as _html_lib
 from datetime import datetime, timedelta, timezone
 
 import psycopg2
@@ -60,6 +61,29 @@ def _sesion(rol='administrador', uid=7):
         s['nombre'] = 'Prueba'
         s['_csrf_token'] = 'token-test'
     return c
+
+
+class CursorSinPermisos:
+    """Doble de la conexión AUTH: el usuario existe pero no tiene filas de
+    permiso (plantilla ya sembrada)."""
+
+    def execute(self, sql, params=None):
+        self._filas = [{'activo': True, 'permiso': None,
+                        'plantilla_sembrada': True}]
+
+    def fetchall(self):
+        return self._filas
+
+    def fetchone(self):
+        return self._filas[0]
+
+
+class ConnSinPermisos:
+    def cursor(self, dictionary=False, **kwargs):
+        return CursorSinPermisos()
+
+    def close(self):
+        pass
 
 
 @pytest.fixture()
@@ -194,6 +218,26 @@ def _resumen(html, clave):
 
 def _vacio(html):
     return 'id="reporte-vacio"' in html
+
+
+def _excel(resp):
+    """El Excel de la respuesta como filas de texto (encabezado + datos)."""
+    import io
+    from openpyxl import load_workbook
+    wb = load_workbook(io.BytesIO(resp.get_data()))
+    ws = wb.active
+    return [[('' if c.value is None else str(c.value)) for c in fila]
+            for fila in ws.iter_rows()]
+
+
+def _celdas(html):
+    """Las filas de la tabla del reporte como listas de texto."""
+    cuerpo = html[html.find('<tbody>'):html.find('</tbody>')]
+    filas = []
+    for m in re.finditer(r'<tr class="fila-reporte">(.*?)</tr>', cuerpo, re.S):
+        filas.append([_html_lib.unescape(re.sub(r'<[^>]+>', '', c)).strip()
+                      for c in re.findall(r'<td>(.*?)</td>', m.group(1), re.S)])
+    return filas
 
 
 # ── Expectativas RELATIVAS (la BD real tambien tiene datos) ──────────
@@ -539,29 +583,77 @@ def test_productos_e_inventario_tienen_estado_vacio(fx):
 
 def test_sin_permiso_de_reportes_no_entra(fx, monkeypatch):
     """Un vendedor sin el permiso «reportes» recibe 302 a su inicio."""
-    class CursorFalso:
-        def execute(self, sql, params=None):
-            self._filas = [{'activo': True, 'permiso': None,
-                            'plantilla_sembrada': True}]
-
-        def fetchall(self):
-            return self._filas
-
-        def fetchone(self):
-            return self._filas[0]
-
-    class ConnFalso:
-        def cursor(self, dictionary=False, **kwargs):
-            return CursorFalso()
-
-        def close(self):
-            pass
-
-    monkeypatch.setattr(modulo_app, 'get_connection_auth', lambda: ConnFalso())
+    monkeypatch.setattr(modulo_app, 'get_connection_auth',
+                        lambda: ConnSinPermisos())
     c = _sesion('vendedor', 8)
     r = c.get('/reportes/generar?tipo=ventas')
     assert r.status_code == 302
     assert '/inicio_personal' in r.headers['Location']
+
+
+# ── Exportación a Excel (el mismo filtro, sin paginar) ────────────────
+
+def test_el_excel_coincide_con_la_tabla_y_trae_todas_las_filas(fx):
+    """El Excel lleva TODAS las filas del filtro (sin paginar) y coincide
+    con la tabla: mismo encabezado, mismas filas y el total del resumen."""
+    desde, hasta = _dias(fx, -30), _dias(fx, 0)
+    html = _html(_reporte(fx, 'ventas', desde=desde, hasta=hasta))
+    r = fx['admin'].get(f'/reportes/rango/exportar'
+                        f'?tipo=ventas&desde={desde}&hasta={hasta}')
+    assert r.status_code == 200
+    assert 'spreadsheetml' in r.headers['Content-Type']
+    filas = _excel(r)
+    tabla = _celdas(html)
+    assert filas[0] == ['Venta', 'Fecha (Perú)', 'Estado', 'Tipo', 'Total (S/)']
+    # sin paginar: el Excel trae todas las filas del filtro
+    assert len(filas) - 1 == int(_resumen(html, 'cantidad'))
+    # y son las mismas que salen en la tabla (mismo filtro y mismo orden)
+    assert filas[1:1 + len(tabla)] == tabla
+    # el nombre del archivo lleva el tipo y el rango
+    disposicion = r.headers['Content-Disposition']
+    assert f'reporte_ventas_{desde}_{hasta}.xlsx' in disposicion
+
+
+def test_los_cuatro_tipos_se_exportan_a_excel(fx):
+    """Los cuatro tipos de la lista blanca se exportan, cada uno con su
+    nombre de archivo (tipo y rango)."""
+    desde, hasta = _dias(fx, -30), _dias(fx, 0)
+    for tipo in ('ventas', 'productos', 'inventario', 'pedidos'):
+        r = fx['admin'].get(f'/reportes/rango/exportar'
+                            f'?tipo={tipo}&desde={desde}&hasta={hasta}')
+        assert r.status_code == 200, tipo
+        assert 'spreadsheetml' in r.headers['Content-Type'], tipo
+        assert (f'reporte_{tipo}_{desde}_{hasta}.xlsx'
+                in r.headers['Content-Disposition']), tipo
+
+
+def test_el_excel_de_inventario_muestra_las_fechas_en_hora_lima(fx):
+    """La fecha del Excel es la Pared Lima: las 23:59:59 se ven 23:59."""
+    desde, hasta = _dias(fx, -1), _dias(fx, -1)
+    r = fx['admin'].get('/reportes/rango/exportar'
+                        f'?tipo=inventario&desde={desde}&hasta={hasta}')
+    assert r.status_code == 200
+    dia = fx['hoy'] - timedelta(days=1)
+    esperado = f'{dia.strftime("%d/%m/%Y")} 23:59'
+    assert any(esperado in celda for fila in _excel(r) for celda in fila)
+
+
+def test_la_exportacion_exige_el_permiso_de_reportes(fx, monkeypatch):
+    """Un vendedor sin el módulo «reportes» recibe 302 a su inicio."""
+    monkeypatch.setattr(modulo_app, 'get_connection_auth',
+                        lambda: ConnSinPermisos())
+    r = _sesion('vendedor', 8).get('/reportes/rango/exportar?tipo=ventas')
+    assert r.status_code == 302
+    assert '/inicio_personal' in r.headers['Location']
+
+
+def test_la_exportacion_de_un_rango_vacio_no_rompe(fx):
+    """Un rango sin datos devuelve un Excel vacío (no un 500)."""
+    r = fx['admin'].get('/reportes/rango/exportar?tipo=ventas'
+                        f'&desde={_dias(fx, -300)}&hasta={_dias(fx, -200)}')
+    assert r.status_code == 200
+    assert 'spreadsheetml' in r.headers['Content-Type']
+    assert _excel(r) == []
 
 
 # ── El formulario de /reportes ya no esta deshabilitado ───────────────

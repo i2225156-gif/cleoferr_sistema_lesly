@@ -125,6 +125,8 @@ RUTAS_POR_PERMISO = {
     '/reportes/clientes/exportar':     'reportes',
     '/reportes/proveedores/exportar':  'reportes',
     '/reportes/inventario/exportar':   'reportes',
+    '/reportes/generar':               'reportes',
+    '/reportes/rango/exportar':        'reportes',
     # alertas
     '/alertas':                        'alertas',
     '/alertas/resolver/<int:id>':      'alertas',
