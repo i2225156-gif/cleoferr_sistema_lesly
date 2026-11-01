@@ -42,6 +42,75 @@ class ConnProxy:
         pass
 
 
+class ConnPermisos:
+    """Doble de la conexión AUTH (patrón de tests/test_permisos.py).
+
+    La consulta de permisos del before_request se sirve con filas
+    inyectadas (los módulos del vendedor de prueba: determinista, sin
+    leer la BD Auth); cualquier otra consulta de esa BD se delega a la
+    conexión real.
+    """
+
+    def __init__(self, claves, real):
+        self.claves = list(claves)
+        self.real = real
+        self.filas = []
+        self.cur_real = None
+
+    def cursor(self, dictionary=False, **kwargs):
+        self.cur_real = (self.real.cursor(dictionary=dictionary, **kwargs)
+                         if self.real is not None else None)
+        return self
+
+    def execute(self, sql, params=None):
+        if 'usuario_permiso' in sql:
+            self.cur_real = None
+            if self.claves:
+                self.filas = [{'activo': True, 'permiso': c,
+                               'plantilla_sembrada': True}
+                              for c in self.claves]
+            else:
+                self.filas = [{'activo': True, 'permiso': None,
+                               'plantilla_sembrada': True}]
+        elif self.cur_real is not None:
+            self.cur_real.execute(sql, params)
+
+    def fetchall(self):
+        if self.cur_real is not None:
+            return self.cur_real.fetchall()
+        return self.filas
+
+    def fetchone(self):
+        if self.cur_real is not None:
+            return self.cur_real.fetchone()
+        return self.filas[0] if self.filas else None
+
+    def commit(self):
+        pass
+
+    def rollback(self):
+        pass
+
+    def close(self):
+        pass
+
+
+# Módulos del vendedor de prueba: la plantilla del rol más los dos que
+# pide este archivo ('productos' para la columna «Vence», 'reportes' para
+# la tarjeta de vencimiento).
+PERMISOS_VENDEDOR_PRUEBA = ('ventas', 'pedidos', 'clientes', 'alertas',
+                            'reportes', 'productos')
+
+
+def _vencimientos(html):
+    """Filas de la tarjeta «Vencimiento de stock» (badge por fila)."""
+    ini = html.find('Vencimiento de stock')
+    fin = html.find('Resultados', ini)
+    seccion = html[ini:] if fin == -1 else html[ini:fin]
+    return (seccion.count('>Vencido</span>')
+            + seccion.count('>Por vencer</span>'))
+
+
 def _vendedor():
     c = app.test_client()
     with c.session_transaction() as s:
@@ -68,13 +137,17 @@ def fx(monkeypatch):
         RETURNING nombre
     """)
     monkeypatch.setattr(modulo_app, 'get_connection_tienda', lambda: proxy)
+    conn_a = db_supabase.get_connection_auth()
+    monkeypatch.setattr(
+        modulo_app, 'get_connection_auth',
+        lambda: ConnPermisos(PERMISOS_VENDEDOR_PRUEBA, conn_a))
     yield {'c': _vendedor(), 'cur': cur}
+    conn_a.close()
     proxy.rollback()
     raw.close()
 
 
 # ── columna «Vence» en /productos ────────────────────────────────
-
 def test_columna_vence_en_productos(fx):
     # Los sintéticos (ids mayores) caen en la ÚLTIMA página por id ASC.
     html = fx['c'].get('/productos?pagina=99999').get_data(as_text=True)
@@ -115,9 +188,35 @@ def test_reporte_orden_vencidos_primero(fx):
 
 
 def test_reporte_estado_vacio_cuando_no_hay(fx):
+    """Los productos SINTETICOS que vencen salen de la tarjeta cuando su
+    fecha se aleja: el conteo es RELATIVO (antes - 2), sin depender de
+    que la BD real no tenga productos vencidos (hoy tiene uno)."""
+    antes = _vencimientos(fx['c'].get('/reportes').get_data(as_text=True))
     fx['cur'].execute("""
         UPDATE producto SET fecha_vencimiento = CURRENT_DATE + 400
          WHERE nombre LIKE 'zzqrep-%'
     """)
     html = fx['c'].get('/reportes').get_data(as_text=True)
+    # los dos sintéticos que vencían (vencido + por vencer) se van
+    assert _vencimientos(html) == antes - 2
+    assert 'zzqrep-vencido' not in html
+    assert 'zzqrep-porvencer' not in html
+    # y si no queda NINGUN producto que venza (se alejan también los
+    # reales, dentro de la transacción con rollback), la tarjeta avisa
+    fx['cur'].execute("""
+        UPDATE producto SET fecha_vencimiento = CURRENT_DATE + 400
+         WHERE fecha_vencimiento IS NOT NULL
+    """)
+    html = fx['c'].get('/reportes').get_data(as_text=True)
     assert 'Ningún producto activo vence' in html
+
+
+def test_vendedor_sin_el_modulo_no_entra(fx, monkeypatch):
+    """El permiso se sigue validando en el backend: un vendedor SIN los
+    módulos recibe 302 a /inicio_personal, no la pantalla."""
+    monkeypatch.setattr(
+        modulo_app, 'get_connection_auth',
+        lambda: ConnPermisos(('ventas', 'pedidos'), None))
+    r = fx['c'].get('/reportes')
+    assert r.status_code == 302
+    assert r.headers['Location'].endswith('/inicio_personal')
