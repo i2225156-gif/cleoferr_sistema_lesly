@@ -129,7 +129,9 @@ def test_login_staff_correcto(fx):
     c = _cliente()
     r = _post(c, '/login', correo=CORREO_STAFF, clave=CLAVE)
     assert r.status_code == 302
-    assert '/productos' in r.headers['Location']
+    # El personal aterriza en /inicio_personal (la ruta que decide a donde
+    # va segun su rol y sus permisos), no en una pantalla fija.
+    assert '/inicio_personal' in r.headers['Location']
     with c.session_transaction() as s:
         assert s['rol'] == 'vendedor'
         assert s['usuario_id'] is not None
