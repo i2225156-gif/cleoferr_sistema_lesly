@@ -95,5 +95,48 @@
       {% endif %}
     </div>
   </div>
+
+  <!-- Transferencias pendientes de verificación por la administradora -->
+  <div class="card shadow-sm mt-4" style="border-radius:12px">
+    <div class="card-body">
+      <h6 class="fw-bold mb-3"><i class="fa fa-bank me-2"></i>Transferencias pendientes de verificación</h6>
+      <p class="text-muted small mb-3">
+        Los pagos por transferencia quedan aquí hasta que confirma o rechaza la operación.
+      </p>
+      {% if transferencias_pendientes %}
+      <div class="table-responsive">
+        <table class="table table-sm table-hover align-middle mb-0">
+          <thead>
+            <tr>
+              <th>Venta</th><th>Transacción</th><th>Monto</th><th>Nro. operación</th><th>Acciones</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for t in transferencias_pendientes %}
+            <tr>
+              <td>#{{ t.id_venta }}</td>
+              <td><code>{{ t.id_transaccion }}</code></td>
+              <td>S/ {{ '%.2f'|format(t.monto|float) }}</td>
+              <td>{{ t.numero_operacion or '–' }}</td>
+              <td>
+                <form method="POST" action="/admin/pagos_simulados/transferencia/{{ t.id_pago }}/confirmar" class="d-inline" onsubmit="return confirm('¿Confirmar esta transferencia?');">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                  <button type="submit" class="btn btn-success btn-sm">Confirmar</button>
+                </form>
+                <form method="POST" action="/admin/pagos_simulados/transferencia/{{ t.id_pago }}/rechazar" class="d-inline" onsubmit="return confirm('¿Rechazar esta transferencia?');">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                  <button type="submit" class="btn btn-danger btn-sm">Rechazar</button>
+                </form>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <p class="text-muted mb-0">No hay transferencias pendientes de verificación.</p>
+      {% endif %}
+    </div>
+  </div>
 </div>
 {% endblock %}

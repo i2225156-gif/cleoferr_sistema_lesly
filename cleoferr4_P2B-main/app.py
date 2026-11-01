@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import uuid
 import secrets
 import hmac
@@ -61,6 +62,7 @@ from services.pagos import (cancelar_pedido_con_pago_inicial, confirmar_pago,
                             registrar_evento)
 from services.pasarela import (EstadoPago, PagoResultado, PagoSolicitud,
                                crear_pasarela)
+from services.payment.gateway import PaymentGatewayError
 from sqlalchemy import text
 
 load_dotenv()
@@ -2590,6 +2592,57 @@ def venta_nueva_guardar():
 # ── Caja (apertura / cierre / arqueo) ────────────────────────────────────────
 # UMBRAL_DIFERENCIA_CAJA: |declarado - sistema| mayor a esto se marca como advertencia
 UMBRAL_DIFERENCIA_CAJA = 20.0
+
+# PAGO_EXPIRACION_MIN: minutos que un pedido online puede quedar en
+# "pagando" (pago pendiente) antes de expirar. Tras el expiro, el stock
+# se devuelve y la venta pasa a 'cancelado'. Nunca queda trabado.
+PAGO_EXPIRACION_MIN = int(os.environ.get("PAGO_EXPIRACION_MIN", "30"))
+
+
+def _expirar_pedido_pendiente(conn, cursor, id_venta, motivo="expirado"):
+    """Devuelve el stock de un pedido pendiente de pago y lo cancela.
+
+    Se usa cuando el pago se rechaza o cuando el pedido expira por tiempo.
+    Devuelve True si se expiró algo, False si ya no había nada que hacer.
+    """
+    cursor.execute("""
+        SELECT v.id_venta, v.id_estado_venta, ev.nombre AS venta_estado,
+               p.id_pago, p.estado AS pago_estado
+          FROM venta v
+          JOIN estado_venta ev ON ev.id_estado_venta = v.id_estado_venta
+          LEFT JOIN pago p ON p.id_venta = v.id_venta
+         WHERE v.id_venta = %s
+    """, (id_venta,))
+    fila = cursor.fetchone()
+    if not fila:
+        return False
+    # Solo actuar si la venta sigue pendiente y el pago no está confirmado.
+    if fila['venta_estado'] not in ('pendiente',):
+        return False
+    if fila['pago_estado'] == 'confirmado':
+        return False
+    # Devolver stock: deshacer los movimientos de salida de esta venta.
+    devolver_stock_venta(cursor, id_venta)
+    # Cambiar la venta a cancelado (expiración / rechazo).
+    cursor.execute("""
+        UPDATE venta
+           SET id_estado_venta = (SELECT id_estado_venta FROM estado_venta
+                                    WHERE nombre = 'cancelado')
+         WHERE id_venta = %s
+           AND id_estado_venta = (SELECT id_estado_venta FROM estado_venta
+                                   WHERE nombre = 'pendiente')
+    """, (id_venta,))
+    if fila['id_pago'] and fila['pago_estado'] == 'pendiente':
+        cursor.execute("""
+            UPDATE pago
+               SET estado = 'rechazado'
+             WHERE id_pago = %s AND estado = 'pendiente'
+        """, (fila['id_pago'],))
+    conn.commit()
+    app.logger.warning(
+        "Pedido #%s expirado/rechazado: stock devuelto y venta cancelada (%s)",
+        id_venta, motivo)
+    return True
 
 
 @app.route('/caja')
@@ -5376,10 +5429,12 @@ def carrito_confirmar_v2():
 def _pago_por_transaccion(cursor, id_transaccion):
     cursor.execute("""
         SELECT p.id_pago, p.id_transaccion, p.monto, p.estado, v.id_venta,
-               v.id_cliente, v.id_estado_venta, ev.nombre AS venta_estado
+               v.id_cliente, v.id_estado_venta, ev.nombre AS venta_estado,
+               tp.nombre AS metodo_pago
           FROM pago p
           JOIN venta v ON v.id_venta = p.id_venta
           JOIN estado_venta ev ON ev.id_estado_venta = v.id_estado_venta
+          LEFT JOIN tipo_pago tp ON tp.id_tipo_pago = p.id_tipo_pago
          WHERE p.id_transaccion = %s
     """, (id_transaccion,))
     return cursor.fetchone()
@@ -5392,6 +5447,7 @@ def pago_simulado(id_transaccion):
         flash('El pago simulado está deshabilitado (PAGO_MODO).', 'danger')
         return redirect(url_for('catalogo_cliente'))
     conn = get_connection_tienda()
+    expirado = False
     try:
         cursor = conn.cursor(dictionary=True)
         pago = _pago_por_transaccion(cursor, id_transaccion)
@@ -5403,8 +5459,29 @@ def pago_simulado(id_transaccion):
                   FROM detalle_venta WHERE id_venta = %s
             """, (pago['id_venta'],))
             total = cursor.fetchone()['total']
+
+            # Expiración: si el pago sigue pendiente y superó el tiempo
+            # configurable, se cancela la venta, se devuelve el stock y
+            # nunca queda trabado en "pagando".
+            if pago['estado'] == 'pendiente':
+                cursor.execute("SELECT v.fecha FROM venta v WHERE v.id_venta = %s",
+                               (pago['id_venta'],))
+                fila_venta = cursor.fetchone()
+                if fila_venta and fila_venta['fecha']:
+                    from datetime import timezone as _tz
+                    ahora = datetime.now(_tz.utc)
+                    fecha_venta = fila_venta['fecha']
+                    if fecha_venta.tzinfo is None:
+                        fecha_venta = fecha_venta.replace(tzinfo=_tz.utc)
+                    if (ahora - fecha_venta).total_seconds() > PAGO_EXPIRACION_MIN * 60:
+                        _expirar_pedido_pendiente(conn, cursor, pago['id_venta'],
+                                                  motivo="expiracion")
+                        expirado = True
     finally:
         conn.close()
+    if expirado:
+        flash('El tiempo de pago expiró. Se canceló el pedido y se devolvió el stock.', 'warning')
+        return redirect(url_for('mis_pedidos'))
     if not pago:
         abort(404)
     if session.get('rol') == 'cliente' and pago['id_cliente'] != session.get('usuario_id'):
@@ -5412,23 +5489,32 @@ def pago_simulado(id_transaccion):
     if pago['estado'] != 'pendiente':
         flash('Este pago ya fue procesado.', 'info')
         return redirect(url_for('pedido_aceptado', id=pago['id_venta']))
-    return render_template('pago_simulado.html', pago=pago, total=total)
+    return render_template('pago_simulado.html', pago=pago, total=total,
+                           metodo_pago=pago.get('metodo_pago') or 'tarjeta')
 
 
 @app.route('/pago/simulado/<id_transaccion>/procesar', methods=['POST'])
 @login_required
 def pago_simulado_procesar(id_transaccion):
-    """Recibe SOLO el resultado simulado ('aprobado'|'rechazado') con CSRF.
+    """Procesa el pago simulado según el método elegido.
 
-    Nada de datos de tarjeta: se ignoran campos extra si llegaran. El
-    monto se recalcula del servidor y la transición pasa por confirmar_pago.
+    - tarjeta: 4111... aprueba; 4000...0002 rechaza por fondos insuficientes;
+               cualquier otra se rechaza como inválida.
+    - yape / plin: código de operación de 6 dígitos -> aprobado.
+    - transferencia: número de operación -> queda 'pendiente' hasta que la
+      administradora lo confirme desde su panel (no se confirma aquí).
+
+    Nunca se reciben ni guardan datos completos de tarjeta ni CVV.
+    Sin cobros duplicados: idempotencia por evento de pago.
     """
-    if _PASARELA.modo != 'simulado':
+    if _PASARELA is None:
+        return {'ok': False, 'error': _PASARELA_ERROR or 'pasarela no disponible'}, 503
+    if _PASARELA.nombre != 'simulated':
         return {'ok': False, 'error': 'pago simulado deshabilitado'}, 403
     data = request.get_json(silent=True) or request.form or {}
-    resultado_sim = str(data.get('resultado') or '').strip().lower()
-    if resultado_sim not in ('aprobado', 'rechazado'):
-        return {'ok': False, 'error': 'resultado simulado inválido'}, 400
+    metodo = str(data.get('metodo_pago') or 'tarjeta').strip().lower()
+    if metodo not in ('tarjeta', 'yape', 'plin', 'transferencia'):
+        return {'ok': False, 'error': 'método de pago inválido'}, 400
 
     conn = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
@@ -5442,35 +5528,84 @@ def pago_simulado_procesar(id_transaccion):
             return {'ok': True, 'estado': 'ya_procesado',
                     'mensaje': f"El pago ya está {pago['estado']}."}, 200
 
-        # Monto del servidor, recalculado de detalle_venta (nunca del
-        # navegador) con la fórmula única (descuento congelado)
+        # Monto del servidor, recalculado de detalle_venta (nunca del navegador)
         cursor.execute(f"""
             SELECT COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='')}), 0) AS total
               FROM detalle_venta WHERE id_venta = %s
         """, (pago['id_venta'],))
         total = cursor.fetchone()['total']
 
-        estado_final = (EstadoPago.CONFIRMADO if resultado_sim == 'aprobado'
-                        else EstadoPago.RECHAZADO)
-        id_evento = f"checkout-{id_transaccion}-{resultado_sim}"
+        # Evaluar estado según método (simulación determinista)
+        estado_final = None
+        motivo = ''
+        if metodo == 'tarjeta':
+            numero = ''.join(ch for ch in str(data.get('numero_tarjeta') or '') if ch.isdigit())
+            if numero == '4111111111111111':
+                estado_final = EstadoPago.CONFIRMADO
+                motivo = 'Pago aprobado (simulado).'
+            elif numero == '4000000000000002':
+                estado_final = EstadoPago.RECHAZADO
+                motivo = 'Fondos insuficientes (simulado).'
+            else:
+                estado_final = EstadoPago.RECHAZADO
+                motivo = 'Tarjeta inválida (simulado).'
+        elif metodo in ('yape', 'plin'):
+            codigo = str(data.get('codigo_operacion') or '').strip()
+            if not (codigo.isdigit() and len(codigo) == 6):
+                return {'ok': False, 'error': 'Código de operación de 6 dígitos requerido.'}, 400
+            estado_final = EstadoPago.CONFIRMADO
+            motivo = f'Pago aprobado vía {metodo.upper()} (simulado).'
+        elif metodo == 'transferencia':
+            num_op = str(data.get('numero_operacion') or '').strip()
+            if not num_op:
+                return {'ok': False, 'error': 'Número de operación obligatorio.'}, 400
+            # Transferencia: queda pendiente de verificación por la administradora.
+            estado_final = EstadoPago.PENDIENTE
+            motivo = ('Transferencia recibida (simulado). Pendiente de verificación '
+                      'por la administradora.')
+            # Guarda el método y número de operación para que el panel de
+            # administración pueda identificarla y confirmarla/rechazarla.
+            cursor.execute("""
+                UPDATE pago
+                   SET detalle_proveedor = COALESCE(detalle_proveedor, '{}'::jsonb) || %s::jsonb
+                 WHERE id_pago = %s
+            """, (json.dumps({'metodo': 'transferencia',
+                              'numero_operacion': num_op,
+                              'estado_transferencia': 'pendiente_verificacion'},
+                             ensure_ascii=False), pago['id_pago']))
+
+        id_evento = f"checkout-{id_transaccion}-{metodo}-{int(time.time())}"
         id_pago_evento = registrar_evento(
             cursor, _PASARELA.nombre, id_evento, 'checkout_simulado',
             pago['id_pago'], estado_final.value, True, True,
-            {'fuente': 'checkout', 'tipo': 'checkout_simulado'})
+            {'fuente': 'checkout', 'tipo': 'checkout_simulado', 'metodo': metodo})
         if id_pago_evento is None:
             # doble clic / reenvío del mismo intento: no reprocesar
             conn.commit()
             return {'ok': True, 'estado': 'repetido'}, 200
+
+        if estado_final == EstadoPago.PENDIENTE:
+            # Transferencia: no se confirma el pago; queda pendiente para admin.
+            conn.commit()
+            return {'ok': True, 'estado': 'pendiente',
+                    'mensaje': motivo,
+                    'id_pedido': pago['id_venta']}, 200
 
         res = confirmar_pago(pago['id_pago'],
                              PagoResultado(id_pago_proveedor=id_transaccion,
                                            estado=estado_final, monto=total),
                              conn=conn, fuente='checkout',
                              id_pago_evento=id_pago_evento)
-        conn.commit()
+        if estado_final == EstadoPago.RECHAZADO:
+            # Pago rechazado: devolver el stock y cancelar la venta,
+            # para que no quede stock descontado sin pedido pagado.
+            _expirar_pedido_pendiente(conn, cursor, pago['id_venta'],
+                                      motivo="rechazo")
+        else:
+            conn.commit()
         return {'ok': res['estado'] in ('confirmado', 'rechazado',
                                         'ya_confirmado', 'ya_rechazado'),
-                'estado': res['estado'], 'motivo': res.get('motivo'),
+                'estado': res['estado'], 'motivo': res.get('motivo') or motivo,
                 'id_pedido': pago['id_venta']}, 200
     except Exception:
         conn.rollback()
@@ -5487,7 +5622,18 @@ def pago_simulado_procesar(id_transaccion):
 # dentro de la pasarela. Excepción documentada y única.
 # crear_pasarela() falla al ARRANCAR si falta el secreto, si es el de
 # ejemplo o si PAGO_MODO no es 'simulado' (validación en registro.py).
-_PASARELA = crear_pasarela()
+# Si falla, _PASARELA queda None y _PASARELA_ERROR guarda el mensaje claro
+# para mostrarlo al cliente en lugar de un error 500.
+_PASARELA = None
+_PASARELA_ERROR = None
+try:
+    _PASARELA = crear_pasarela()
+except PaymentGatewayError as _e:
+    _PASARELA_ERROR = str(_e)
+    app.logger.error("Pasarela de pago no disponible: %s", _PASARELA_ERROR)
+except Exception as _e:  # nunca dejan caer la app por un proveedor de pago
+    _PASARELA_ERROR = f"No se pudo inicializar la pasarela de pago: {_e}"
+    app.logger.exception("Pasarela de pago no disponible")
 
 
 def _procesar_evento_pago(ev, id_evento_fallback=None):
@@ -5636,10 +5782,26 @@ def admin_pagos_simulados():
              LIMIT 50
         """)
         pendientes = cursor.fetchall()
+
+        # Transferencias pendientes de verificación (método guardado en detalle_proveedor)
+        cursor.execute("""
+            SELECT p.id_pago, p.id_transaccion, p.monto, v.id_venta,
+                   v.id_cliente,
+                   (p.detalle_proveedor->>'numero_operacion') AS numero_operacion
+              FROM pago p
+              JOIN venta v ON v.id_venta = p.id_venta
+             WHERE p.estado = 'pendiente'
+               AND p.id_transaccion IS NOT NULL
+               AND p.detalle_proveedor->>'metodo' = 'transferencia'
+             ORDER BY v.id_venta DESC
+             LIMIT 50
+        """)
+        transferencias_pendientes = cursor.fetchall()
     finally:
         conn.close()
     return render_template('admin_pagos_simulados.html',
                            eventos=eventos, pendientes=pendientes,
+                           transferencias_pendientes=transferencias_pendientes,
                            pagina=pagina, total=total,
                            por_pagina=POR_PAGINA_ADMIN,
                            filtros_qs=_filtros_sin_pagina())
@@ -5689,6 +5851,96 @@ def admin_pagos_disparar():
     else:
         flash(f"Evento simulado no aplicado: {respuesta.get('error') or respuesta.get('motivo') or est}.", 'warning')
     return redirect(url_for('admin_pagos_simulados'))
+
+
+@app.route('/admin/pagos_simulados/transferencia/<int:id_pago>/<accion>', methods=['POST'])
+@login_required
+@admin_required
+def admin_pagos_transferencia(id_pago, accion):
+    """La administradora confirma o rechaza una transferencia pendiente."""
+    if _PASARELA is None or _PASARELA.nombre != 'simulated':
+        return {'ok': False, 'error': 'pasarela simulada no disponible'}, 403
+    if accion not in ('confirmar', 'rechazar'):
+        return {'ok': False, 'error': 'acción inválida'}, 400
+    conn = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("""
+            SELECT p.id_pago, p.id_transaccion, p.monto, p.estado, v.id_venta, v.id_cliente
+              FROM pago p
+              JOIN venta v ON v.id_venta = p.id_venta
+             WHERE p.id_pago = %s
+               AND p.estado = 'pendiente'
+               AND p.detalle_proveedor->>'metodo' = 'transferencia'
+        """, (id_pago,))
+        pago = cursor.fetchone()
+        if not pago:
+            flash('Transferencia no encontrada o ya no está pendiente.', 'warning')
+            return redirect(url_for('admin_pagos_simulados'))
+        # Total recalculado del servidor
+        cursor.execute(f"""
+            SELECT COALESCE(SUM({SQL_IMPORTE_LINEA.format(p='')}), 0) AS total
+              FROM detalle_venta WHERE id_venta = %s
+        """, (pago['id_venta'],))
+        total = cursor.fetchone()['total']
+        estado_final = EstadoPago.CONFIRMADO if accion == 'confirmar' else EstadoPago.RECHAZADO
+        res = confirmar_pago(pago['id_pago'],
+                             PagoResultado(id_pago_proveedor=pago['id_transaccion'],
+                                           estado=estado_final, monto=total),
+                             conn=conn, fuente='admin_transferencia')
+        conn.commit()
+        if accion == 'confirmar':
+            flash(f'Transferencia de venta #{pago["id_venta"]} confirmada.', 'success')
+        else:
+            flash(f'Transferencia de venta #{pago["id_venta"]} rechazada.', 'warning')
+    except Exception:
+        conn.rollback()
+        app.logger.exception("Error procesando transferencia %s", id_pago)
+        flash('No se pudo procesar la transferencia.', 'danger')
+    finally:
+        conn.close()
+    return redirect(url_for('admin_pagos_simulados'))
+
+
+@app.route('/admin/pedidos/expirar_pendientes', methods=['POST'])
+@login_required
+@admin_required
+def admin_expirar_pendientes():
+    """Cancela pedidos online pendientes de pago cuyo tiempo expiró.
+
+    Devuelve el stock y deja la venta en 'cancelado'. Nunca deja un pedido
+    trabado en 'pagando'."""
+    if _PASARELA is None or _PASARELA.nombre != 'simulated':
+        flash('Pasarela simulada no disponible.', 'danger')
+        return redirect(url_for('productos'))
+    conn = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    expirados = 0
+    try:
+        cursor.execute("""
+            SELECT v.id_venta
+              FROM venta v
+              JOIN pago p ON p.id_venta = v.id_venta
+              JOIN estado_venta ev ON ev.id_estado_venta = v.id_estado_venta
+             WHERE ev.nombre = 'pendiente'
+               AND p.estado = 'pendiente'
+               AND v.fecha <= NOW() - make_interval(mins => %s)
+        """, (PAGO_EXPIRACION_MIN,))
+        filas = cursor.fetchall()
+        for fila in filas:
+            if _expirar_pedido_pendiente(conn, cursor, fila['id_venta'],
+                                         motivo="expiracion_admin"):
+                expirados += 1
+        conn.commit()
+        flash(f'{expirados} pedido(s) expirado(s): stock devuelto y venta cancelada.',
+              'warning' if expirados else 'info')
+    except Exception:
+        conn.rollback()
+        app.logger.exception("Error expirando pedidos pendientes")
+        flash('No se pudieron expirar los pedidos pendientes.', 'danger')
+    finally:
+        conn.close()
+    return redirect(url_for('pedidos'))
 
 
 # -- Perfil del cliente (documento de identidad) ----------------

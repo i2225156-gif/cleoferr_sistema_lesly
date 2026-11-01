@@ -1,12 +1,12 @@
 {% extends 'base.html' %}
 {% block titulito %}Pago simulado – Cleoferr{% endblock %}
 {% block contenido %}
-<div class="container py-4" style="max-width:640px">
+<div class="container py-4" style="max-width:720px">
 
   <!-- Bandera SIEMPRE visible en el checkout simulado -->
   <div class="alert alert-warning text-center fw-bold" role="alert"
        style="border:2px dashed #d97706;font-size:1rem">
-    <i class="fa fa-flask me-2"></i>PAGO SIMULADO – sin cobro real
+    <i class="fa fa-flask me-2"></i>Modo simulación – no se realizan cobros reales
   </div>
 
   <div class="card shadow-sm" style="border-radius:14px">
@@ -20,15 +20,27 @@
         <span class="fw-bold fs-4" style="color:var(--naranja)">S/ {{ '%.2f'|format(total|float) }}</span>
       </div>
 
-      <!-- Tarjetas de prueba deterministas de la demo -->
-      <div class="alert alert-light border mb-3" style="font-size:0.85rem">
-        <strong>Tarjetas de prueba (simulación):</strong><br>
-        <span class="badge bg-success me-1">APRUEBA</span> 4111 1111 1111 1111<br>
-        <span class="badge bg-danger me-1">RECHAZA</span> 4000 0000 0000 0002<br>
-        Cualquier otra tarjeta válida se simula como <strong>rechazada</strong>.
+      <!-- Selector de método de pago -->
+      <div class="mb-4">
+        <label class="form-label fw-semibold d-block mb-2">Método de pago</label>
+        <div class="btn-group btn-group-toggle w-100" role="group">
+          <label class="btn btn-outline-naranja w-25" id="lblMetodoTarjeta">
+            <input type="radio" name="metodo_pago" value="tarjeta" id="metodoTarjeta" autocomplete="off" checked> Tarjeta
+          </label>
+          <label class="btn btn-outline-naranja w-25" id="lblMetodoYape">
+            <input type="radio" name="metodo_pago" value="yape" id="metodoYape" autocomplete="off"> Yape
+          </label>
+          <label class="btn btn-outline-naranja w-25" id="lblMetodoPlin">
+            <input type="radio" name="metodo_pago" value="plin" id="metodoPlin" autocomplete="off"> Plin
+          </label>
+          <label class="btn btn-outline-naranja w-25" id="lblMetodoTransferencia">
+            <input type="radio" name="metodo_pago" value="transferencia" id="metodoTransferencia" autocomplete="off"> Transferencia
+          </label>
+        </div>
       </div>
 
-      <form id="formPagoSimulado" autocomplete="off">
+      <!-- === TARJETA === -->
+      <div id="panelTarjeta" class="metodo-panel card p-3 mb-3 border">
         <div class="mb-3">
           <label class="form-label fw-semibold">Número de tarjeta</label>
           <input type="text" id="numTarjeta" class="form-control" inputmode="numeric"
@@ -49,6 +61,81 @@
             <div class="form-text text-danger d-none" id="errCvv">CVV de 3 dígitos.</div>
           </div>
         </div>
+        <div class="alert alert-light border mb-0" style="font-size:0.85rem">
+          <strong>Tarjetas de prueba (simulación):</strong><br>
+          <span class="badge bg-success me-1">APRUEBA</span> 4111 1111 1111 1111<br>
+          <span class="badge bg-danger me-1">RECHAZA</span> 4000 0000 0000 0002 (fondos insuficientes)<br>
+          Cualquier otra tarjeta válida se simula como <strong>rechazada</strong>.
+        </div>
+      </div>
+
+      <!-- === YAPE === -->
+      <div id="panelYape" class="metodo-panel card p-3 mb-3 border d-none">
+        <div class="text-center mb-3">
+          <div class="qr-placeholder d-inline-block border p-2 rounded" style="width:150px;height:150px;background:#f8f9fa">
+            <svg width="150" height="150" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+              <rect width="100" height="100" fill="none" stroke="#ccc" stroke-width="1"/>
+              <text x="50" y="50" text-anchor="middle" dy=".35em" font-size="10" fill="#999">QR YAPE</text>
+            </svg>
+          </div>
+          <div class="mt-2 text-muted small">Escanea con la app Yape</div>
+        </div>
+        <div class="mb-3">
+          <label class="form-label fw-semibold">Código de operación (6 dígitos)</label>
+          <input type="text" id="codigoYape" class="form-control" inputmode="numeric"
+                 placeholder="123456" maxlength="6" required>
+          <div class="form-text text-danger d-none" id="errYape">Código de 6 dígitos.</div>
+        </div>
+      </div>
+
+      <!-- === PLIN === -->
+      <div id="panelPlin" class="metodo-panel card p-3 mb-3 border d-none">
+        <div class="text-center mb-3">
+          <div class="qr-placeholder d-inline-block border p-2 rounded" style="width:150px;height:150px;background:#f8f9fa">
+            <svg width="150" height="150" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+              <rect width="100" height="100" fill="none" stroke="#ccc" stroke-width="1"/>
+              <text x="50" y="50" text-anchor="middle" dy=".35em" font-size="10" fill="#999">QR PLIN</text>
+            </svg>
+          </div>
+          <div class="mt-2 text-muted small">Escanea con la app Plin</div>
+        </div>
+        <div class="mb-3">
+          <label class="form-label fw-semibold">Código de operación (6 dígitos)</label>
+          <input type="text" id="codigoPlin" class="form-control" inputmode="numeric"
+                 placeholder="123456" maxlength="6" required>
+          <div class="form-text text-danger d-none" id="errPlin">Código de 6 dígitos.</div>
+        </div>
+      </div>
+
+      <!-- === TRANSFERENCIA === -->
+      <div id="panelTransferencia" class="metodo-panel card p-3 mb-3 border d-none">
+        <div class="row g-3 mb-3">
+          <div class="col-md-6">
+            <label class="form-label fw-semibold">Banco</label>
+            <input type="text" class="form-control" value="Banco Ejemplo" readonly>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label fw-semibold">CCI</label>
+            <input type="text" class="form-control" value="000-000-000000000001" readonly>
+          </div>
+        </div>
+        <div class="mb-3">
+          <label class="form-label fw-semibold">Número de cuenta</label>
+          <input type="text" class="form-control" value="0000-1234-567890" readonly>
+        </div>
+        <div class="mb-3">
+          <label class="form-label fw-semibold">Número de operación</label>
+          <input type="text" id="numOperacion" class="form-control" inputmode="numeric"
+                 placeholder="Ej: OP12345678" maxlength="20" required>
+          <div class="form-text text-danger d-none" id="errTransferencia">Número de operación obligatorio.</div>
+          <div class="form-text text-muted">
+            El pedido queda <strong>pendiente de verificación</strong> hasta que la administradora lo confirme desde su panel.
+          </div>
+        </div>
+      </div>
+
+      <form id="formPagoSimulado" autocomplete="off" novalidate>
+        <input type="hidden" id="csrf_input" name="csrf_token" value="{{ csrf_token }}">
         <button type="submit" id="btnPagar" class="btn btn-naranja w-100 fw-bold" disabled>
           <i class="fa fa-lock me-2"></i>Pagar S/ {{ '%.2f'|format(total|float) }} (simulado)
         </button>
@@ -63,19 +150,40 @@
 </div>
 
 <script>
-// Constantes de la demo: deben coincidir con services/pasarela/simulada.py
-// (lo vigila tests/test_pago_simulado.py).
 const TARJETA_APRUEBA = '4111111111111111';
 const TARJETA_RECHAZA = '4000000000000002';
 const CSRF_TOKEN = {{ csrf_token|tojson }};
+const ID_TRANSACCION = {{ pago.id_transaccion|tojson }};
 
+const radios = document.querySelectorAll('input[name="metodo_pago"]');
+const paneles = {
+  tarjeta: document.getElementById('panelTarjeta'),
+  yape: document.getElementById('panelYape'),
+  plin: document.getElementById('panelPlin'),
+  transferencia: document.getElementById('panelTransferencia'),
+};
+const btn = document.getElementById('btnPagar');
+const resultado = document.getElementById('resultado');
+
+function mostrarMetodo(metodo) {
+  Object.entries(paneles).forEach(([key, el]) => {
+    el.classList.toggle('d-none', key !== metodo);
+  });
+}
+radios.forEach(r => r.addEventListener('change', () => {
+  mostrarMetodo(r.value);
+  btn.disabled = true;
+  resultado.classList.add('d-none');
+  resultado.innerHTML = '';
+}));
+mostrarMetodo('tarjeta');
+
+// ---- Validación tarjeta ----
 const elNum = document.getElementById('numTarjeta');
 const elVenc = document.getElementById('vencimiento');
 const elCvv = document.getElementById('cvv');
-const btn = document.getElementById('btnPagar');
 
 elNum.addEventListener('input', () => {
-  // Formato: grupos de 4 dígitos
   const d = elNum.value.replace(/\D/g, '').slice(0, 16);
   elNum.value = d.replace(/(\d{4})(?=\d)/g, '$1 ');
   validar();
@@ -101,62 +209,134 @@ function luhn(num) {
   return suma % 10 === 0;
 }
 
+// ---- Validación Yape/Plin ----
+const elYape = document.getElementById('codigoYape');
+const elPlin = document.getElementById('codigoPlin');
+elYape.addEventListener('input', () => {
+  elYape.value = elYape.value.replace(/\D/g, '').slice(0, 6);
+  validar();
+});
+elPlin.addEventListener('input', () => {
+  elPlin.value = elPlin.value.replace(/\D/g, '').slice(0, 6);
+  validar();
+});
+
+// ---- Validación Transferencia ----
+const elOp = document.getElementById('numOperacion');
+elOp.addEventListener('input', validar);
+
 function validar() {
-  const dNum = elNum.value.replace(/\D/g, '');
-  const dVenc = elVenc.value.replace(/\D/g, '');
-  const dCvv = elCvv.value;
-  const okNum = dNum.length === 16 && luhn(dNum);
-  const okVenc = (() => {
-    if (dVenc.length !== 4) return false;
-    const mm = parseInt(dVenc.slice(0, 2), 10);
-    const aa = 2000 + parseInt(dVenc.slice(2), 10);
-    if (mm < 1 || mm > 12) return false;
-    const hoy = new Date();
-    return aa > hoy.getFullYear() || (aa === hoy.getFullYear() && mm >= hoy.getMonth() + 1);
-  })();
-  const okCvv = /^\d{3}$/.test(dCvv);
-  document.getElementById('errNumero').classList.toggle('d-none', okNum || dNum.length === 0);
-  document.getElementById('errVenc').classList.toggle('d-none', okVenc || dVenc.length === 0);
-  document.getElementById('errCvv').classList.toggle('d-none', okCvv || dCvv.length === 0);
-  btn.disabled = !(okNum && okVenc && okCvv);
+  const metodo = document.querySelector('input[name="metodo_pago"]:checked').value;
+  let ok = false;
+  document.getElementById('errNumero').classList.add('d-none');
+  document.getElementById('errVenc').classList.add('d-none');
+  document.getElementById('errCvv').classList.add('d-none');
+  document.getElementById('errYape').classList.add('d-none');
+  document.getElementById('errPlin').classList.add('d-none');
+  document.getElementById('errTransferencia').classList.add('d-none');
+
+  if (metodo === 'tarjeta') {
+    const dNum = elNum.value.replace(/\D/g, '');
+    const dVenc = elVenc.value.replace(/\D/g, '');
+    const dCvv = elCvv.value;
+    const okNum = dNum.length === 16 && luhn(dNum);
+    const okVenc = (() => {
+      if (dVenc.length !== 4) return false;
+      const mm = parseInt(dVenc.slice(0, 2), 10);
+      const aa = 2000 + parseInt(dVenc.slice(2), 10);
+      if (mm < 1 || mm > 12) return false;
+      const hoy = new Date();
+      return aa > hoy.getFullYear() || (aa === hoy.getFullYear() && mm >= hoy.getMonth() + 1);
+    })();
+    const okCvv = /^\d{3}$/.test(dCvv);
+    document.getElementById('errNumero').classList.toggle('d-none', okNum || dNum.length === 0);
+    document.getElementById('errVenc').classList.toggle('d-none', okVenc || dVenc.length === 0);
+    document.getElementById('errCvv').classList.toggle('d-none', okCvv || dCvv.length === 0);
+    ok = okNum && okVenc && okCvv;
+  } else if (metodo === 'yape' || metodo === 'plin') {
+    const el = metodo === 'yape' ? elYape : elPlin;
+    const err = metodo === 'yape' ? document.getElementById('errYape') : document.getElementById('errPlin');
+    const d = el.value;
+    const ok6 = /^\d{6}$/.test(d);
+    err.classList.toggle('d-none', ok6 || d.length === 0);
+    ok = ok6;
+  } else if (metodo === 'transferencia') {
+    const d = elOp.value.trim();
+    const okOp = d.length > 0;
+    document.getElementById('errTransferencia').classList.toggle('d-none', okOp || d.length === 0);
+    ok = okOp;
+  }
+  btn.disabled = !ok;
 }
 
+// ---- Envío ----
+let enviando = false;
 document.getElementById('formPagoSimulado').addEventListener('submit', (e) => {
   e.preventDefault();
-  btn.disabled = true;
-  const dNum = elNum.value.replace(/\D/g, '');
-  // La decisión es determinista según la tarjeta de prueba. Los datos de
-  // la tarjeta NUNCA salen de este navegador: al servidor solo viaja el
-  // RESULTADO simulado. El monto real lo recalcula el servidor.
-  const resultado = (dNum === TARJETA_APRUEBA) ? 'aprobado' : 'rechazado';
+  if (enviando) return;
+  const metodo = document.querySelector('input[name="metodo_pago"]:checked').value;
+  const payload = { metodo_pago: metodo };
 
-  fetch('/pago/simulado/{{ pago.id_transaccion }}/procesar', {
+  if (metodo === 'tarjeta') {
+    payload.numero_tarjeta = elNum.value.replace(/\D/g, '');
+  } else if (metodo === 'yape') {
+    payload.codigo_operacion = elYape.value;
+  } else if (metodo === 'plin') {
+    payload.codigo_operacion = elPlin.value;
+  } else if (metodo === 'transferencia') {
+    payload.numero_operacion = elOp.value.trim();
+  }
+
+  enviando = true;
+  btn.disabled = true;
+  btn.innerHTML = '<i class="fa fa-spinner fa-spin me-2"></i>Procesando…';
+
+  fetch('/pago/simulado/' + ID_TRANSACCION + '/procesar', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-CSRFToken': CSRF_TOKEN },
-    body: JSON.stringify({ resultado: resultado })
+    body: JSON.stringify(payload)
   })
   .then(r => r.json())
   .then(d => {
-    const caja = document.getElementById('resultado');
-    caja.classList.remove('d-none');
+    resultado.classList.remove('d-none');
     if (d.ok && (d.estado === 'confirmado' || d.estado === 'ya_confirmado')) {
-      caja.innerHTML = '<div class="alert alert-success mb-0"><i class="fa fa-check-circle me-2"></i>' +
+      resultado.innerHTML = '<div class="alert alert-success mb-0"><i class="fa fa-check-circle me-2"></i>' +
         'Pago aprobado (simulado). Redirigiendo a tu pedido…</div>';
       setTimeout(() => {
         window.location.href = '/pedido_aceptado?id=' + (d.id_pedido || {{ pago.id_venta }});
       }, 1200);
+    } else if (d.estado === 'pendiente') {
+      resultado.innerHTML = '<div class="alert alert-info mb-0"><i class="fa fa-hourglass me-2"></i>' +
+        (d.mensaje || 'Pago pendiente de verificación por la administradora.') + '</div>';
+      setTimeout(() => {
+        window.location.href = '/mis_pedidos';
+      }, 1500);
     } else if (d.estado === 'rechazado' || d.estado === 'ya_rechazado') {
-      caja.innerHTML = '<div class="alert alert-danger mb-0"><i class="fa fa-times-circle me-2"></i>' +
-        'El pago fue rechazado (simulado). Puedes ver el estado en <a href="/mis_pedidos">mis pedidos</a>.</div>';
+      btn.disabled = false;
+      enviando = false;
+      btn.innerHTML = '<i class="fa fa-lock me-2"></i>Pagar S/ {{ \'%.2f\'|format(total|float) }} (simulado)';
+      resultado.innerHTML = '<div class="alert alert-danger mb-0"><i class="fa fa-times-circle me-2"></i>' +
+        (d.motivo || 'El pago fue rechazado (simulado). Puedes reintentar.') + '</div>';
+    } else if (d.estado === 'repetido') {
+      btn.disabled = false;
+      enviando = false;
+      btn.innerHTML = '<i class="fa fa-lock me-2"></i>Pagar S/ {{ \'%.2f\'|format(total|float) }} (simulado)';
+      resultado.innerHTML = '<div class="alert alert-warning mb-0"><i class="fa fa-exclamation-triangle me-2"></i>' +
+        'Este pago ya fue procesado. Verifica en <a href="/mis_pedidos">mis pedidos</a>.</div>';
     } else {
-      caja.innerHTML = '<div class="alert alert-warning mb-0"><i class="fa fa-exclamation-triangle me-2"></i>' +
+      btn.disabled = false;
+      enviando = false;
+      btn.innerHTML = '<i class="fa fa-lock me-2"></i>Pagar S/ {{ \'%.2f\'|format(total|float) }} (simulado)';
+      resultado.innerHTML = '<div class="alert alert-warning mb-0"><i class="fa fa-exclamation-triangle me-2"></i>' +
         (d.motivo || d.error || ('Estado: ' + d.estado)) + '</div>';
     }
   })
   .catch(() => {
-    const caja = document.getElementById('resultado');
-    caja.classList.remove('d-none');
-    caja.innerHTML = '<div class="alert alert-danger mb-0">Error de conexión. Intenta de nuevo.</div>';
+    btn.disabled = false;
+    enviando = false;
+    btn.innerHTML = '<i class="fa fa-lock me-2"></i>Pagar S/ {{ \'%.2f\'|format(total|float) }} (simulado)';
+    resultado.classList.remove('d-none');
+    resultado.innerHTML = '<div class="alert alert-danger mb-0">Error de conexión. Intenta de nuevo.</div>';
   });
 });
 </script>
