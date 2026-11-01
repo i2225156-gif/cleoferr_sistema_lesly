@@ -5798,6 +5798,9 @@ def pago_simulado_procesar(id_transaccion):
                               'codigo_operacion': codigo,
                               'estado_pago': 'pendiente_verificacion'},
                              ensure_ascii=False), pago['id_pago']))
+            cursor.execute("""
+                UPDATE venta SET num_operacion = %s WHERE id_venta = %s
+            """, (codigo, pago['id_venta']))
         elif metodo == 'transferencia':
             num_op = str(data.get('numero_operacion') or '').strip()
             if not num_op:
@@ -5816,6 +5819,9 @@ def pago_simulado_procesar(id_transaccion):
                               'numero_operacion': num_op,
                               'estado_transferencia': 'pendiente_verificacion'},
                              ensure_ascii=False), pago['id_pago']))
+            cursor.execute("""
+                UPDATE venta SET num_operacion = %s WHERE id_venta = %s
+            """, (num_op, pago['id_venta']))
 
         id_evento = f"checkout-{id_transaccion}-{metodo}-{int(time.time())}"
         id_pago_evento = registrar_evento(

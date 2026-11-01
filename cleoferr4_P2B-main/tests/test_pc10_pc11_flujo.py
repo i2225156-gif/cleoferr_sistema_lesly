@@ -128,3 +128,24 @@ def test_cambio_de_metodo_guarda_el_metodo_final_y_el_mismo_pedido(
     assert pago_aprobado['metodo_final'] == metodo_final
     fx['cur'].execute("SELECT COUNT(*) AS n FROM venta")
     assert fx['cur'].fetchone()['n'] == ventas_antes
+
+
+@pytest.mark.parametrize('metodo_final', ['yape', 'plin'])
+def test_operacion_yape_plin_se_guarda_en_la_misma_venta(fx, metodo_final):
+    pedido = _crear_pedido(fx, metodo='tarjeta')
+    trx = pedido['checkout_url'].rstrip('/').rsplit('/', 1)[-1]
+    assert _pago_de(fx, trx)['num_operacion'] is None
+    codigo = str(100000 + (_uuid.uuid4().int % 900000))
+
+    r = fx['client'].post(f'/pago/simulado/{trx}/procesar', json={
+        'metodo_pago': metodo_final,
+        'codigo_operacion': codigo,
+        'csrf_token': 'token-test',
+    })
+
+    assert r.status_code == 200
+    pago = _pago_de(fx, trx)
+    assert pago['id_venta'] == pedido['id_pedido']
+    assert pago['metodo_final'] == metodo_final
+    assert pago['num_operacion'] == codigo
+    assert pago['estado_venta'] == 'pendiente'
