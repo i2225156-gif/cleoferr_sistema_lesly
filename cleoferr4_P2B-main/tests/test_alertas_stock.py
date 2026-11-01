@@ -8,13 +8,14 @@ disparan la sincronizacion con esa misma conexion inyectada (el commit
 de la ruta es no-op en el proxy, todo queda en la transaccion) y
 verifican la invariante global: los datos reales tambien quedan
 sincronizados dentro de la transaccion y se revierten al final.
+La invariante global esta ACOTADA al tipo 1 (stock bajo): con RF17 el
+tipo 3 (vencimiento) tambien genera alertas sin resolver.
 """
 import uuid as _uuid
 
 import psycopg2
 import psycopg2.extras
 import pytest
-from sqlalchemy import text
 
 import db_supabase
 import app as modulo_app
@@ -133,10 +134,44 @@ def test_tras_sync_ninguna_alerta_activa_de_producto_repuesto(fx):
     assert cur.fetchone()['cnt'] == 1
 
 
-def test_todas_las_alertas_sin_resolver_son_de_stock_bajo():
-    """Invariante global de solo lectura: sin resolver solo hay alertas
-    de stock bajo (id_tipo_alerta = 1)."""
-    with db_supabase.engine_tienda.connect() as c:
-        n = c.execute(text("SELECT COUNT(*) FROM alerta"
-                           " WHERE resuelta = FALSE AND id_tipo_alerta != 1")).scalar()
-    assert n == 0
+def test_todas_las_alertas_de_stock_bajo_sin_resolver_son_de_productos_bajos(fx):
+    """Invariante GLOBAL de solo lectura ACOTADA al tipo 1 (stock bajo).
+
+    Con RF17 (c4d943c) el tipo 3 (vencimiento por producto) tambien
+    genera alertas sin resolver: la invariante 'todo lo sin resolver es
+    de stock bajo' quedo obsoleta (la BD real tiene alertas de
+    vencimiento pendientes). Ahora la invariante es la del tipo 1: toda
+    alerta de stock bajo sin resolver corresponde a un producto con
+    stock bajo. Se mide sobre datos SINTETICOS (antes + 1) para no
+    depender de las alertas vivas.
+    """
+    cur = fx['cur']
+    id_bajo = fx['ids_bajos'][1]      # producto bajo SIN alerta previa
+    cur.execute("""
+        SELECT COUNT(*) AS cnt FROM alerta
+         WHERE resuelta = FALSE AND id_tipo_alerta = 1 AND id_producto = %s
+    """, (id_bajo,))
+    antes = cur.fetchone()['cnt']
+    r = fx['vendedor'].get('/alertas')
+    assert r.status_code == 200
+    # La sincronizacion creo la que faltaba (antes + 1)...
+    cur.execute("""
+        SELECT COUNT(*) AS cnt FROM alerta
+         WHERE resuelta = FALSE AND id_tipo_alerta = 1 AND id_producto = %s
+    """, (id_bajo,))
+    assert cur.fetchone()['cnt'] == antes + 1
+    # ...y no duplico la que ya existia (antes + 0).
+    cur.execute("""
+        SELECT COUNT(*) AS cnt FROM alerta
+         WHERE resuelta = FALSE AND id_tipo_alerta = 1 AND id_producto = %s
+    """, (fx['ids_bajos'][0],))
+    assert cur.fetchone()['cnt'] == 1
+    # GLOBAL (tipo 1): ninguna alerta de stock bajo sin resolver pertenece
+    # a un producto con stock >= 15 (las de tipo 3 no entran en la cuenta).
+    cur.execute("""
+        SELECT COUNT(*) AS cnt FROM alerta
+         WHERE resuelta = FALSE AND id_tipo_alerta = 1
+           AND id_producto NOT IN (SELECT id_producto FROM producto
+                                    WHERE stock < 15)
+    """)
+    assert cur.fetchone()['cnt'] == 0
