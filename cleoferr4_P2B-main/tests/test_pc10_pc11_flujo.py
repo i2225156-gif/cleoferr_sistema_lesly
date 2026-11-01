@@ -1,4 +1,5 @@
 """Pruebas del flujo PC10→PC11 con transacción local y rollback."""
+from pathlib import Path
 import uuid as _uuid
 
 import psycopg2
@@ -149,3 +150,38 @@ def test_operacion_yape_plin_se_guarda_en_la_misma_venta(fx, metodo_final):
     assert pago['metodo_final'] == metodo_final
     assert pago['num_operacion'] == codigo
     assert pago['estado_venta'] == 'pendiente'
+
+
+def test_contrato_http_de_compra_y_pago_no_acepta_datos_de_tarjeta():
+    raiz = Path(__file__).resolve().parent.parent
+    carrito = (raiz / 'templates' / 'carrito.html').read_text(encoding='utf-8')
+    pago_html = (raiz / 'templates' / 'pago_simulado.html').read_text(encoding='utf-8')
+    app_py = (raiz / 'app.py').read_text(encoding='utf-8')
+    confirmacion = carrito.split('function confirmarPedidoFinal()', 1)[1]
+    envio_pago = pago_html.split(
+        "document.getElementById('formPagoSimulado').addEventListener('submit'", 1)[1]
+    procesamiento = app_py.split('def pago_simulado_procesar', 1)[1].split(
+        '@app.route', 1)[0]
+
+    for bloque in (confirmacion, envio_pago, procesamiento):
+        for campo in ('numero_tarjeta', 'vencimiento', 'cvv'):
+            assert f'payload.{campo}' not in bloque
+            assert f"data.get('{campo}'" not in bloque
+            assert f'{campo}:' not in bloque
+
+
+def test_tarjeta_aprobada_sin_enviar_numero_vencimiento_ni_cvv(fx):
+    pedido = _crear_pedido(fx, metodo='tarjeta')
+    trx = pedido['checkout_url'].rstrip('/').rsplit('/', 1)[-1]
+
+    r = fx['client'].post(f'/pago/simulado/{trx}/procesar', json={
+        'metodo_pago': 'tarjeta',
+        'resultado': 'aprobado',
+        'csrf_token': 'token-test',
+    })
+
+    assert r.status_code == 200
+    assert r.get_json()['estado'] == 'confirmado'
+    pago = _pago_de(fx, trx)
+    assert pago['estado_pago'] == 'confirmado'
+    assert pago['estado_venta'] == 'confirmado'

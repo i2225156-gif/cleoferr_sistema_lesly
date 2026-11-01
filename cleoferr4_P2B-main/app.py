@@ -5712,8 +5712,8 @@ def pago_simulado(id_transaccion):
 def pago_simulado_procesar(id_transaccion):
     """Procesa el pago simulado según el método elegido.
 
-    - tarjeta: 4111... aprueba; 4000...0002 rechaza por fondos insuficientes;
-               cualquier otra se rechaza como inválida.
+    - tarjeta: recibe solo el resultado simulado; 'aprobado' confirma y
+               'fondos_insuficientes' o 'rechazado' rechaza.
     - yape / plin: código de operación de 6 dígitos -> aprobado.
     - transferencia: número de operación -> queda 'pendiente' hasta que la
       administradora lo confirme desde su panel (no se confirma aquí).
@@ -5772,11 +5772,11 @@ def pago_simulado_procesar(id_transaccion):
         estado_final = None
         motivo = ''
         if metodo == 'tarjeta':
-            numero = ''.join(ch for ch in str(data.get('numero_tarjeta') or '') if ch.isdigit())
-            if numero == '4111111111111111':
+            resultado_tarjeta = str(data.get('resultado') or '').strip().lower()
+            if resultado_tarjeta == 'aprobado':
                 estado_final = EstadoPago.CONFIRMADO
                 motivo = 'Pago aprobado (simulado).'
-            elif numero == '4000000000000002':
+            elif resultado_tarjeta == 'fondos_insuficientes':
                 estado_final = EstadoPago.RECHAZADO
                 motivo = 'Fondos insuficientes (simulado).'
             else:

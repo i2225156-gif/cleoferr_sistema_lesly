@@ -278,7 +278,9 @@ document.getElementById('formPagoSimulado').addEventListener('submit', (e) => {
   const payload = { metodo_pago: metodo };
 
   if (metodo === 'tarjeta') {
-    payload.numero_tarjeta = elNum.value.replace(/\D/g, '');
+    const numero = elNum.value.replace(/\D/g, '');
+    payload.resultado = numero === TARJETA_APRUEBA ? 'aprobado'
+      : (numero === TARJETA_RECHAZA ? 'fondos_insuficientes' : 'rechazado');
   } else if (metodo === 'yape') {
     payload.codigo_operacion = elYape.value;
   } else if (metodo === 'plin') {
