@@ -385,7 +385,7 @@
                         <button class="btn btn-outline-secondary px-4" onclick="irPaso(2)">
                             <i class="fa fa-arrow-left me-1"></i> Atrás
                         </button>
-                        <button class="btn btn-success px-4 fw-bold" onclick="confirmarPedidoFinal()">
+                        <button class="btn btn-success px-4 fw-bold" id="btnConfirmarPedido" onclick="confirmarPedidoFinal()">
                             <i class="fa fa-check me-1"></i> Confirmar pedido
                         </button>
                     </div>
@@ -857,6 +857,10 @@ function confirmarPedidoFinal() {
     const numOp = document.getElementById('numOperacion') ? document.getElementById('numOperacion').value.trim() : '';
     // Validar RUC si es factura
     if (!validarRucFactura(ruc)) return;
+    // Bloquear el botón al primer clic para evitar peticiones duplicadas.
+    // Se reactiva solo si la respuesta es un error (para poder reintentar).
+    const btnConfirmar = document.getElementById('btnConfirmarPedido');
+    if (btnConfirmar) btnConfirmar.disabled = true;
     fetch('/carrito/confirmar_v2', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -905,10 +909,12 @@ function confirmarPedidoFinal() {
             } else {
                 await avisoAccion({ mensaje: 'Error al procesar el pedido: ' + (d.error || 'intenta de nuevo'), tipo: 'error', persistente: true });
             }
+            if (btnConfirmar) btnConfirmar.disabled = false;
         }
     })
     .catch(async () => {
         await avisoAccion({ mensaje: 'Error de conexión. Intenta de nuevo.', tipo: 'error', persistente: true });
+        if (btnConfirmar) btnConfirmar.disabled = false;
     });
 }
 

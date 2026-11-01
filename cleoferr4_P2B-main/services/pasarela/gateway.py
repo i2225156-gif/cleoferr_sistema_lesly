@@ -125,7 +125,7 @@ class SimulatedGateway(PaymentGateway):
 
         id_cargo = f"chr_sim_{secrets.token_hex(8)}"
         metodo = (solicitud.metodo or "tarjeta").strip().lower()
-        estado = self._evaluar_estado(metodo, solicitud.datos_cliente or {})
+        estado = "pendiente"
 
         cargo = {
             "id": id_cargo,
@@ -138,7 +138,7 @@ class SimulatedGateway(PaymentGateway):
             "mensaje": self._mensaje_estado(estado, metodo),
             "ultimos_4": None,
             "marca": None,
-            "requiere_verificacion": estado == "pendiente",
+            "requiere_verificacion": metodo != "tarjeta",
             "creado_en": time.time(),
         }
         # Solo tarjeta guarda últimos 4 y marca (siempre enmascarados).
@@ -201,6 +201,8 @@ class SimulatedGateway(PaymentGateway):
                 "Transferencia bancaria recibida. El pedido queda pendiente "
                 "de verificación por la administradora."
             ) if estado == "pendiente" else "Transferencia procesada."
+        if estado == "pendiente":
+            return "Pago iniciado. Continúa en la pantalla de pago (simulación)."
         if estado == "aprobado":
             return "Pago aprobado (simulación)."
         if estado == "rechazado":

@@ -5240,7 +5240,9 @@ def carrito_confirmar_v2():
     metodo_pago      = data.get('metodo_pago', 'efectivo')
     tipo_comprobante = data.get('tipo_comprobante', 'boleta_simple')
     ruc              = (data.get('ruc') or '').strip() or None
-    num_operacion    = (data.get('num_operacion') or '').strip() or None
+    num_operacion = None
+    if metodo_pago in ('yape', 'plin', 'transferencia'):
+        num_operacion = (data.get('num_operacion') or '').strip() or None
 
     if not items:
         return {'ok': False, 'error': 'Carrito vacío'}
@@ -5311,7 +5313,8 @@ def carrito_confirmar_v2():
         try:
             cursor_ses.execute("""
                 SELECT v.id_venta, v.id_estado_venta, ev.nombre AS estado_venta,
-                       p.id_pago, p.estado AS estado_pago
+                       p.id_pago, p.estado AS estado_pago,
+                       p.id_transaccion, p.detalle_proveedor
                   FROM venta v
                   LEFT JOIN pago p ON p.id_venta = v.id_venta
                   LEFT JOIN estado_venta ev ON ev.id_estado_venta = v.id_estado_venta
@@ -5319,6 +5322,24 @@ def carrito_confirmar_v2():
             """, (id_venta_sesion, session['usuario_id']))
             fila_ses = cursor_ses.fetchone()
             if fila_ses and fila_ses['estado_venta'] == 'pendiente' and fila_ses['estado_pago'] == 'pendiente':
+                # Si el pago ya se inició (tiene id_transaccion), devolver el
+                # mismo pedido y su checkout_url sin tocar nada: NUNCA cancelar
+                # un pedido que ya tiene un pago iniciado por una petición repetida.
+                if fila_ses.get('id_transaccion'):
+                    dp = fila_ses.get('detalle_proveedor') or {}
+                    if isinstance(dp, str):
+                        try:
+                            dp = json.loads(dp)
+                        except Exception:
+                            dp = {}
+                    checkout_url = (dp or {}).get('checkout_url') if isinstance(dp, dict) else None
+                    return {'ok': True,
+                            'id_pedido': fila_ses['id_venta'],
+                            'id_pago': fila_ses['id_pago'],
+                            'checkout_url': checkout_url,
+                            'mensaje': 'Pedido existente reutilizado (pago ya iniciado).',
+                            'total': None,
+                            'reutilizado': True}
                 return {'ok': True,
                         'id_pedido': fila_ses['id_venta'],
                         'id_pago': fila_ses['id_pago'],
@@ -5426,6 +5447,12 @@ def carrito_confirmar_v2():
         # total RECALCULADO de detalle_venta (Decimal), jamás del navegador.
         # La pasarela se llama SOLO después del commit: nunca con una
         # transacción abierta ni antes de guardar.
+        if num_operacion:
+            cursor.execute("SELECT 1 FROM venta WHERE num_operacion = %s LIMIT 1", (num_operacion,))
+            if cursor.fetchone():
+                conn.rollback()
+                return {'ok': False,
+                        'error': 'Este número de operación ya fue registrado en otro pedido. Verifica el código de tu Yape o Plin.'}, 409
         cursor.execute("""
             INSERT INTO venta (id_tipo_venta, id_cliente, id_estado_venta, num_operacion)
             VALUES ((SELECT id_tipo_venta FROM tipo_venta WHERE nombre = 'online'),
@@ -5548,7 +5575,15 @@ def carrito_confirmar_v2():
             return {'ok': False,
                     'error': 'No se pudo iniciar el pago. El pedido fue cancelado. Intenta de nuevo.'}, 502
 
-        if not resultado_pasarela.id_pago_proveedor or resultado_pasarela.estado is not EstadoPago.PENDIENTE:
+        app.logger.info(
+            "TEMP crear_pago estado_tipo=%s estado_valor=%r id_pago_proveedor=%r checkout_url=%r",
+            type(resultado_pasarela.estado).__name__,
+            getattr(resultado_pasarela.estado, "value", resultado_pasarela.estado),
+            resultado_pasarela.id_pago_proveedor,
+            resultado_pasarela.checkout_url,
+        )
+
+        if not resultado_pasarela.id_pago_proveedor or resultado_pasarela.estado != EstadoPago.PENDIENTE:
             cancelar_pedido_con_pago_inicial(conn, id_venta)
             return {'ok': False,
                     'error': 'La pasarela no pudo iniciar el pago. El pedido fue cancelado.'}, 502
@@ -5588,6 +5623,10 @@ def carrito_confirmar_v2():
         # afectado y lo disponible; sin detalles técnicos ni 500 genérico.
         conn.rollback()
         return {'ok': False, 'error': str(e)}, 409
+    except _pg_errores.UniqueViolation:
+        conn.rollback()
+        return {'ok': False,
+                'error': 'Este número de operación ya fue registrado en otro pedido. Verifica el código de tu Yape o Plin.'}, 409
     except Exception:
         conn.rollback()
         app.logger.exception("Error carrito_confirmar_v2")

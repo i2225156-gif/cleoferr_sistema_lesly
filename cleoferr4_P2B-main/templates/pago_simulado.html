@@ -314,19 +314,19 @@ document.getElementById('formPagoSimulado').addEventListener('submit', (e) => {
     } else if (d.estado === 'rechazado' || d.estado === 'ya_rechazado') {
       btn.disabled = false;
       enviando = false;
-      btn.innerHTML = '<i class="fa fa-lock me-2"></i>Pagar S/ {{ \'%.2f\'|format(total|float) }} (simulado)';
+      btn.innerHTML = '<i class="fa fa-lock me-2"></i>Pagar S/ {{ "%.2f"|format(total|float) }} (simulado)';
       resultado.innerHTML = '<div class="alert alert-danger mb-0"><i class="fa fa-times-circle me-2"></i>' +
         (d.motivo || 'El pago fue rechazado (simulado). Puedes reintentar.') + '</div>';
     } else if (d.estado === 'repetido') {
       btn.disabled = false;
       enviando = false;
-      btn.innerHTML = '<i class="fa fa-lock me-2"></i>Pagar S/ {{ \'%.2f\'|format(total|float) }} (simulado)';
+      btn.innerHTML = '<i class="fa fa-lock me-2"></i>Pagar S/ {{ "%.2f"|format(total|float) }} (simulado)';
       resultado.innerHTML = '<div class="alert alert-warning mb-0"><i class="fa fa-exclamation-triangle me-2"></i>' +
         'Este pago ya fue procesado. Verifica en <a href="/mis_pedidos">mis pedidos</a>.</div>';
     } else {
       btn.disabled = false;
       enviando = false;
-      btn.innerHTML = '<i class="fa fa-lock me-2"></i>Pagar S/ {{ \'%.2f\'|format(total|float) }} (simulado)';
+      btn.innerHTML = '<i class="fa fa-lock me-2"></i>Pagar S/ {{ "%.2f"|format(total|float) }} (simulado)';
       resultado.innerHTML = '<div class="alert alert-warning mb-0"><i class="fa fa-exclamation-triangle me-2"></i>' +
         (d.motivo || d.error || ('Estado: ' + d.estado)) + '</div>';
     }
@@ -334,7 +334,7 @@ document.getElementById('formPagoSimulado').addEventListener('submit', (e) => {
   .catch(() => {
     btn.disabled = false;
     enviando = false;
-    btn.innerHTML = '<i class="fa fa-lock me-2"></i>Pagar S/ {{ \'%.2f\'|format(total|float) }} (simulado)';
+    btn.innerHTML = '<i class="fa fa-lock me-2"></i>Pagar S/ {{ "%.2f"|format(total|float) }} (simulado)';
     resultado.classList.remove('d-none');
     resultado.innerHTML = '<div class="alert alert-danger mb-0">Error de conexión. Intenta de nuevo.</div>';
   });
