@@ -1,6 +1,11 @@
 """POS (POST /ventas/nueva): contrato del descuento de stock (C2).
 
 Contra la BD real dentro de transacciones con rollback: nada persiste.
+Los productos son SINTETICOS (los del fixture): ninguna prueba depende
+del stock real de un producto de la BD, y las comprobaciones son
+relativas (antes + n). El rollback de la ruta (stock insuficiente)
+vuelve al SAVEPOINT del test: el montaje sintético sobrevive y se
+puede comprobar que no quedó nada escrito de la venta.
 La venta local usa la MISMA regla de descuento que el checkout online
 (UPDATE con guarda stock >= cantidad): no hay sobreventa secuencial ni
 por líneas duplicadas, y el camino feliz deja venta entregada + pago
@@ -19,10 +24,18 @@ from app import app
 
 
 class ConnProxy:
-    """commit() no-op: la ruta cree que commitea; el test hace rollback."""
+    """commit() no-op: la ruta cree que commitea; el test hace rollback.
 
-    def __init__(self, raw):
+    rollback() vuelve AL GUARDADO (SAVEPOINT) del test cuando lo tiene:
+    cuando la ruta falla por stock insuficiente hace conn.rollback() y
+    revierte su transacción; con el guardado el montaje sintético del
+    test (producto, cliente, caja) sobrevive y el test puede comprobar
+    que no quedó nada escrito de la venta. El teardown revierte todo.
+    """
+
+    def __init__(self, raw, guardado=None):
         self._raw = raw
+        self.guardado = guardado
 
     def cursor(self, dictionary=False, **kwargs):
         if dictionary:
@@ -33,7 +46,14 @@ class ConnProxy:
         pass
 
     def rollback(self):
-        self._raw.rollback()
+        if self.guardado:
+            cur = self._raw.cursor()
+            try:
+                cur.execute(f'ROLLBACK TO SAVEPOINT {self.guardado}')
+            finally:
+                cur.close()
+        else:
+            self._raw.rollback()
 
     def close(self):
         pass
@@ -44,7 +64,8 @@ def fx(monkeypatch):
     suf = _uuid.uuid4().hex[:10]
     raw_a = db_supabase.engine_auth.raw_connection()
     raw_t = db_supabase.engine_tienda.raw_connection()
-    proxy_a, proxy_t = ConnProxy(raw_a), ConnProxy(raw_t)
+    proxy_a = ConnProxy(raw_a)
+    proxy_t = ConnProxy(raw_t, guardado='pos_test')
     cur_a, cur_t = proxy_a.cursor(dictionary=True), proxy_t.cursor(dictionary=True)
     cur_a.execute("""
         INSERT INTO usuario (email, contrasena, id_rol, nombres, activo)
@@ -86,16 +107,10 @@ def fx(monkeypatch):
             VALUES (%s, 100.00, 'abierta') RETURNING id_caja
         """, (id_vendedor,))
         id_caja = cur_t.fetchone()['id_caja']
-    # producto real (menor stock >= 1) para las pruebas de rollback: al
-    # revertir la ruta su transacción, los sintéticos desaparecen del
-    # proxy; los reales siguen visibles para verificar que nada quedó
-    # descontado (excluido el sintético de este fixture).
-    cur_t.execute("""SELECT id_producto, nombre, stock FROM producto
-                      WHERE activo = TRUE AND stock >= 1
-                        AND nombre NOT LIKE %s
-                      ORDER BY stock ASC, id_producto LIMIT 1""",
-                  ("zzq-pos-%",))
-    real = cur_t.fetchone()
+    # Todo el montaje sintético (producto, cliente, caja) queda antes del
+    # guardado: el rollback de la ruta vuelve al guardado y el test sigue
+    # viendo su montaje para comprobar que la venta no escribió nada.
+    cur_t.execute("SAVEPOINT pos_test")
     monkeypatch.setattr(modulo_app, 'get_connection_auth', lambda: proxy_a)
     monkeypatch.setattr(modulo_app, 'get_connection_tienda', lambda: proxy_t)
     c = app.test_client()
@@ -105,10 +120,9 @@ def fx(monkeypatch):
         s['nombre'] = 'Vendedor POS'
         s['_csrf_token'] = 'token-test'
     yield {'client': c, 'cur': cur_t, 'id_cliente': id_cliente,
-           'id_producto': id_producto, 'id_caja': id_caja, 'suf': suf,
-           'real': real}
-    proxy_a.rollback()
-    proxy_t.rollback()
+           'id_producto': id_producto, 'id_caja': id_caja, 'suf': suf}
+    raw_a.rollback()
+    raw_t.rollback()
     raw_a.close()
     raw_t.close()
 
@@ -141,6 +155,13 @@ def _n_ventas(fx):
     return fx['cur'].fetchone()['n']
 
 
+def _n_movimientos(fx, id_producto):
+    fx['cur'].execute(
+        "SELECT COUNT(*) AS n FROM inventario_movimiento WHERE id_producto = %s",
+        (id_producto,))
+    return fx['cur'].fetchone()['n']
+
+
 def _venta_id(fx, respuesta):
     m = re.search(r'Venta local #(\d+)', respuesta.get_data(as_text=True))
     if m:
@@ -153,6 +174,8 @@ def _venta_id(fx, respuesta):
 
 def test_venta_local_camino_feliz_efecto_real(fx):
     cur = fx['cur']
+    stock_antes = _stock(fx)
+    mov_antes = _n_movimientos(fx, fx['id_producto'])
     r = _post_venta(fx, [(fx['id_producto'], 2)])
     html = r.get_data(as_text=True)
     assert r.status_code == 200
@@ -171,12 +194,14 @@ def test_venta_local_camino_feliz_efecto_real(fx):
                 (id_venta,))
     d = cur.fetchone()
     assert d['cantidad'] == 2 and float(d['precio_unitario']) == 12.50
-    # stock descontado con la guarda (10 pasa a 8) y movimiento de salida
-    assert _stock(fx) == 8
+    # stock descontado con la guarda (baja en 2) y movimiento de salida
+    assert _stock(fx) == stock_antes - 2
+    assert _n_movimientos(fx, fx['id_producto']) == mov_antes + 1
     cur.execute("""SELECT tipo, cantidad, stock_resultante FROM inventario_movimiento
                     WHERE observacion = %s""", (f'Venta local #{id_venta}',))
     mov = cur.fetchone()
-    assert mov['tipo'] == 'salida' and mov['cantidad'] == 2 and mov['stock_resultante'] == 8
+    assert mov['tipo'] == 'salida' and mov['cantidad'] == 2
+    assert mov['stock_resultante'] == stock_antes - 2
     # pago confirmado en efectivo y asociado a la caja del turno
     cur.execute("""SELECT p.estado, tp.nombre AS metodo, p.id_caja
                      FROM pago p JOIN tipo_pago tp ON tp.id_tipo_pago = p.id_tipo_pago
@@ -198,44 +223,33 @@ def test_venta_local_camino_feliz_efecto_real(fx):
 
 
 def test_venta_local_stock_insuficiente_rechazada_y_no_escribe(fx):
-    """Sobre un producto REAL: pedir más de lo que hay da flash claro y
-    NADA escrito (rollback de la ruta; verificado en datos comprometidos)."""
-    if not fx['real']:
-        pytest.skip('sin productos reales con stock')
-    cur = fx['cur']
-    pid, stock = fx['real']['id_producto'], fx['real']['stock']
-    cur.execute("SELECT COUNT(*) AS n FROM inventario_movimiento WHERE id_producto = %s",
-                (pid,))
-    mov_antes = cur.fetchone()['n']
+    """Sobre el producto SINTETICO del fixture: pedir más de lo que hay da
+    flash claro y NADA escrito (rollback de la ruta; verificado en datos
+    comprometidos)."""
+    pid = fx['id_producto']
+    stock = _stock(fx)
+    mov_antes = _n_movimientos(fx, pid)
+    ventas_antes = _n_ventas(fx)
     r = _post_venta(fx, [(pid, stock + 1)])
     html = r.get_data(as_text=True)
     assert 'Stock insuficiente' in html
     assert f'disponible: {stock}' in html
-    assert _n_ventas(fx) == 0
-    cur.execute("SELECT stock FROM producto WHERE id_producto = %s", (pid,))
-    assert cur.fetchone()['stock'] == stock
-    cur.execute("SELECT COUNT(*) AS n FROM inventario_movimiento WHERE id_producto = %s",
-                (pid,))
-    assert cur.fetchone()['n'] == mov_antes
+    assert _n_ventas(fx) == ventas_antes          # no se registró venta
+    assert _stock(fx) == stock                     # stock intacto
+    assert _n_movimientos(fx, pid) == mov_antes    # ningún movimiento
 
 
 def test_venta_local_lineas_duplicadas_no_sobrevenen(fx):
-    """Dos líneas que agotan el stock de un producto REAL: la segunda no
+    """Dos líneas que agotan el stock del producto SINTETICO: la segunda no
     encuentra stock y TODO se revierte (ni venta, ni detalle, ni
     descuento)."""
-    if not fx['real']:
-        pytest.skip('sin productos reales con stock')
-    cur = fx['cur']
-    pid, stock = fx['real']['id_producto'], fx['real']['stock']
-    cur.execute("SELECT COUNT(*) AS n FROM inventario_movimiento WHERE id_producto = %s",
-                (pid,))
-    mov_antes = cur.fetchone()['n']
+    pid = fx['id_producto']
+    stock = _stock(fx)
+    mov_antes = _n_movimientos(fx, pid)
+    ventas_antes = _n_ventas(fx)
     r = _post_venta(fx, [(pid, stock), (pid, stock)])
     html = r.get_data(as_text=True)
     assert 'Stock insuficiente' in html
-    assert _n_ventas(fx) == 0
-    cur.execute("SELECT stock FROM producto WHERE id_producto = %s", (pid,))
-    assert cur.fetchone()['stock'] == stock
-    cur.execute("SELECT COUNT(*) AS n FROM inventario_movimiento WHERE id_producto = %s",
-                (pid,))
-    assert cur.fetchone()['n'] == mov_antes
+    assert _n_ventas(fx) == ventas_antes          # no se registró venta
+    assert _stock(fx) == stock                     # stock intacto
+    assert _n_movimientos(fx, pid) == mov_antes    # ningún movimiento
