@@ -43,11 +43,14 @@ from services.comprobantes import (EMISOR, UMBRAL_BOLETA_SIN_DOC,
                                     texto_qr)
 from services.documentos import (NOMBRES_TIPO, normalizar_numero,
                                  tipo_documento_de_cliente, validar_documento)
-from services.horario import SQL_DIA_LIMA, SQL_HOY_LIMA, SQL_PARED_LIMA
+from services.horario import (SQL_DIA_LIMA, SQL_HOY_LIMA, SQL_PARED_LIMA,
+                            validar_rango_fechas)
 from services.inventario import devolver_stock_venta
 from services.ofertas import (SQL_IMPORTE_LINEA, SQL_PRECIO_VIGENTE,
                               calcular_descuento_unitario, oferta_vigente,
                               precios_vigentes)
+from services.reportes import (NOMBRES_TIPO, TIPOS_REPORTE, reporte,
+                               sql_top_productos)
 from services.validacion import (correo as _correo_valido, documento_proveedor,
                                  entero, nombre_persona,
                                  numero, requerido, telefono as _telefono_valido,
@@ -3235,17 +3238,7 @@ def reportes():
     if len(rango_params) == 2 and rango_params[0] > rango_params[1]:
         flash('Rango inválido: «desde» es posterior a «hasta».', 'warning')
         rango_sql, rango_params = "", []
-    sql_top = f"""
-        SELECT p.id_producto, p.nombre,
-               SUM(d.cantidad) AS unidades,
-               SUM({SQL_IMPORTE_LINEA.format(p='d.')}) AS monto
-          FROM detalle_venta d
-          JOIN venta v ON v.id_venta = d.id_venta
-          JOIN pago pg ON pg.id_venta = v.id_venta AND pg.estado = 'confirmado'
-          JOIN producto p ON p.id_producto = d.id_producto
-         WHERE 1=1{rango_sql}
-         GROUP BY p.id_producto, p.nombre
-    """
+    sql_top = sql_top_productos(rango_sql)
 
     try:
         # Ventas de hoy SOLO con pago confirmado (criterio del alcance §6.9).
@@ -3332,6 +3325,53 @@ def reportes():
                            top_unidades=top_unidades, top_monto=top_monto,
                            vencimiento=vencimiento,
                            vence_umbral=umbral_vencimiento_dias())
+
+
+@app.route('/reportes/generar')
+@login_required
+@permiso_required('reportes')
+def reportes_generar():
+    """Reporte por rango de fechas (lista blanca de tipos).
+
+    El rango sigue la politica UNICA de services.horario
+    (validar_rango_fechas): dias calendario Lima, «hasta» no futuro,
+    «desde» <= «hasta», por defecto los ultimos 30 dias y formato
+    invalido = caso seguro con aviso. Los resumenes se calculan sobre
+    TODO el conjunto filtrado; la tabla va paginada de 20 en 20.
+    """
+    tipo = (request.args.get('tipo') or '').strip().lower()
+    aviso = None
+    if tipo and tipo not in TIPOS_REPORTE:
+        aviso = f'Tipo de reporte desconocido («{tipo}»): se muestran ventas.'
+        tipo = 'ventas'
+    elif not tipo:
+        tipo = 'ventas'
+    try:
+        pagina = int(request.args.get('pagina', 1))
+    except (TypeError, ValueError):
+        pagina = 1
+    conn = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute(f"SELECT {SQL_HOY_LIMA} AS hoy")
+        fila = cursor.fetchone()
+        hoy = fila['hoy'] if fila else None
+        desde, hasta, aviso_rango = validar_rango_fechas(
+            request.args.get('desde'), request.args.get('hasta'), hoy=hoy)
+        if aviso_rango:
+            aviso = f'{aviso} {aviso_rango}' if aviso else aviso_rango
+        datos = reporte(tipo, cursor, desde, hasta, pagina, POR_PAGINA_ADMIN)
+    finally:
+        conn.close()
+    return render_template(
+        'reportes_rango.html',
+        tipo=tipo, tipo_nombre=NOMBRES_TIPO.get(tipo, tipo),
+        tipos=TIPOS_REPORTE, nombres_tipo=NOMBRES_TIPO,
+        desde=desde, hasta=hasta, aviso=aviso,
+        headers=datos['headers'], filas=datos['filas'],
+        total=datos['total'], pagina=datos['pagina'],
+        por_pagina=POR_PAGINA_ADMIN, resumen=datos['resumen'],
+        filtros_qs=_filtros_sin_pagina())
 
 
 # ── Alertas ─────────────────────────────────────────────────

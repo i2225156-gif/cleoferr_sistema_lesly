@@ -64,3 +64,13 @@ def test_los_enlaces_estaticos_de_las_plantillas_existen():
                 rotos.append(f'{plantilla.relative_to(RAIZ)}: {valor}')
     assert not rotos, ('enlaces a rutas que no existen:\n'
                         + '\n'.join(rotos))
+
+
+def test_el_reporte_por_rango_apunta_a_una_ruta_real():
+    """El formulario de /reportes (y el de la pagina del reporte) apuntan
+    a la ruta real del reporte por rango, no a una URL inventada."""
+    reglas = {str(regla.rule) for regla in app.url_map.iter_rules()}
+    assert '/reportes/generar' in reglas
+    for plantilla in ('reportes.html', 'reportes_rango.html'):
+        fuente = (RAIZ / plantilla).read_text(encoding='utf-8')
+        assert 'action="/reportes/generar"' in fuente, plantilla
