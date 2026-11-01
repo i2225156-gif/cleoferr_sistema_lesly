@@ -5756,6 +5756,18 @@ def pago_simulado_procesar(id_transaccion):
         """, (pago['id_venta'],))
         total = cursor.fetchone()['total']
 
+        # El método definitivo es el elegido en esta pantalla, no necesariamente
+        # el que inició el pedido. Se actualiza la MISMA fila de pago.
+        metodo_db = 'yape_plin' if metodo in ('yape', 'plin') else (
+                    'tarjeta' if metodo == 'tarjeta' else 'efectivo')
+        cursor.execute("""
+            UPDATE pago
+               SET id_tipo_pago = (SELECT id_tipo_pago FROM tipo_pago WHERE nombre = %s),
+                   detalle_proveedor = COALESCE(detalle_proveedor, '{}'::jsonb) || %s::jsonb
+             WHERE id_pago = %s
+        """, (metodo_db, json.dumps({'metodo': metodo}, ensure_ascii=False),
+              pago['id_pago']))
+
         # Evaluar estado según método (simulación determinista)
         estado_final = None
         motivo = ''
