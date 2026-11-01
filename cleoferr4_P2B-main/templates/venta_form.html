@@ -289,7 +289,7 @@ function renderCatalogo() {
                 ${sinStock ? 'disabled' : ''}
                 onclick="agregar(${p.id_producto})">
             <div class="p-codigo">#${p.id_producto}</div>
-            <div class="p-nombre">${p.nombre}</div>
+            <div class="p-nombre">${esc(p.nombre)}</div>
             <div class="p-precio">S/ ${parseFloat(p.precio).toFixed(2)}</div>
             <div class="p-stock">Stock: ${p.stock}</div>
         </button>`;
@@ -343,7 +343,7 @@ function renderTicket() {
         html += `
         <div class="pos-item">
             <div>
-                <div class="it-nombre">${it.nombre}</div>
+                <div class="it-nombre">${esc(it.nombre)}</div>
                 <div class="it-precio">S/ ${it.precio.toFixed(2)} c/u</div>
             </div>
             <div class="qty-box">
@@ -505,7 +505,7 @@ async function guardarClientePos() {
         document.getElementById('compResumen').innerHTML =
             '<span class="badge" style="background:#28a745;color:white">' +
             (esBoleta ? 'Boleta B001 – DNI ' : 'Factura F001 – RUC ') + document.getElementById('compDoc').value +
-            ' · ' + data.nombre + '</span>';
+            ' · ' + esc(data.nombre) + '</span>';
         setCliMsg(true, data.ya_existia
             ? 'Cliente ya existía con ese documento. Se vinculó a la venta.'
             : 'Cliente registrado y vinculado a la venta.');

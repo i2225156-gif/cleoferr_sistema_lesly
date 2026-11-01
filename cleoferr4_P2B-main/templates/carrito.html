@@ -442,7 +442,7 @@ function renderCarrito() {
         const tr = document.createElement('tr');
         tr.innerHTML = `
             <td>
-                <div class="fw-semibold" style="color:var(--gris-oscuro)">${item.nombre}</div>
+                <div class="fw-semibold" style="color:var(--gris-oscuro)">${esc(item.nombre)}</div>
                 <small class="text-muted">#${item.id}</small>
             </td>
             <td class="fw-bold" style="color:var(--naranja)">${precioCell}</td>
@@ -658,7 +658,7 @@ document.addEventListener('DOMContentLoaded', function() {
                             const condicion = d.condicion || '';
                             document.getElementById('rucEstado').innerHTML =
                                 `<span style="color:${estado.toLowerCase().includes('activo') ? '#28a745' : '#dc3545'};font-weight:600">
-                                    ${estado}${condicion ? ' · ' + condicion : ''}
+                                    ${esc(estado)}${condicion ? ' · ' + esc(condicion) : ''}
                                 </span>`;
                             rucDatos.style.display = 'block';
                             rucError.style.display = 'none';
@@ -756,15 +756,15 @@ function irPaso3() {
         <div class="mb-2"><strong>Método de pago:</strong> ${metodoLabel}</div>
         <div class="mb-2"><strong>Comprobante:</strong> ${compLabel}`;
     if (tipoComprobante === 'factura' && ruc) {
-        html += ` – RUC: ${ruc}`;
-        if (razonSocialActual) html += `<br><span style="font-size:0.85rem;color:#555">${razonSocialActual}</span>`;
+        html += ` – RUC: ${esc(ruc)}`;
+        if (razonSocialActual) html += `<br><span style="font-size:0.85rem;color:#555">${esc(razonSocialActual)}</span>`;
     }
     if (tipoComprobante === 'boleta_electronica' && dni) {
-        html += ` – DNI: ${dni}`;
-        if (nombreCompletoDni) html += `<br><span style="font-size:0.85rem;color:#555">${nombreCompletoDni}</span>`;
+        html += ` – DNI: ${esc(dni)}`;
+        if (nombreCompletoDni) html += `<br><span style="font-size:0.85rem;color:#555">${esc(nombreCompletoDni)}</span>`;
     }
     html += `</div><div class="mb-2"><strong>Productos:</strong></div><ul style="margin:0;padding-left:18px">`;
-    carrito.forEach(i => { html += `<li>${i.nombre} × ${i.cantidad} = S/ ${(i.precio * i.cantidad).toFixed(2)}</li>`; });
+    carrito.forEach(i => { html += `<li>${esc(i.nombre)} × ${i.cantidad} = S/ ${(i.precio * i.cantidad).toFixed(2)}</li>`; });
     html += `</ul><div class="mt-2 fw-bold" style="font-size:1rem;color:var(--naranja)">TOTAL: S/ ${total.toFixed(2)}</div>`;
     document.getElementById('resumenConfirmar').innerHTML = html;
     irPaso(3);

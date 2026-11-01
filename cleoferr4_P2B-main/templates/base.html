@@ -393,6 +393,20 @@
 </nav>
 {% endblock %}
 
+<script>
+// Escape de texto libre para innerHTML (UNA sola función para todas las
+// páginas): los nombres de producto/cliente y cualquier dato del usuario
+// NUNCA se interpolan crudos en un innerHTML.
+function esc(texto) {
+    const s = String(texto === undefined || texto === null ? '' : texto);
+    return s.replace(/&/g, '&' + 'amp;')
+            .replace(/</g, '&' + 'lt;')
+            .replace(/>/g, '&' + 'gt;')
+            .replace(/"/g, '&' + 'quot;')
+            .replace(/'/g, '&' + '#39;');
+}
+</script>
+
 <div class="container-fluid px-4 py-3">
 
     {# Flashes con wrapper estable: en admin el CSS del sidebar le hace
