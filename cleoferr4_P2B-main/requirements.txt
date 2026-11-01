@@ -7,3 +7,5 @@ psycopg2-binary
 openpyxl
 bcrypt
 qrcode
+requests
+certifi

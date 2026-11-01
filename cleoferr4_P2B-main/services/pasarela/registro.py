@@ -1,19 +1,22 @@
-"""Fábrica de pasarelas (Parte 1).
+"""Fábrica de pasarelas (unificada en services/pasarela).
 
 Elige el proveedor según PAYMENT_PROVIDER (valor por defecto: "simulated")
 y devuelve un PasarelaAdapter que expone la interfaz Pasarela legacy
 delegando internamente en la nueva PaymentGateway.
 
-Si se elige "culqi" sin llaves, lanza PaymentGatewayError con un mensaje
-claro (no un error 500).
+Si se elige "culqi" sin llaves, usa "simulated" con advertencia en el log
+(no falla). Toda la configuración se lee de configuracion_pago(), que da
+prioridad al nombre en español y usa el inglés como fallback.
 """
 from __future__ import annotations
 
-import os
+from typing import Optional
 
-from ..pasarela.base import Pasarela
-from ..pasarela.simulada import PasarelaSimulada
-from ..payment import crear_adaptador, PaymentGatewayError
+from .adaptador import crear_adaptador
+from .base import Pasarela
+from .config import configuracion_pago
+from .gateway import CulqiGateway, PaymentGatewayError
+from .simulada import PasarelaSimulada
 
 # Valor publicado en .env.example: si alguien arranca con esto, es un error.
 _SECRETO_EJEMPLO = ("cambia-este-secreto-genera-uno-nuevo-con-python-c-import"
@@ -25,54 +28,59 @@ PROVEEDORES_VALIDOS = ("simulated", "culqi")
 def crear_pasarela(nombre: Optional[str] = None) -> Pasarela:
     """Devuelve el adaptador de pasarela según PAYMENT_PROVIDER.
 
-    Mantiene compatibilidad con la variable PAGO_PROVEEDOR por si algún
-    entorno aún la usa, pero PAYMENT_PROVIDER tiene prioridad.
+    Mantiene compatibilidad con PAGO_PROVEEDOR y PAYMENT_PROVIDER.
+    La configuración se lee única y exclusivamente desde configuracion_pago().
     """
-    from typing import Optional  # noqa: F401  (mantenido por claridad)
-    proveedor = (
-        nombre
-        or os.environ.get("PAYMENT_PROVIDER")
-        or os.environ.get("PAGO_PROVEEDOR")
-        or "simulated"
-    ).strip().lower()
+    cfg = configuracion_pago()
+
+    proveedor = nombre or cfg["proveedor"]
 
     if proveedor == "simulated":
-        secreto = os.environ.get("PAGO_SIMULADA_WEBHOOK_SECRETO", "") or \
-                  os.environ.get("PAYMENT_SIMULATED_WEBHOOK_SECRET", "")
-        if not secreto or secreto == _SECRETO_EJEMPLO or secreto.startswith("cambia-este"):
+        secreto = cfg["secreto_webhook"]
+        if (not secreto or secreto == _SECRETO_EJEMPLO
+                or secreto.startswith("cambia-este")):
             raise PaymentGatewayError(
-                "PAGO_PROVEEDOR/PAYMENT_PROVIDER=simulated pero falta el secreto "
+                "Falta el secreto "
                 "del webhook (PAGO_SIMULADA_WEBHOOK_SECRETO o "
                 "PAYMENT_SIMULATED_WEBHOOK_SECRET) en el .env del proyecto, o "
                 "tiene el valor de ejemplo. Genera uno con: "
                 "python -c \"import secrets; print(secrets.token_hex(32))\""
             )
-        tolerancia = int(os.environ.get("PAGO_WEBHOOK_TOLERANCIA_SEG", "300"))
-        modo = os.environ.get("PAGO_MODO", "simulado")
+        tolerancia = cfg["tolerancia_seg"]
+        modo = cfg["modo"]
         if modo != "simulado":
             raise PaymentGatewayError(
-                f"PAGO_MODO inválido: '{modo}'. Único valor válido: 'simulado'."
+                "PAGO_MODO/PAYMENT_MODO debe ser 'simulado'."
             )
         pasarela_vieja = PasarelaSimulada(
             secreto_webhook=secreto, tolerancia_seg=tolerancia, modo=modo)
         return crear_adaptador("simulated", pasarela_vieja=pasarela_vieja)
 
     if proveedor == "culqi":
-        llave_publica = os.environ.get("PAGO_CULQI_LLAVE_PUBLICA", "")
-        llave_secreta = os.environ.get("PAGO_CULQI_SECRETA", "")
+        llave_publica = cfg["culqi_llave_publica"]
+        llave_secreta = cfg["culqi_secreta"]
         if not llave_publica or not llave_secreta:
-            raise PaymentGatewayError(
-                "PAYMENT_PROVIDER=culqi pero faltan credenciales de Culqi en "
-                "el .env: PAGO_CULQI_LLAVE_PUBLICA y PAGO_CULQI_SECRETA. "
-                "La integración real de Culqi se hará en otro ciclo "
-                "(Culqi exige RUC para entregar llaves)."
+            # No falla: usa simulated con advertencia.
+            import logging
+            logging.getLogger(__name__).warning(
+                "Faltan credenciales de Culqi "
+                "(PAYMENT_PROVIDER/PAGO_PROVEEDOR): se usa la pasarela "
+                "simulada. Configura PAGO_CULQI_LLAVE_PUBLICA y "
+                "PAGO_CULQI_SECRETA en .env.")
+            pasarela_vieja = PasarelaSimulada(
+                secreto_webhook=cfg["secreto_webhook"],
+                tolerancia_seg=cfg["tolerancia_seg"],
+                modo=cfg["modo"],
             )
-        from ..payment import CulqiGateway
+            return crear_adaptador(
+                "simulated",
+                pasarela_vieja=pasarela_vieja,
+            )
         gateway = CulqiGateway(llave_publica=llave_publica,
                                llave_secreta=llave_secreta)
         return crear_adaptador("culqi", pasarela_vieja=None)
 
     raise PaymentGatewayError(
-        f"Proveedor de pago desconocido: '{proveedor}'. "
+        "Proveedor de pago desconocido. Revisa PAYMENT_PROVIDER/PAGO_PROVEEDOR. "
         f"Valores válidos: {', '.join(PROVEEDORES_VALIDOS)}."
     )

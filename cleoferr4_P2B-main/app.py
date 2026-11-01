@@ -61,8 +61,7 @@ from services.reservas import (liberar_reservas_vencidas, preview_reservas_venci
 from services.pagos import (cancelar_pedido_con_pago_inicial, confirmar_pago,
                             registrar_evento)
 from services.pasarela import (EstadoPago, PagoResultado, PagoSolicitud,
-                               crear_pasarela)
-from services.payment.gateway import PaymentGatewayError
+                               crear_pasarela, PaymentGatewayError)
 from sqlalchemy import text
 
 load_dotenv()
@@ -5344,6 +5343,10 @@ def carrito_confirmar_v2():
         total = cursor.fetchone()[0]
 
         # Pago 'pendiente' con el monto oficial (Decimal) y la pasarela
+        if _PASARELA is None:
+            conn.rollback()
+            return {'ok': False,
+                    'error': 'El servicio de pagos no está disponible en este momento.'}, 503
         cursor.execute("""
             INSERT INTO pago (id_venta, id_tipo_pago, id_caja, estado, pasarela, monto)
             VALUES (%s, (SELECT id_tipo_pago FROM tipo_pago WHERE nombre = %s), %s,
@@ -5620,20 +5623,60 @@ def pago_simulado_procesar(id_transaccion):
 # la pasarela (no el navegador) y se autentica con la firma HMAC del
 # secreto PAGO_SIMULADA_WEBHOOK_SECRETO, verificada en tiempo constante
 # dentro de la pasarela. Excepción documentada y única.
+
+
+def _normalizar_proveedor(valor):
+    """Normaliza el nombre del proveedor de pago.
+
+    Devuelve siempre 'simulated' o 'culqi'. Si el valor es desconocido,
+    se usa 'simulated' (con advertencia en el log) para que la app no
+    deje de arrancar.
+    """
+    if valor is None:
+        return 'simulated'
+    v = str(valor).strip().lower()
+    if v in ('', 'simulada', 'simulado', 'simulated', 'simulación'):
+        return 'simulated'
+    if v == 'culqi':
+        return 'culqi'
+    app.logger.warning(
+        "Proveedor de pago desconocido '%s': se usa 'simulated'.", valor)
+    return 'simulated'
+
+
 # crear_pasarela() falla al ARRANCAR si falta el secreto, si es el de
 # ejemplo o si PAGO_MODO no es 'simulado' (validación en registro.py).
-# Si falla, _PASARELA queda None y _PASARELA_ERROR guarda el mensaje claro
-# para mostrarlo al cliente en lugar de un error 500.
-_PASARELA = None
-_PASARELA_ERROR = None
+# Si el proveedor es 'culqi' y faltan las llaves, se usa 'simulated' con
+# advertencia en el log. Solo si la pasarela simulada falla al crearse se
+# hace raise (no debería pasar).
+_PROVEEDOR_RESUELTO = _normalizar_proveedor(
+    os.environ.get("PAYMENT_PROVIDER")
+    or os.environ.get("PAGO_PROVEEDOR")
+)
+
 try:
-    _PASARELA = crear_pasarela()
+    if _PROVEEDOR_RESUELTO == 'culqi':
+        llave_publica = os.environ.get("PAGO_CULQI_LLAVE_PUBLICA", "")
+        llave_secreta = os.environ.get("PAGO_CULQI_SECRETA", "")
+        if not llave_publica or not llave_secreta:
+            app.logger.warning(
+                "PAYMENT_PROVIDER=culqi pero faltan llaves de Culqi: se usa "
+                "'simulated'. Configura PAGO_CULQI_LLAVE_PUBLICA y "
+                "PAGO_CULQI_SECRETA en .env para activar Culqi.")
+            _PROVEEDOR_RESUELTO = 'simulated'
+    _PASARELA = crear_pasarela(_PROVEEDOR_RESUELTO)
+    _PASARELA_ERROR = None
 except PaymentGatewayError as _e:
+    _PASARELA = None
     _PASARELA_ERROR = str(_e)
-    app.logger.error("Pasarela de pago no disponible: %s", _PASARELA_ERROR)
-except Exception as _e:  # nunca dejan caer la app por un proveedor de pago
+    # Solo si la pasarela simulada falla al crearse, la app no arranca.
+    app.logger.exception("Pasarela simulada no disponible al arrancar")
+    raise
+except Exception as _e:
+    _PASARELA = None
     _PASARELA_ERROR = f"No se pudo inicializar la pasarela de pago: {_e}"
-    app.logger.exception("Pasarela de pago no disponible")
+    app.logger.exception("Pasarela simulada no disponible al arrancar")
+    raise
 
 
 def _procesar_evento_pago(ev, id_evento_fallback=None):
@@ -6221,32 +6264,43 @@ def admin_dashboard():
                            reservas_vencidas=reservas_vencidas)
 
 
-import json as _json
-import urllib.request as _urllib_request
-import urllib.error as _urllib_error
+import requests as _requests
+import certifi as _certifi
 
 SUNAT_API_BASE  = os.environ.get("BASE_SUNAT", "https://dniruc.apisperu.com/api/v1")
 SUNAT_API_TOKEN = os.environ.get("TOKEN_SUNAT")  # sin valor por defecto: jamás hardcodeado
 
+# URL de consulta (sin el token, que va en el parámetro de query):
+# {BASE}/{tipo}/{numero}?token=...
+# Ejemplo: https://dniruc.apisperu.com/api/v1/ruc/20123456789?token=...
+# Ejemplo: https://dniruc.apisperu.com/api/v1/dni/12345678?token=...
+
 def _consultar_api_sunat(tipo, numero):
-    """Consulta la API Perú (simulación de SUNAT) desde el servidor y devuelve (data, status, error)."""
+    """Consulta la API Perú (simulación de SUNAT) desde el servidor y devuelve (data, status, error).
+
+    Usa requests + certifi para certificados raíz actualizados. Nunca desactiva
+    la verificación SSL (no verify=False).
+    """
     if not SUNAT_API_TOKEN:
-        return None, 503, "Servicio no configurado: falta TOKEN_SUNAT en el entorno del servidor."
+        return None, 503, "servicio_no_configurado"
     url = f"{SUNAT_API_BASE}/{tipo}/{numero}?token={SUNAT_API_TOKEN}"
-    req = _urllib_request.Request(url, headers={"Accept": "application/json"})
     try:
-        with _urllib_request.urlopen(req, timeout=10) as resp:
-            data = _json.loads(resp.read().decode("utf-8"))
-            return data, 200, None
-    except _urllib_error.HTTPError as e:
-        try:
-            data = _json.loads(e.read().decode("utf-8"))
-        except Exception:
-            data = None
-        return data, e.code, f"Error de la API externa ({e.code})"
-    except Exception as e:
+        resp = _requests.get(
+            url,
+            headers={"Accept": "application/json"},
+            timeout=10,
+            verify=_certifi.where(),
+        )
+        if resp.status_code >= 400:
+            return None, resp.status_code, f"error_api_{resp.status_code}"
+        data = resp.json()
+        return data, 200, None
+    except _requests.exceptions.SSLError as e:
+        app.logger.error("SSL error consultando API RUC/DNI: %s", e)
+        return None, 502, "ssl_error"
+    except _requests.exceptions.RequestException as e:
         app.logger.exception("Error consultando API RUC/DNI: %s", e)
-        return None, 502, "No se pudo conectar al servicio de consulta."
+        return None, 502, "error_conexion"
 
 @app.route('/api/consultar_ruc/<ruc>')
 def api_consultar_ruc(ruc):
@@ -6258,9 +6312,15 @@ def api_consultar_ruc(ruc):
                  'error': 'Inicia sesión para validar el documento.'}, 401)
     if not (ruc.isdigit() and len(ruc) == 11):
         return {'ok': False, 'error': 'RUC inválido: debe tener 11 dígitos.'}, 400
+    if ruc[:2] not in ('10', '20'):
+        return {'ok': False, 'error': 'RUC inválido: debe empezar con 10 o 20.'}, 400
     data, status, err = _consultar_api_sunat('ruc', ruc)
     if err and data is None:
-        return {'ok': False, 'error': err}, status
+        # La API externa no está disponible (SSL, conexión, token faltante).
+        # El frontend puede permitir entrada manual de razón social.
+        return {'ok': False,
+                'error': 'No se pudo validar el documento en este momento.',
+                'api_no_disponible': True}, status
     resp = dict(data) if isinstance(data, dict) else {}
     resp['ok'] = bool(resp.get('razonSocial') or resp.get('razon_social') or resp.get('nombre'))
     return resp, 200 if resp['ok'] else status
@@ -6275,7 +6335,9 @@ def api_consultar_dni(dni):
         return {'ok': False, 'error': 'DNI inválido: debe tener 8 dígitos.'}, 400
     data, status, err = _consultar_api_sunat('dni', dni)
     if err and data is None:
-        return {'ok': False, 'error': err}, status
+        return {'ok': False,
+                'error': 'No se pudo validar el documento en este momento.',
+                'api_no_disponible': True}, status
     resp = dict(data) if isinstance(data, dict) else {}
     resp['ok'] = bool(resp.get('nombres') or resp.get('nombre') or resp.get('apellidoPaterno') or resp.get('apellido_paterno'))
     return resp, 200 if resp['ok'] else status
