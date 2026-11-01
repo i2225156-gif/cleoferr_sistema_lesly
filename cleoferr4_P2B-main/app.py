@@ -417,6 +417,7 @@ def admin_required(f):
             flash("Acceso denegado.", "danger")
             return redirect(url_for("inicio_personal"))
         return f(*args, **kwargs)
+    decorated_function._solo_admin = True   # introspección/tests
     return decorated_function
 
 
