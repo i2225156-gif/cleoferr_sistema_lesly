@@ -33,6 +33,20 @@ def umbral_vencimiento_dias():
     except ValueError:
         return 30
 
+
+def alerta_snooze_dias():
+    """Días de calma tras resolver una alerta de stock bajo.
+
+    Variable de entorno ALERTA_SNOOZE_DIAS (default 7). Resolver una
+    alerta es «enterarse» de ella: no vuelve a salir aunque el stock
+    baje por debajo del nivel que tenía al resolver hasta que pasen
+    estos días. 0 = sin calma (vuelve a salir de inmediato).
+    """
+    try:
+        return max(0, int(os.environ.get('ALERTA_SNOOZE_DIAS', '7')))
+    except ValueError:
+        return 7
+
 # ── Umbrales de semáforo (UN solo lugar) ─────────────────────────
 # KPI 3 — días de cobertura de stock (ventas pagadas últimos 30 días)
 ROTACION_DIAS_QUIEBRE = 15        # por debajo: rojo (riesgo de quiebres)

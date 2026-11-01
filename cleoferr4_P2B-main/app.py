@@ -3335,10 +3335,52 @@ def reportes():
 
 
 # ── Alertas ─────────────────────────────────────────────────
+# La tabla `alerta` no tiene columna de referencia: la referencia que
+# permite no recrear una alerta ya «enterada» (nivel de stock o fecha de
+# vencimiento) se deriva de la descripcion, que la app escribe al crear
+# la alerta y refresca al resolverla. `fecha` es el ultimo cambio de
+# estado (creacion o resolucion) y se usa para la calma (snooze).
+TIPO_ALERTA_STOCK_BAJO = 1
+TIPO_ALERTA_VENCIMIENTO = 3
+
+_RE_REF_STOCK = re.compile(r'tiene\s+(\d+)\s+unidades')
+_RE_REF_VENCIMIENTO = re.compile(r'^(Vence|Vencido)\s+el\s+(\d{2}/\d{2}/\d{4})')
+
+
+def _descripcion_stock_bajo(nombre, stock):
+    return f"Stock insuficiente: {nombre} tiene {stock} unidades (mínimo sugerido: 15)"
+
+
+def _descripcion_vencimiento(nombre, stock, fecha_vencimiento, vencido):
+    fecha_txt = fecha_vencimiento.strftime('%d/%m/%Y')
+    if vencido:
+        return f"Vencido el {fecha_txt}: {nombre} (stock {stock})"
+    return f"Vence el {fecha_txt}: {nombre} (stock {stock})"
+
+
+def _ref_stock_bajo(descripcion):
+    """Nivel de stock con el que se creo/resolvio la alerta.
+
+    None si la descripcion no lo dice: entonces la alerta resuelta se
+    respeta (no se recrea) porque no se puede saber si empeoro.
+    """
+    m = _RE_REF_STOCK.search(descripcion or '')
+    return int(m.group(1)) if m else None
+
+
+def _ref_vencimiento(descripcion):
+    """(vencido, fecha dd/mm/aaaa) de la alerta de vencimiento."""
+    m = _RE_REF_VENCIMIENTO.match((descripcion or '').strip())
+    if not m:
+        return None
+    return (m.group(1) == 'Vencido', m.group(2))
+
+
 @app.route('/alertas')
 @login_required
 @permiso_required('alertas')
 def alertas():
+    from services.kpis import alerta_snooze_dias, umbral_vencimiento_dias
     conn = get_connection_tienda()
     cursor = conn.cursor(dictionary=True)
     alertas = []
@@ -3358,13 +3400,31 @@ def alertas():
                 LIMIT 1
             """, (p['id_producto'],))
             if not cursor.fetchone():
+                # Resolver es «enterarse»: la alerta resuelta no se recrea
+                # mientras el stock no baje por debajo del nivel que tenia
+                # al resolver, ni antes de que pase la calma
+                # (ALERTA_SNOOZE_DIAS).
+                cursor.execute("""
+                    SELECT descripcion,
+                           (fecha <= NOW() - make_interval(days => %s)) AS calma_cumplida
+                      FROM alerta
+                     WHERE id_tipo_alerta = 1 AND id_producto = %s AND resuelta = TRUE
+                     ORDER BY fecha DESC LIMIT 1
+                """, (alerta_snooze_dias(), p['id_producto']))
+                previa = cursor.fetchone()
+                if previa:
+                    ref = _ref_stock_bajo(previa['descripcion'])
+                    if ref is None or p['stock'] >= ref:
+                        continue
+                    if not previa['calma_cumplida']:
+                        continue
                 prioridad = 'alta' if p['stock'] < 5 else 'media'
                 cursor.execute("""
                     INSERT INTO alerta (id_tipo_alerta, id_producto, descripcion, prioridad, fecha)
                     VALUES (1, %s, %s, %s, NOW())
                 """, (
                     p['id_producto'],
-                    f"Stock insuficiente: {p['nombre']} tiene {p['stock']} unidades (mínimo sugerido: 15)",
+                    _descripcion_stock_bajo(p['nombre'], p['stock']),
                     prioridad
                 ))
         # Limpiar alertas stale: resolver aquellas cuyo producto ya no tiene stock < 15
@@ -3390,12 +3450,9 @@ def alertas():
         """, (umbral,))
         for p in cursor.fetchall():
             fecha_txt = p['fecha_vencimiento'].strftime('%d/%m/%Y')
-            if p['vencido']:
-                descripcion = f"Vencido el {fecha_txt}: {p['nombre']} (stock {p['stock']})"
-                prioridad = 'alta'
-            else:
-                descripcion = f"Vence el {fecha_txt}: {p['nombre']} (stock {p['stock']})"
-                prioridad = 'media'
+            descripcion = _descripcion_vencimiento(
+                p['nombre'], p['stock'], p['fecha_vencimiento'], bool(p['vencido']))
+            prioridad = 'alta' if p['vencido'] else 'media'
             cursor.execute("""
                 SELECT id_alerta FROM alerta
                  WHERE id_tipo_alerta = 3 AND id_producto = %s AND resuelta = FALSE
@@ -3407,11 +3464,23 @@ def alertas():
                     UPDATE alerta SET descripcion = %s, prioridad = %s
                      WHERE id_alerta = %s
                 """, (descripcion, prioridad, existente['id_alerta']))
-            else:
-                cursor.execute("""
-                    INSERT INTO alerta (id_tipo_alerta, id_producto, descripcion, prioridad, fecha)
-                    VALUES (3, %s, %s, %s, NOW())
-                """, (p['id_producto'], descripcion, prioridad))
+                continue
+            # Resolver es «enterarse»: la misma fecha de vencimiento y el
+            # mismo estado (por vencer / vencido) no vuelven a avisar.
+            cursor.execute("""
+                SELECT descripcion FROM alerta
+                 WHERE id_tipo_alerta = 3 AND id_producto = %s AND resuelta = TRUE
+                 ORDER BY fecha DESC LIMIT 1
+            """, (p['id_producto'],))
+            previa = cursor.fetchone()
+            if previa:
+                ref = _ref_vencimiento(previa['descripcion'])
+                if ref is not None and ref == (bool(p['vencido']), fecha_txt):
+                    continue
+            cursor.execute("""
+                INSERT INTO alerta (id_tipo_alerta, id_producto, descripcion, prioridad, fecha)
+                VALUES (3, %s, %s, %s, NOW())
+            """, (p['id_producto'], descripcion, prioridad))
         # Limpiar stale de vencimiento: sin fecha, inactivo o fuera del umbral
         cursor.execute("""
             UPDATE alerta SET resuelta = TRUE
@@ -3422,7 +3491,12 @@ def alertas():
                       AND fecha_vencimiento <= CURRENT_DATE + make_interval(days => %s))
         """, (umbral,))
         conn.commit()
-        cursor.execute("SELECT * FROM alerta ORDER BY fecha DESC LIMIT 200")
+        # Solo las alertas pendientes: las resueltas estan «enteradas» y no
+        # se listan (asi resolver quita la fila y no vuelve al recargar).
+        cursor.execute("""
+            SELECT * FROM alerta WHERE resuelta = FALSE
+            ORDER BY fecha DESC LIMIT 200
+        """)
         alertas = cursor.fetchall()
     except Exception:
         alertas = []
@@ -3436,7 +3510,12 @@ def alertas():
 @login_required
 @permiso_required('alertas')
 def alertas_resolver(id):
-    """Resuelve una alerta (POST + CSRF).
+    """Resuelve («entera») una alerta.
+
+    Refresca la referencia con el estado actual del producto (nivel de
+    stock o fecha de vencimiento) y deja `fecha` como el ultimo cambio de
+    estado: la sincronizacion usa esa referencia para no recrear la
+    alerta mientras la condicion no cambie.
 
     Formulario normal: flash + redireccion a /alertas. AJAX (el fetch de
     la propia pagina): JSON, nunca una pagina HTML (response.json() sobre
@@ -3444,15 +3523,40 @@ def alertas_resolver(id):
     """
     ajax = _es_ajax()
     conn = get_connection_tienda()
-    cursor = conn.cursor()
+    cursor = conn.cursor(dictionary=True)
     try:
-        cursor.execute("UPDATE alerta SET resuelta = TRUE WHERE id_alerta = %s", (id,))
-        conn.commit()
-        if getattr(cursor, 'rowcount', 1) == 0:
+        cursor.execute("""
+            SELECT a.id_tipo_alerta, p.nombre, p.stock, p.fecha_vencimiento,
+                   (p.fecha_vencimiento < CURRENT_DATE) AS vencido
+              FROM alerta a
+              LEFT JOIN producto p ON p.id_producto = a.id_producto
+             WHERE a.id_alerta = %s
+        """, (id,))
+        alerta = cursor.fetchone()
+        if not alerta:
             if ajax:
                 return {'ok': False, 'error': 'La alerta no existe.'}, 404
             flash("La alerta ya no existe.", "danger")
             return redirect(url_for('alertas'))
+        descripcion = None
+        if alerta['id_tipo_alerta'] == TIPO_ALERTA_STOCK_BAJO and alerta['nombre']:
+            descripcion = _descripcion_stock_bajo(alerta['nombre'], alerta['stock'])
+        elif alerta['id_tipo_alerta'] == TIPO_ALERTA_VENCIMIENTO \
+                and alerta['nombre'] and alerta['fecha_vencimiento']:
+            descripcion = _descripcion_vencimiento(
+                alerta['nombre'], alerta['stock'], alerta['fecha_vencimiento'],
+                bool(alerta['vencido']))
+        if descripcion:
+            cursor.execute("""
+                UPDATE alerta SET resuelta = TRUE, fecha = NOW(), descripcion = %s
+                 WHERE id_alerta = %s
+            """, (descripcion, id))
+        else:
+            cursor.execute("""
+                UPDATE alerta SET resuelta = TRUE, fecha = NOW()
+                 WHERE id_alerta = %s
+            """, (id,))
+        conn.commit()
         if not ajax:
             flash("Alerta marcada como resuelta.", "success")
     except Exception as e:
