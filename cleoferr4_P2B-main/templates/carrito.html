@@ -448,10 +448,15 @@ function renderCarrito() {
             <td class="fw-bold" style="color:var(--naranja)">${precioCell}</td>
             <td>
                 <div class="qty-control">
-                    <button class="qty-btn" onclick="cambiarCantidad(${idx}, -1)">−</button>
-                    <span class="qty-num">${item.cantidad}</span>
-                    <button class="qty-btn" onclick="cambiarCantidad(${idx}, +1)">+</button>
+                    <button class="qty-btn" onclick="cambiarCantidad(${idx}, -1)"
+                            ${item.cantidad <= 1 ? 'disabled' : ''}>−</button>
+                    <span class="qty-num" id="qty-${idx}">${item.cantidad}</span>
+                    <button class="qty-btn" onclick="cambiarCantidad(${idx}, +1)"
+                            ${item.cantidad >= (item.stock || 99) ? 'disabled' : ''}>+</button>
                 </div>
+                <small class="text-muted d-block" style="font-size:0.7rem">
+                    Stock disponible: ${item.stock || '–'}
+                </small>
             </td>
             <td class="fw-bold">${subCell}</td>
             <td>
@@ -503,6 +508,7 @@ function refrescarPrecios() {
                 it.precio      = pv.precio_final;   // el servidor decide
                 it.precio_base = pv.precio;
                 it.descuento   = pv.descuento;
+                it.stock       = pv.stock;          // stock disponible del servidor
             }
         });
         preciosConfirmados = true;   // recién ahora se muestran importes
@@ -513,9 +519,38 @@ function refrescarPrecios() {
 
 function cambiarCantidad(idx, delta) {
     const carrito = getCarrito();
-    carrito[idx].cantidad += delta;
-    if (carrito[idx].cantidad <= 0) carrito.splice(idx, 1);
-    saveCarrito(carrito);
+    if (!carrito[idx]) return;
+    const item = carrito[idx];
+    const stockMax = item.stock || 99;
+    let nueva = item.cantidad + delta;
+    if (nueva < 1) nueva = 1;
+    if (nueva > stockMax) nueva = stockMax;
+    if (nueva === item.cantidad) return;
+
+    // Validar contra el backend antes de guardar
+    fetch('/carrito/actualizar', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRFToken': CSRF_TOKEN },
+        body: JSON.stringify({ id_producto: item.id, cantidad: nueva })
+    })
+    .then(r => r.json())
+    .then(d => {
+        if (d.ok) {
+            carrito[idx].cantidad = d.cantidad;
+            if (d.aviso_stock) {
+                avisoAccion({ mensaje: d.aviso_stock, tipo: 'warning' });
+            }
+            document.getElementById('qty-' + idx).textContent = d.cantidad;
+            saveCarrito(carrito);
+        } else {
+            avisoAccion({ mensaje: d.error || 'No se pudo actualizar la cantidad.', tipo: 'error' });
+        }
+    })
+    .catch(() => {
+        // Fallback sin backend: ajustar localmente
+        carrito[idx].cantidad = nueva;
+        saveCarrito(carrito);
+    });
 }
 function eliminarItem(idx) {
     const carrito = getCarrito();
@@ -540,6 +575,50 @@ let metodoPago = null, tipoComprobante = null, razonSocialActual = '', nombreCom
 async function abrirModalPago() {
     const carrito = getCarrito();
     if (carrito.length === 0) return;
+
+    // ── Revalidación de stock antes de abrir el modal (paso 1) ──
+    const ids = carrito.map(i => i.id);
+    if (ids.length > 0) {
+        try {
+            const resp = await fetch('/carrito/precios', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-CSRFToken': CSRF_TOKEN },
+                body: JSON.stringify({ ids: ids })
+            });
+            const d = await resp.json();
+            if (d.ok && d.precios) {
+                let huboCambios = false;
+                carrito.forEach(it => {
+                    const pv = d.precios[it.id];
+                    if (pv) {
+                        const stockMax = pv.stock || 0;
+                        if (it.cantidad > stockMax) {
+                            it.cantidad = stockMax > 0 ? stockMax : 0;
+                            huboCambios = true;
+                        }
+                        it.stock = stockMax;
+                    }
+                });
+                // Eliminar items con stock 0
+                const filtrado = carrito.filter(i => (i.cantidad || 0) > 0);
+                if (filtrado.length !== carrito.length) {
+                    saveCarrito(filtrado);
+                    huboCambios = true;
+                } else if (huboCambios) {
+                    saveCarrito(carrito);
+                }
+                if (huboCambios) {
+                    await avisoAccion({
+                        mensaje: 'Algunas cantidades se ajustaron al stock disponible.',
+                        tipo: 'warning'
+                    });
+                }
+            }
+        } catch (e) {
+            // Si falla la revalidación, seguimos igual (el backend valida al confirmar)
+        }
+    }
+
     // Verificar si está logueado; si no, redirigir al login
     {% if not session.usuario_id or session.rol != 'cliente' %}
     const irLogin = await confirmarAccion({

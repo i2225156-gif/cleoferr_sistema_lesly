@@ -176,10 +176,8 @@ class SimulatedGateway(PaymentGateway):
     # ── internos ──────────────────────────────────────────────────────
 
     def _evaluar_estado(self, metodo: str, datos_cliente: dict) -> str:
-        if metodo == "transferencia":
+        if metodo in ("yape", "plin", "transferencia"):
             return "pendiente"  # pendiente de verificación por la administradora
-        if metodo in ("yape", "plin"):
-            return "aprobado"   # simulado: se asume código de operación válido
         # tarjeta (default): decisión determinista por número de prueba
         numero = "".join(
             ch for ch in str(datos_cliente.get("numero_tarjeta", "")) if ch.isdigit()
@@ -191,6 +189,13 @@ class SimulatedGateway(PaymentGateway):
         return "rechazado"
 
     def _mensaje_estado(self, estado: str, metodo: str) -> str:
+        if metodo in ("yape", "plin"):
+            if estado == "pendiente":
+                return (
+                    f"Pago vía {metodo.upper()} recibido (simulado). "
+                    "Pendiente de verificación por la administradora."
+                )
+            return f"Pago vía {metodo.upper()} procesado."
         if metodo == "transferencia":
             return (
                 "Transferencia bancaria recibida. El pedido queda pendiente "

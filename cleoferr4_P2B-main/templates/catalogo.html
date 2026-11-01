@@ -600,7 +600,7 @@ function abrirProducto(id, nombre, precio, stock, desc, imagen, marca, precioBas
     // Stock
     const stockDiv = document.getElementById('mpStock');
     if (stock > 0) {
-        stockDiv.innerHTML = '<div class="dot-verde"></div><span class="txt-disp">Disponible</span>';
+        stockDiv.innerHTML = '<div class="dot-verde"></div><span class="txt-disp">Stock disponible: ' + stock + '</span>';
     } else {
         stockDiv.innerHTML = '<div class="dot-rojo"></div><span class="txt-agot">Sin stock</span>';
     }

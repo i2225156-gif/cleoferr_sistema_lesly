@@ -4053,17 +4053,70 @@ def carrito_agregar():
     if prod['stock'] is not None and int(prod['stock']) < 1:
         return {'ok': False,
                 'error': f"'{prod['nombre']}' está agotado. Se quitará del carrito."}
-    if int(prod['stock']) < cantidad:
-        return {'ok': False,
-                'error': f"Stock insuficiente de '{prod['nombre']}': quedan {prod['stock']}."}
+    stock_disp = int(prod['stock'])
+    cantidad_ajustada = cantidad
+    aviso_stock = None
+    if stock_disp < cantidad:
+        cantidad_ajustada = stock_disp
+        aviso_stock = f"Se ajustó la cantidad a {stock_disp} (máximo disponible)."
 
     return {'ok': True,
             'id_producto': id_producto,
             'nombre':  prod['nombre'],
-            'precio':  float(prod['precio']),           # base (referencia)
-            'descuento': float(prod['descuento']),       # dcto unitario vigente
-            'precio_final': float(prod['precio_final']), # lo que se paga
-            'stock':   int(prod['stock'])}
+            'precio':  float(prod['precio']),
+            'descuento': float(prod['descuento']),
+            'precio_final': float(prod['precio_final']),
+            'stock':   stock_disp,
+            'cantidad': cantidad_ajustada,
+            'aviso_stock': aviso_stock}
+
+
+@app.route('/carrito/actualizar', methods=['POST'])
+@login_required
+def carrito_actualizar():
+    """Valida y ajusta la cantidad de un producto en el carrito según el
+    stock real disponible. Si la cantidad solicitada supera el stock, se
+    ajusta al máximo y se devuelve aviso_stock para que el frontend lo
+    muestre al usuario inmediatamente."""
+    data        = request.get_json(silent=True) or {}
+    id_producto = int(data.get('id_producto', 0))
+    cantidad    = int(data.get('cantidad', 1))
+
+    conn   = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute(f"""
+        SELECT p.nombre, p.precio, p.stock,
+               COALESCE(of.descuento_unitario, 0) AS descuento,
+               p.precio - COALESCE(of.descuento_unitario, 0) AS precio_final
+          FROM producto p
+          {SQL_PRECIO_VIGENTE.format(p="p.", a="of")}
+         WHERE p.id_producto=%s AND p.activo = TRUE
+    """, (id_producto,))
+    prod = cursor.fetchone()
+    conn.close()
+
+    if not prod:
+        return {'ok': False,
+                'error': 'Este producto ya no está disponible.'}
+    stock_disp = int(prod['stock'] or 0)
+    if stock_disp < 1:
+        return {'ok': False,
+                'error': f"'{prod['nombre']}' está agotado."}
+    cantidad_ajustada = cantidad
+    aviso_stock = None
+    if stock_disp < cantidad:
+        cantidad_ajustada = stock_disp
+        aviso_stock = f"Se ajustó la cantidad a {stock_disp} (máximo disponible)."
+
+    return {'ok': True,
+            'id_producto': id_producto,
+            'nombre':  prod['nombre'],
+            'precio':  float(prod['precio']),
+            'descuento': float(prod['descuento']),
+            'precio_final': float(prod['precio_final']),
+            'stock':   stock_disp,
+            'cantidad': cantidad_ajustada,
+            'aviso_stock': aviso_stock}
 
 
 @app.route('/carrito/precios', methods=['POST'])
@@ -4094,7 +4147,8 @@ def carrito_precios():
         conn.close()
     precios = {idp: {'precio': float(f['precio']),
                      'descuento': float(f['descuento_unitario'] or 0),
-                     'precio_final': float(f['precio_final'])}
+                     'precio_final': float(f['precio_final']),
+                     'stock': int(f['stock'] or 0)}
                for idp, f in lote.items()}
     return {'ok': True, 'precios': precios}
 
@@ -4854,6 +4908,11 @@ def pedido_aceptado():
     Una venta ajena responde EXACTAMENTE igual que una inexistente (404),
     sin revelar si el id existe. El staff (administrador o vendedor)
     conserva el acceso a cualquier venta.
+
+    La pantalla "¡Pedido aceptado!" solo se muestra si el estado es
+    "pagado" (venta confirmada) o "pendiente de verificación"
+    (venta pendiente con pago pendiente, p. ej. transferencia).
+    En cualquier otro caso se redirige a la pantalla de pago o a Mis pedidos.
     """
     id_pedido = (request.args.get('id') or '').strip()
     estado    = 'pendiente'
@@ -4865,8 +4924,10 @@ def pedido_aceptado():
         if not 0 < id_venta <= 9223372036854775807:
             abort(404)
         sql = """
-            SELECT ev.nombre AS estado FROM venta v
+            SELECT ev.nombre AS estado_venta, p.estado AS estado_pago
+            FROM venta v
             LEFT JOIN estado_venta ev ON v.id_estado_venta = ev.id_estado_venta
+            LEFT JOIN pago p ON p.id_venta = v.id_venta
             WHERE v.id_venta = %s
         """
         params = [id_venta]
@@ -4885,7 +4946,22 @@ def pedido_aceptado():
             conn.close()
         if not row:
             abort(404)
-        estado = row.get('estado') or 'pendiente'
+        estado_venta = row.get('estado_venta') or 'pendiente'
+        estado_pago  = row.get('estado_pago')
+
+        # Solo mostrar "¡Pedido aceptado!" si está pagado o pendiente de verificación.
+        if estado_venta == 'confirmado':
+            estado = 'confirmado'          # pagado
+        elif estado_venta == 'pendiente' and estado_pago == 'pendiente':
+            estado = 'pendiente'           # pendiente de verificación (transferencia)
+        elif estado_venta == 'pendiente' and estado_pago == 'rechazado':
+            # Pago rechazado: redirigir a pagar de nuevo o a Mis pedidos.
+            flash('El pago de este pedido fue rechazado. Puedes intentar de nuevo.', 'warning')
+            return redirect(url_for('pago_simulado', id_transaccion=None) if False else url_for('mis_pedidos'))
+        else:
+            # cancelado u otro: no mostrar pantalla de aceptado.
+            flash(f'El pedido está en estado "{estado_venta}".', 'warning')
+            return redirect(url_for('mis_pedidos'))
     return render_template('pedido_aceptado.html', id_pedido=id_pedido, estado=estado)
 
 
@@ -5012,6 +5088,69 @@ def pedido_cambiar_estado(id):
     if '/pedidos?' in ref or ref.rstrip('/').endswith('/pedidos'):
         return redirect(url_for('pedidos'))
     return redirect(url_for('pedido_detalle', id=id))
+
+
+@app.route('/pedidos/<int:id>/cancelar', methods=['POST'])
+@login_required
+def pedido_cancelar(id):
+    """Cancela un pedido pendiente de pago y devuelve el stock.
+
+    Solo el cliente dueño del pedido (o staff) puede cancelarlo.
+    Solo se puede cancelar si la venta está en 'pendiente' y el pago
+    no está confirmado.
+    """
+    is_ajax = _es_ajax()
+    conn = get_connection_tienda()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("""
+            SELECT v.id_venta, v.id_cliente, v.id_estado_venta, ev.nombre AS estado_venta,
+                   p.id_pago, p.estado AS estado_pago
+              FROM venta v
+              LEFT JOIN pago p ON p.id_venta = v.id_venta
+              LEFT JOIN estado_venta ev ON ev.id_estado_venta = v.id_estado_venta
+             WHERE v.id_venta = %s
+        """, (id,))
+        fila = cursor.fetchone()
+        if not fila:
+            if is_ajax:
+                return {'ok': False, 'mensaje': 'El pedido no existe.'}, 404
+            abort(404)
+        if session.get('rol') not in ('administrador', 'vendedor') \
+                and fila['id_cliente'] != session.get('usuario_id'):
+            if is_ajax:
+                return {'ok': False, 'mensaje': 'No autorizado.'}, 403
+            abort(403)
+        if fila['estado_venta'] != 'pendiente':
+            mensaje = f'El pedido ya está en estado "{fila["estado_venta"]}".'
+            if is_ajax:
+                return {'ok': False, 'mensaje': mensaje}, 409
+            flash(mensaje, 'warning')
+            return redirect(url_for('pedido_detalle', id=id))
+        if fila['estado_pago'] == 'confirmado':
+            mensaje = 'No se puede cancelar: el pago ya está confirmado.'
+            if is_ajax:
+                return {'ok': False, 'mensaje': mensaje}, 409
+            flash(mensaje, 'warning')
+            return redirect(url_for('pedido_detalle', id=id))
+
+        # Devolver stock y cancelar venta (idempotente).
+        _expirar_pedido_pendiente(conn, cursor, id, motivo="cancelar_cliente")
+        session.pop('id_venta_pendiente', None)
+        mensaje = 'Pedido cancelado. El stock se devolvió al inventario.'
+        if is_ajax:
+            return {'ok': True, 'mensaje': mensaje}
+        flash(mensaje, 'success')
+        return redirect(url_for('mis_pedidos'))
+    except Exception:
+        conn.rollback()
+        app.logger.exception("Error cancelando pedido %s", id)
+        if is_ajax:
+            return {'ok': False, 'mensaje': 'No se pudo cancelar el pedido.'}, 500
+        flash('No se pudo cancelar el pedido.', 'danger')
+        return redirect(url_for('pedido_detalle', id=id))
+    finally:
+        conn.close()
 
 
 # ── Helpers del comprobante de venta (simulación boleta/factura) ─────────────
@@ -5162,6 +5301,35 @@ def carrito_confirmar_v2():
                 'error': 'Ningún producto del carrito está disponible.',
                 'excluidos': excluidos}
 
+    # Idempotencia por sesión: un solo pedido por proceso de compra.
+    # Si el cliente ya tiene un pedido pendiente de pago en la sesión,
+    # se reutiliza en lugar de crear otro (evita 26155, 26156, 26157...).
+    id_venta_sesion = session.get('id_venta_pendiente')
+    if id_venta_sesion:
+        conn_ses = get_connection_tienda()
+        cursor_ses = conn_ses.cursor(dictionary=True)
+        try:
+            cursor_ses.execute("""
+                SELECT v.id_venta, v.id_estado_venta, ev.nombre AS estado_venta,
+                       p.id_pago, p.estado AS estado_pago
+                  FROM venta v
+                  LEFT JOIN pago p ON p.id_venta = v.id_venta
+                  LEFT JOIN estado_venta ev ON ev.id_estado_venta = v.id_estado_venta
+                 WHERE v.id_venta = %s AND v.id_cliente = %s
+            """, (id_venta_sesion, session['usuario_id']))
+            fila_ses = cursor_ses.fetchone()
+            if fila_ses and fila_ses['estado_venta'] == 'pendiente' and fila_ses['estado_pago'] == 'pendiente':
+                return {'ok': True,
+                        'id_pedido': fila_ses['id_venta'],
+                        'id_pago': fila_ses['id_pago'],
+                        'mensaje': 'Pedido existente reutilizado (mismo cliente y productos).',
+                        'total': None,
+                        'reutilizado': True}
+        except Exception:
+            app.logger.exception("Error reutilizando pedido pendiente de sesión")
+        finally:
+            conn_ses.close()
+
     # Deduplicación: reusar pedido pendiente existente si el mismo cliente
     # tiene un pedido reciente con los mismos productos y misma fecha/hora.
     # Evita crear registros duplicados por doble clic o reenvío.
@@ -5267,6 +5435,10 @@ def carrito_confirmar_v2():
             RETURNING id_venta
         """, (session['usuario_id'], num_operacion))
         id_venta = cursor.fetchone()[0]
+
+        # Guarda el id en sesión para idempotencia: un solo pedido por
+        # proceso de compra, sin crear duplicados al reintentar.
+        session['id_venta_pendiente'] = id_venta
 
         # Si hay caja abierta, asociar el pago a la caja actual
         cursor.execute("SELECT id_caja FROM caja WHERE estado = 'abierta' LIMIT 1")
@@ -5528,8 +5700,15 @@ def pago_simulado_procesar(id_transaccion):
         if session.get('rol') == 'cliente' and pago['id_cliente'] != session.get('usuario_id'):
             return {'ok': False, 'error': 'no autorizado'}, 403
         if pago['estado'] != 'pendiente':
-            return {'ok': True, 'estado': 'ya_procesado',
-                    'mensaje': f"El pago ya está {pago['estado']}."}, 200
+            if pago['estado'] == 'rechazado':
+                # Permitir reintento: resetear el pago a pendiente para
+                # evaluar de nuevo con otra tarjeta u otro método, sin
+                # crear un pedido nuevo.
+                cursor.execute("UPDATE pago SET estado = 'pendiente' WHERE id_pago = %s AND estado = 'rechazado'", (pago['id_pago'],))
+                conn.commit()
+            else:
+                return {'ok': True, 'estado': 'ya_procesado',
+                        'mensaje': f"El pago ya está {pago['estado']}."}, 200
 
         # Monto del servidor, recalculado de detalle_venta (nunca del navegador)
         cursor.execute(f"""
@@ -5556,8 +5735,18 @@ def pago_simulado_procesar(id_transaccion):
             codigo = str(data.get('codigo_operacion') or '').strip()
             if not (codigo.isdigit() and len(codigo) == 6):
                 return {'ok': False, 'error': 'Código de operación de 6 dígitos requerido.'}, 400
-            estado_final = EstadoPago.CONFIRMADO
-            motivo = f'Pago aprobado vía {metodo.upper()} (simulado).'
+            # Yape/Plin: queda pendiente de verificación por la administradora.
+            estado_final = EstadoPago.PENDIENTE
+            motivo = (f'Pago vía {metodo.upper()} recibido (simulado). '
+                      'Pendiente de verificación por la administradora.')
+            cursor.execute("""
+                UPDATE pago
+                   SET detalle_proveedor = COALESCE(detalle_proveedor, '{}'::jsonb) || %s::jsonb
+                 WHERE id_pago = %s
+            """, (json.dumps({'metodo': metodo,
+                              'codigo_operacion': codigo,
+                              'estado_pago': 'pendiente_verificacion'},
+                             ensure_ascii=False), pago['id_pago']))
         elif metodo == 'transferencia':
             num_op = str(data.get('numero_operacion') or '').strip()
             if not num_op:
@@ -5599,13 +5788,11 @@ def pago_simulado_procesar(id_transaccion):
                                            estado=estado_final, monto=total),
                              conn=conn, fuente='checkout',
                              id_pago_evento=id_pago_evento)
-        if estado_final == EstadoPago.RECHAZADO:
-            # Pago rechazado: devolver el stock y cancelar la venta,
-            # para que no quede stock descontado sin pedido pagado.
-            _expirar_pedido_pendiente(conn, cursor, pago['id_venta'],
-                                      motivo="rechazo")
-        else:
-            conn.commit()
+        conn.commit()
+        # Si se rechazó, NO cancelamos la venta ni devolvemos el stock.
+        # La venta queda en 'pendiente' y el cliente puede reintentar desde
+        # la misma pantalla de pago.
+        session.pop('id_venta_pendiente', None)
         return {'ok': res['estado'] in ('confirmado', 'rechazado',
                                         'ya_confirmado', 'ya_rechazado'),
                 'estado': res['estado'], 'motivo': res.get('motivo') or motivo,
@@ -5826,25 +6013,28 @@ def admin_pagos_simulados():
         """)
         pendientes = cursor.fetchall()
 
-        # Transferencias pendientes de verificación (método guardado en detalle_proveedor)
+        # Pagos pendientes de verificación (yape, plin, transferencia)
+        # método guardado en detalle_proveedor
         cursor.execute("""
             SELECT p.id_pago, p.id_transaccion, p.monto, v.id_venta,
                    v.id_cliente,
-                   (p.detalle_proveedor->>'numero_operacion') AS numero_operacion
+                   (p.detalle_proveedor->>'metodo') AS metodo_pago,
+                   (p.detalle_proveedor->>'numero_operacion') AS numero_operacion,
+                   (p.detalle_proveedor->>'codigo_operacion') AS codigo_operacion
               FROM pago p
               JOIN venta v ON v.id_venta = p.id_venta
              WHERE p.estado = 'pendiente'
                AND p.id_transaccion IS NOT NULL
-               AND p.detalle_proveedor->>'metodo' = 'transferencia'
+               AND p.detalle_proveedor->>'metodo' IN ('yape', 'plin', 'transferencia')
              ORDER BY v.id_venta DESC
              LIMIT 50
         """)
-        transferencias_pendientes = cursor.fetchall()
+        pagos_pendientes_verificacion = cursor.fetchall()
     finally:
         conn.close()
     return render_template('admin_pagos_simulados.html',
                            eventos=eventos, pendientes=pendientes,
-                           transferencias_pendientes=transferencias_pendientes,
+                           pagos_pendientes_verificacion=pagos_pendientes_verificacion,
                            pagina=pagina, total=total,
                            por_pagina=POR_PAGINA_ADMIN,
                            filtros_qs=_filtros_sin_pagina())
@@ -5896,11 +6086,12 @@ def admin_pagos_disparar():
     return redirect(url_for('admin_pagos_simulados'))
 
 
-@app.route('/admin/pagos_simulados/transferencia/<int:id_pago>/<accion>', methods=['POST'])
+@app.route('/admin/pagos_simulados/pago/<int:id_pago>/<accion>', methods=['POST'])
 @login_required
 @admin_required
-def admin_pagos_transferencia(id_pago, accion):
-    """La administradora confirma o rechaza una transferencia pendiente."""
+def admin_pagos_verificacion(id_pago, accion):
+    """La administradora confirma o rechaza un pago pendiente de verificación
+    (yape, plin o transferencia)."""
     if _PASARELA is None or _PASARELA.nombre != 'simulated':
         return {'ok': False, 'error': 'pasarela simulada no disponible'}, 403
     if accion not in ('confirmar', 'rechazar'):
@@ -5909,16 +6100,17 @@ def admin_pagos_transferencia(id_pago, accion):
     cursor = conn.cursor(dictionary=True)
     try:
         cursor.execute("""
-            SELECT p.id_pago, p.id_transaccion, p.monto, p.estado, v.id_venta, v.id_cliente
+            SELECT p.id_pago, p.id_transaccion, p.monto, p.estado, v.id_venta, v.id_cliente,
+                   p.detalle_proveedor->>'metodo' AS metodo_pago
               FROM pago p
               JOIN venta v ON v.id_venta = p.id_venta
              WHERE p.id_pago = %s
                AND p.estado = 'pendiente'
-               AND p.detalle_proveedor->>'metodo' = 'transferencia'
+               AND p.detalle_proveedor->>'metodo' IN ('yape', 'plin', 'transferencia')
         """, (id_pago,))
         pago = cursor.fetchone()
         if not pago:
-            flash('Transferencia no encontrada o ya no está pendiente.', 'warning')
+            flash('Pago no encontrado o ya no está pendiente.', 'warning')
             return redirect(url_for('admin_pagos_simulados'))
         # Total recalculado del servidor
         cursor.execute(f"""
@@ -5930,16 +6122,17 @@ def admin_pagos_transferencia(id_pago, accion):
         res = confirmar_pago(pago['id_pago'],
                              PagoResultado(id_pago_proveedor=pago['id_transaccion'],
                                            estado=estado_final, monto=total),
-                             conn=conn, fuente='admin_transferencia')
+                             conn=conn, fuente='admin_verificacion')
         conn.commit()
+        metodo_label = pago['metodo_pago'].upper() if pago['metodo_pago'] else 'Pago'
         if accion == 'confirmar':
-            flash(f'Transferencia de venta #{pago["id_venta"]} confirmada.', 'success')
+            flash(f'{metodo_label} de venta #{pago["id_venta"]} confirmado.', 'success')
         else:
-            flash(f'Transferencia de venta #{pago["id_venta"]} rechazada.', 'warning')
+            flash(f'{metodo_label} de venta #{pago["id_venta"]} rechazado.', 'warning')
     except Exception:
         conn.rollback()
-        app.logger.exception("Error procesando transferencia %s", id_pago)
-        flash('No se pudo procesar la transferencia.', 'danger')
+        app.logger.exception("Error procesando pago %s", id_pago)
+        flash('No se pudo procesar el pago.', 'danger')
     finally:
         conn.close()
     return redirect(url_for('admin_pagos_simulados'))
