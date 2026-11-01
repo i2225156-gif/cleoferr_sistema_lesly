@@ -320,6 +320,9 @@ _CSRF_PROTEGIDAS = {
     'desactivar_producto',
     # Commit A: alta admin de clientes (form HTML con token en cliente_form)
     'nuevo_cliente',
+    # Alertas: resolver una alerta es escritura (POST + CSRF); el fetch de
+    # la pagina manda X-CSRFToken y el formulario el token oculto.
+    'alertas_resolver',
 }
 
 
@@ -3433,18 +3436,35 @@ def alertas():
 @login_required
 @permiso_required('alertas')
 def alertas_resolver(id):
+    """Resuelve una alerta (POST + CSRF).
+
+    Formulario normal: flash + redireccion a /alertas. AJAX (el fetch de
+    la propia pagina): JSON, nunca una pagina HTML (response.json() sobre
+    un <!doctype> rompia el toast).
+    """
+    ajax = _es_ajax()
     conn = get_connection_tienda()
     cursor = conn.cursor()
     try:
         cursor.execute("UPDATE alerta SET resuelta = TRUE WHERE id_alerta = %s", (id,))
         conn.commit()
-        flash("Alerta marcada como resuelta.", "success")
+        if getattr(cursor, 'rowcount', 1) == 0:
+            if ajax:
+                return {'ok': False, 'error': 'La alerta no existe.'}, 404
+            flash("La alerta ya no existe.", "danger")
+            return redirect(url_for('alertas'))
+        if not ajax:
+            flash("Alerta marcada como resuelta.", "success")
     except Exception as e:
         conn.rollback()
-        flash("Error al resolver alerta.", "danger")
         app.logger.exception("Error resolviendo alerta %s: %s", id, e)
+        if ajax:
+            return {'ok': False, 'error': 'Error al resolver la alerta.'}, 500
+        flash("Error al resolver alerta.", "danger")
     finally:
         conn.close()
+    if ajax:
+        return {'ok': True, 'id': id}
     return redirect(url_for('alertas'))
 
 
