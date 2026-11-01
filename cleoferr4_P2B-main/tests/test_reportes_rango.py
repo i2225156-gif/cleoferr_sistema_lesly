@@ -114,14 +114,20 @@ def fx(monkeypatch):
     id_venta_preparando = venta(ts(-3, 9), 2, 'pendiente',
                                  f'zzrepbase-prep-{marca}')
 
-    # Movimientos de inventario (entradas y salidas).
+    # Movimientos de inventario (entradas y salidas) y uno al borde:
+    # 23:59:59 de Lima del dia anterior.
     cur.execute("""
         INSERT INTO inventario_movimiento (tipo, id_producto, cantidad,
                                            precio_unitario, stock_resultante,
                                            observacion, fecha)
         VALUES ('entrada', %s, 5, 10.00, 105, 'zzrep-entrada', %s),
-               ('salida', %s, 2, 10.00, 103, 'zzrep-salida', %s)
-    """, (id_producto, ts(-3, 10), id_producto, ts(-1, 18)))
+               ('salida', %s, 2, 10.00, 103, 'zzrep-salida', %s),
+               ('salida', %s, 1, 10.00, 102, 'zzrep-borde', %s)
+        RETURNING id_movimiento
+    """, (id_producto, ts(-3, 10), id_producto, ts(-1, 18),
+          id_producto, ts(-1, 23, 59, 59)))
+    ids_mov = [f['id_movimiento'] for f in cur.fetchall()]
+    id_mov_entrada, id_mov_salida, id_mov_borde = ids_mov
 
     monkeypatch.setattr(modulo_app, 'get_connection_tienda', lambda: proxy)
     yield {'cur': cur, 'proxy': proxy, 'admin': _sesion(), 'hoy': hoy,
@@ -129,7 +135,10 @@ def fx(monkeypatch):
            'id_venta_borde': id_venta_borde,
            'id_venta_vieja': id_venta_vieja,
            'id_venta_pendiente': id_venta_pendiente,
-           'id_venta_preparando': id_venta_preparando}
+           'id_venta_preparando': id_venta_preparando,
+           'id_mov_entrada': id_mov_entrada,
+           'id_mov_salida': id_mov_salida,
+           'id_mov_borde': id_mov_borde}
     proxy.rollback()
     raw.close()
 
@@ -162,9 +171,19 @@ def _filas(html):
     return html.count('class="fila-reporte"')
 
 
-def _ids_ventas(html):
+def _ids(html):
+    """La primera celda de cada fila (id de venta o de movimiento)."""
     return [int(x) for x in
             re.findall(r'fila-reporte">\s*<td>(\d+)</td>', html)]
+
+
+def _fila_producto(html, nombre):
+    """(unidades, monto) de la fila del producto en la tabla."""
+    m = re.search(
+        r'fila-reporte">\s*<td>%s</td>\s*<td>(\d+)</td>\s*<td>([\d.]+)</td>'
+        % re.escape(nombre), html)
+    assert m, f'no esta el producto «{nombre}» en la tabla'
+    return int(m.group(1)), float(m.group(2))
 
 
 def _resumen(html, clave):
@@ -204,6 +223,37 @@ def _sql_pedidos(fx, desde, hasta):
     return int(fila['c']), int(fila['e'])
 
 
+def _sql_productos(fx, desde, hasta):
+    """(productos, unidades, monto neto) del rango: la misma consulta."""
+    fx['cur'].execute(f"""
+        SELECT COUNT(*) AS c, COALESCE(SUM(unidades), 0) AS u,
+               COALESCE(SUM(monto), 0) AS m FROM (
+            SELECT p.id_producto, SUM(d.cantidad) AS unidades,
+                   SUM({NETO}) AS monto
+              FROM detalle_venta d
+              JOIN venta v ON v.id_venta = d.id_venta
+              JOIN pago pg ON pg.id_venta = v.id_venta AND pg.estado = 'confirmado'
+              JOIN producto p ON p.id_producto = d.id_producto
+             WHERE (v.fecha AT TIME ZONE 'America/Lima')::date BETWEEN %s AND %s
+             GROUP BY p.id_producto) x
+    """, (desde, hasta))
+    fila = fx['cur'].fetchone()
+    return int(fila['c']), int(fila['u']), float(fila['m'] or 0)
+
+
+def _sql_inventario(fx, desde, hasta):
+    """(movimientos, unidades de entrada, unidades de salida) del rango."""
+    fx['cur'].execute("""
+        SELECT COUNT(*) AS c,
+               COALESCE(SUM(CASE WHEN tipo = 'entrada' THEN cantidad ELSE 0 END), 0) AS e,
+               COALESCE(SUM(CASE WHEN tipo = 'salida' THEN cantidad ELSE 0 END), 0) AS s
+          FROM inventario_movimiento
+         WHERE (fecha AT TIME ZONE 'America/Lima')::date BETWEEN %s AND %s
+    """, (desde, hasta))
+    fila = fx['cur'].fetchone()
+    return int(fila['c']), int(fila['e']), int(fila['s'])
+
+
 # ── Ventas: cantidad y total neto (solo pagos confirmados) ───────────
 
 def test_ventas_lista_solo_las_ventas_con_pago_confirmado_del_rango(fx):
@@ -211,7 +261,7 @@ def test_ventas_lista_solo_las_ventas_con_pago_confirmado_del_rango(fx):
     de pago no confirmado no."""
     desde, hasta = _dias(fx, -3), _dias(fx, -1)
     html = _html(_reporte(fx, 'ventas', desde=desde, hasta=hasta))
-    ids = _ids_ventas(html)
+    ids = _ids(html)
     assert fx['id_venta_borde'] in ids
     assert fx['id_venta_pendiente'] not in ids
     assert fx['id_venta_preparando'] not in ids
@@ -288,15 +338,136 @@ def test_pedidos_el_resumen_cuenta_todo_el_conjunto(fx):
     assert int(_resumen(html, 'cantidad')) == pedidos
 
 
+# ── Productos: mas vendidos por unidades y monto ──────────────────────
+
+def test_productos_lista_los_mas_vendidos_con_unidades_y_monto(fx):
+    """El producto del fixture sale con sus unidades y su monto neto; las
+    ventas sin pago confirmado (o fuera del rango) no cuentan."""
+    desde, hasta = _dias(fx, -3), _dias(fx, -1)
+    html = _html(_reporte(fx, 'productos', desde=desde, hasta=hasta))
+    unidades, monto = _fila_producto(html, f'zzrep-prod-{fx["marca"]}')
+    assert unidades == 2
+    assert monto == pytest.approx(20.00, abs=0.01)
+
+
+def test_productos_el_resumen_cuenta_todo_el_conjunto(fx):
+    desde, hasta = _dias(fx, -3), _dias(fx, -1)
+    html = _html(_reporte(fx, 'productos', desde=desde, hasta=hasta))
+    productos, unidades, monto = _sql_productos(fx, desde, hasta)
+    assert int(_resumen(html, 'cantidad')) == productos
+    assert int(_resumen(html, 'unidades')) == unidades
+    assert float(_resumen(html, 'monto')) == pytest.approx(monto, abs=0.01)
+
+
+def test_productos_el_total_no_depende_de_la_pagina(fx):
+    """Con mas de 20 productos la tabla muestra 20 filas, pero el resumen
+    cuenta el conjunto filtrado completo."""
+    cur = fx['cur']
+    marca = fx['marca']
+    hoy = fx['hoy']
+    cur.execute("""
+        INSERT INTO producto (nombre, precio, stock, stock_minimo, destacado, activo)
+        SELECT %s || g, 10.00, 100, 5, FALSE, TRUE FROM generate_series(1, 25) g
+        RETURNING id_producto
+    """, (f'zzrepmany-prod-{marca}-',))
+    ids_productos = [f['id_producto'] for f in cur.fetchall()]
+    cur.execute("""
+        INSERT INTO venta (fecha, id_tipo_venta, id_estado_venta, cliente_nombre)
+        SELECT %s, 1, 6, %s || g FROM generate_series(1, 25) g
+        RETURNING id_venta
+    """, (datetime(hoy.year, hoy.month, hoy.day, 9, tzinfo=LIMA),
+          f'zzrepmany-cli-{marca}-'))
+    ids_ventas = [f['id_venta'] for f in cur.fetchall()]
+    for id_venta, id_producto in zip(ids_ventas, ids_productos):
+        cur.execute("""
+            INSERT INTO detalle_venta (id_venta, id_producto, cantidad,
+                                       precio_unitario, nombre_producto,
+                                       descuento_unitario)
+            VALUES (%s, %s, 1, 10.00, 'zzrepmany', 0)
+        """, (id_venta, id_producto))
+        cur.execute("""
+            INSERT INTO pago (id_venta, id_tipo_pago, estado, fecha_pago)
+            VALUES (%s, 1, 'confirmado', NOW())
+        """, (id_venta,))
+    desde, hasta = _dias(fx, -30), _dias(fx, 0)
+    productos, unidades, monto = _sql_productos(fx, desde, hasta)
+    assert productos > POR_PAGINA
+    html = _html(_reporte(fx, 'productos', desde=desde, hasta=hasta))
+    assert _filas(html) == POR_PAGINA
+    assert int(_resumen(html, 'cantidad')) == productos
+    assert int(_resumen(html, 'unidades')) == unidades
+    assert float(_resumen(html, 'monto')) == pytest.approx(monto, abs=0.01)
+
+
+# ── Inventario: movimientos por tipo (entradas y salidas) ──────────────
+
+def test_inventario_lista_las_entradas_y_las_salidas_del_rango(fx):
+    """Los movimientos del rango salen con su tipo, su producto y su
+    cantidad."""
+    desde, hasta = _dias(fx, -3), _dias(fx, -1)
+    html = _html(_reporte(fx, 'inventario', desde=desde, hasta=hasta))
+    ids = _ids(html)
+    assert fx['id_mov_entrada'] in ids
+    assert fx['id_mov_salida'] in ids
+    assert fx['id_mov_borde'] in ids
+    assert 'entrada' in html and 'salida' in html
+
+
+def test_inventario_el_resumen_cuenta_entradas_y_salidas_del_conjunto(fx):
+    desde, hasta = _dias(fx, -3), _dias(fx, -1)
+    html = _html(_reporte(fx, 'inventario', desde=desde, hasta=hasta))
+    movimientos, entradas, salidas = _sql_inventario(fx, desde, hasta)
+    assert int(_resumen(html, 'cantidad')) == movimientos
+    assert int(_resumen(html, 'entradas')) == entradas
+    assert int(_resumen(html, 'salidas')) == salidas
+
+
+def test_inventario_el_borde_de_2339_lima_entra_en_su_dia(fx):
+    """El movimiento de las 23:59:59 de Lima del dia anterior cuenta en
+    ese dia (y no en el anterior) y sale a las 23:59 (hora Lima)."""
+    html = _html(_reporte(fx, 'inventario',
+                          desde=_dias(fx, -1), hasta=_dias(fx, -1)))
+    assert fx['id_mov_borde'] in _ids(html)
+    dia = fx['hoy'] - timedelta(days=1)
+    assert f'{dia.strftime("%d/%m/%Y")} 23:59' in html
+    html = _html(_reporte(fx, 'inventario',
+                          desde=_dias(fx, -2), hasta=_dias(fx, -2)))
+    assert fx['id_mov_borde'] not in _ids(html)
+
+
+def test_inventario_el_total_no_depende_de_la_pagina(fx):
+    """Con mas de 20 movimientos la tabla muestra 20 filas, pero el resumen
+    cuenta el conjunto filtrado completo."""
+    cur = fx['cur']
+    hoy = fx['hoy']
+    cur.execute("""
+        INSERT INTO inventario_movimiento (tipo, id_producto, cantidad,
+                                           precio_unitario, stock_resultante,
+                                           observacion, fecha)
+        SELECT 'entrada', %s, 3, 10.00, 100, 'zzrepmany-mov',
+               %s + (g || ' minutes')::interval
+          FROM generate_series(1, 25) g
+    """, (fx['id_producto'],
+          datetime(hoy.year, hoy.month, hoy.day, 6, tzinfo=LIMA)))
+    desde, hasta = _dias(fx, -30), _dias(fx, 0)
+    movimientos, entradas, salidas = _sql_inventario(fx, desde, hasta)
+    assert movimientos > POR_PAGINA
+    html = _html(_reporte(fx, 'inventario', desde=desde, hasta=hasta))
+    assert _filas(html) == POR_PAGINA
+    assert int(_resumen(html, 'cantidad')) == movimientos
+    assert int(_resumen(html, 'entradas')) == entradas
+    assert int(_resumen(html, 'salidas')) == salidas
+
+
 # ── Política de fechas ────────────────────────────────────────────────
 
 def test_el_borde_de_2339_lima_entra_en_su_dia_y_no_en_el_siguiente(fx):
     """La venta de las 23:59:59 de Lima del dia anterior cuenta en ese
     dia (y no en el anterior)."""
     html = _html(_reporte(fx, 'ventas', desde=_dias(fx, -1), hasta=_dias(fx, -1)))
-    assert fx['id_venta_borde'] in _ids_ventas(html)
+    assert fx['id_venta_borde'] in _ids(html)
     html = _html(_reporte(fx, 'ventas', desde=_dias(fx, -2), hasta=_dias(fx, -2)))
-    assert fx['id_venta_borde'] not in _ids_ventas(html)
+    assert fx['id_venta_borde'] not in _ids(html)
 
 
 def test_el_rango_por_defecto_son_los_ultimos_30_dias(fx):
@@ -354,6 +525,16 @@ def test_estado_vacio_legible_sin_500(fx):
     html = _html(_reporte(fx, 'ventas', desde=_dias(fx, -300), hasta=_dias(fx, -200)))
     assert _vacio(html)
     assert _filas(html) == 0
+
+
+def test_productos_e_inventario_tienen_estado_vacio(fx):
+    """Los dos tipos nuevos tambien muestran el estado vacio (no un 500)
+    cuando el rango no tiene datos."""
+    for tipo in ('productos', 'inventario'):
+        html = _html(_reporte(fx, tipo,
+                              desde=_dias(fx, -300), hasta=_dias(fx, -200)))
+        assert _vacio(html), tipo
+        assert _filas(html) == 0, tipo
 
 
 def test_sin_permiso_de_reportes_no_entra(fx, monkeypatch):

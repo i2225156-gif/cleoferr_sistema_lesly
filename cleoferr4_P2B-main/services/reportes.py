@@ -143,11 +143,105 @@ def _reporte_pedidos(cursor, desde, hasta, pagina, por_pagina):
     }
 
 
+def _reporte_productos(cursor, desde, hasta, pagina, por_pagina):
+    """Productos mas vendidos del rango: unidades y monto neto.
+
+    Reutiliza `sql_top_productos` (la consulta del RF12): SOLO pagos
+    confirmados y dias calendario Lima. El resumen es sobre TODO el
+    conjunto filtrado, no sobre la pagina.
+    """
+    rango, params = sql_rango('v.', 'fecha', desde, hasta)
+    base = sql_top_productos(rango)
+    cursor.execute(f"""
+        SELECT COUNT(*) AS c, COALESCE(SUM(unidades), 0) AS u,
+               COALESCE(SUM(monto), 0) AS m
+          FROM ({base}) x
+    """, params)
+    agg = cursor.fetchone()
+    total = int(agg['c'] or 0)
+    unidades = int(agg['u'] or 0)
+    monto = float(agg['m'] or 0)
+    sql, sql_params, pagina = _paginar(
+        total, pagina, por_pagina,
+        base + " ORDER BY unidades DESC, monto DESC, p.id_producto ASC", params)
+    cursor.execute(sql, sql_params)
+    filas = cursor.fetchall()
+    return {
+        'headers': ['Producto', 'Unidades', 'Monto (S/)'],
+        'filas': [[f['nombre'], int(f['unidades'] or 0),
+                   f"{float(f['monto'] or 0):.2f}"] for f in filas],
+        'total': total,
+        'pagina': pagina,
+        'resumen': [
+            {'clave': 'cantidad', 'label': 'Productos', 'valor': str(total)},
+            {'clave': 'unidades', 'label': 'Unidades', 'valor': str(unidades)},
+            {'clave': 'monto', 'label': 'Monto neto (S/)',
+             'valor': f"{monto:.2f}"},
+        ],
+    }
+
+
+def _reporte_inventario(cursor, desde, hasta, pagina, por_pagina):
+    """Movimientos de inventario del rango: entradas y salidas.
+
+    El filtro es por dia calendario Lima (services.horario) y la fecha
+    que se muestra es la Pared Lima (SQL_PARED_LIMA): un movimiento de
+    las 23:59:59 cuenta en su dia y sale a las 23:59.
+    """
+    rango, params = sql_rango('m.', 'fecha', desde, hasta)
+    base = f"""
+        SELECT m.id_movimiento, m.tipo,
+               {SQL_PARED_LIMA.format(p='m.', col='fecha')} AS fecha,
+               COALESCE(p.nombre, '(sin producto)') AS producto,
+               m.cantidad, m.stock_resultante
+          FROM inventario_movimiento m
+          LEFT JOIN producto p ON p.id_producto = m.id_producto
+         WHERE 1=1{rango}
+    """
+    cursor.execute(f"""
+        SELECT COUNT(*) AS c,
+               COALESCE(SUM(CASE WHEN tipo = 'entrada' THEN cantidad ELSE 0 END), 0) AS e,
+               COALESCE(SUM(CASE WHEN tipo = 'salida' THEN cantidad ELSE 0 END), 0) AS s
+          FROM ({base}) x
+    """, params)
+    agg = cursor.fetchone()
+    total = int(agg['c'] or 0)
+    entradas = int(agg['e'] or 0)
+    salidas = int(agg['s'] or 0)
+    sql, sql_params, pagina = _paginar(
+        total, pagina, por_pagina,
+        base + " ORDER BY fecha DESC, m.id_movimiento DESC", params)
+    cursor.execute(sql, sql_params)
+    filas = cursor.fetchall()
+    return {
+        'headers': ['Movimiento', 'Tipo', 'Fecha (Perú)', 'Producto',
+                    'Cantidad', 'Stock'],
+        'filas': [[f['id_movimiento'], f['tipo'] or '–',
+                   f['fecha'].strftime('%d/%m/%Y %H:%M') if f['fecha'] else '–',
+                   f['producto'] or '–', int(f['cantidad'] or 0),
+                   f['stock_resultante'] if f['stock_resultante'] is not None else '–']
+                  for f in filas],
+        'total': total,
+        'pagina': pagina,
+        'resumen': [
+            {'clave': 'cantidad', 'label': 'Movimientos', 'valor': str(total)},
+            {'clave': 'entradas', 'label': 'Entradas (unidades)',
+             'valor': str(entradas)},
+            {'clave': 'salidas', 'label': 'Salidas (unidades)',
+             'valor': str(salidas)},
+        ],
+    }
+
+
 def reporte(tipo, cursor, desde, hasta, pagina=1, por_pagina=20):
     """Reporte del tipo pedido. `pagina=None` = todas las filas (export)."""
     if tipo == 'ventas':
         return _reporte_ventas(cursor, desde, hasta, pagina, por_pagina)
     if tipo == 'pedidos':
         return _reporte_pedidos(cursor, desde, hasta, pagina, por_pagina)
+    if tipo == 'productos':
+        return _reporte_productos(cursor, desde, hasta, pagina, por_pagina)
+    if tipo == 'inventario':
+        return _reporte_inventario(cursor, desde, hasta, pagina, por_pagina)
     return {'headers': [], 'filas': [], 'total': 0, 'pagina': 1,
             'resumen': []}
