@@ -185,3 +185,42 @@ def test_tarjeta_aprobada_sin_enviar_numero_vencimiento_ni_cvv(fx):
     pago = _pago_de(fx, trx)
     assert pago['estado_pago'] == 'confirmado'
     assert pago['estado_venta'] == 'confirmado'
+
+
+def test_metodo_se_conserva_en_recarga_otra_pestana_y_regreso(fx):
+    pedido = _crear_pedido(fx, metodo='yape')
+    url = pedido['checkout_url']
+    respuestas = [fx['client'].get(url), fx['client'].get(url)]
+    fx['client'].get('/carrito')
+    respuestas.append(fx['client'].get(url))
+
+    otra_pestana = app.test_client()
+    with otra_pestana.session_transaction() as s:
+        s['usuario_id'] = 11
+        s['rol'] = 'cliente'
+        s['nombre'] = 'Cliente'
+        s['_csrf_token'] = 'token-test'
+    respuestas.append(otra_pestana.get(url))
+
+    for r in respuestas:
+        assert r.status_code == 200
+        html = r.get_data(as_text=True)
+        assert 'const METODO_INICIAL = "yape";' in html
+        assert 'sessionStorage' not in html
+
+
+def test_boton_se_bloquea_y_doble_confirmacion_reutiliza_el_pedido(fx):
+    html = fx['client'].get('/carrito').get_data(as_text=True)
+    assert 'btnConfirmar.disabled = true' in html
+    primero = _crear_pedido(fx)
+    fx['cur'].execute("SELECT COUNT(*) AS n FROM venta")
+    ventas_antes = fx['cur'].fetchone()['n']
+
+    segundo = _crear_pedido(fx)
+
+    assert segundo['reutilizado'] is True
+    assert segundo['id_pedido'] == primero['id_pedido']
+    assert segundo['id_pago'] == primero['id_pago']
+    assert segundo['checkout_url'] == primero['checkout_url']
+    fx['cur'].execute("SELECT COUNT(*) AS n FROM venta")
+    assert fx['cur'].fetchone()['n'] == ventas_antes
