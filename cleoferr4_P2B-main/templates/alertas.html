@@ -6,11 +6,10 @@
 <div class="page-header">
     <div>
         <h2><i class="fa fa-bell me-2"></i>ALERTAS</h2>
-        <p>Alertas próximas: bajos stocks, pedidos pendientes o vencimientos. Gestiona y programa acciones.</p>
+        <p>Alertas próximas: bajos stocks, pedidos pendientes o vencimientos. Gestiona las alertas pendientes.</p>
     </div>
-    <div>
-        <a href="/alertas/programar" class="btn btn-outline-secondary"><i class="fa fa-calendar-plus me-1"></i>Programar reabastecimiento</a>
-    </div>
+    {# Botón "Programar reabastecimiento" oculto: todavía no existe la
+       ruta /alertas/programar y no se inventa una función vacía. #}
 </div>
 
 {% if bajo_stock %}
