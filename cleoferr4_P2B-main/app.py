@@ -3376,6 +3376,20 @@ def _ref_vencimiento(descripcion):
     return (m.group(1) == 'Vencido', m.group(2))
 
 
+# tipo_alerta.nombre -> lo que ve el usuario en la columna TIPO.
+_NOMBRE_TIPO_ALERTA = {
+    'stock_bajo': 'Stock bajo',
+    'stock_agotado': 'Stock agotado',
+    'vencimiento_proximo': 'Vencimiento',
+}
+
+
+def _nombre_tipo_alerta(nombre):
+    if not nombre:
+        return None
+    return _NOMBRE_TIPO_ALERTA.get(nombre, nombre.replace('_', ' ').capitalize())
+
+
 @app.route('/alertas')
 @login_required
 @permiso_required('alertas')
@@ -3493,11 +3507,18 @@ def alertas():
         conn.commit()
         # Solo las alertas pendientes: las resueltas estan «enteradas» y no
         # se listan (asi resolver quita la fila y no vuelve al recargar).
+        # Con tipo_alerta y producto para las columnas TIPO y RELACIONADO.
         cursor.execute("""
-            SELECT * FROM alerta WHERE resuelta = FALSE
-            ORDER BY fecha DESC LIMIT 200
+            SELECT a.*, t.nombre AS tipo_nombre, p.nombre AS producto_nombre
+              FROM alerta a
+              LEFT JOIN tipo_alerta t ON t.id_tipo_alerta = a.id_tipo_alerta
+              LEFT JOIN producto p ON p.id_producto = a.id_producto
+             WHERE a.resuelta = FALSE
+             ORDER BY a.fecha DESC LIMIT 200
         """)
         alertas = cursor.fetchall()
+        for a in alertas:
+            a['tipo_nombre'] = _nombre_tipo_alerta(a.get('tipo_nombre'))
     except Exception:
         alertas = []
         conn.rollback()

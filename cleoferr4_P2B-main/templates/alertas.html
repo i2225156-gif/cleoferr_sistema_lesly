@@ -82,9 +82,15 @@
                     {% for a in alertas %}
                     <tr data-id="{{ a.id_alerta }}">
                         <td><small>{{ a.fecha.strftime('%d/%m/%Y %H:%M') if a.fecha else '–' }}</small></td>
-                        <td>{{ a.tipo or '–' }}</td>
+                        <td>{{ a.tipo_nombre or '–' }}</td>
                         <td>{{ a.descripcion or '–' }}</td>
-                        <td>{{ a.relacionado or '–' }}</td>
+                        <td>
+                            {%- if a.producto_nombre -%}
+                            <a href="/productos/detalle/{{ a.id_producto }}">{{ a.producto_nombre }}</a>
+                            {%- else -%}
+                            –
+                            {%- endif -%}
+                        </td>
                         <td>
                             <span class="badge {% if a.prioridad=='alta' %}badge-salida{% elif a.prioridad=='media' %}badge-entrada{% else %}badge-inactivo{% endif %}">
                                 {{ a.prioridad|capitalize or '–' }}
