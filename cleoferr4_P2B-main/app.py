@@ -2598,7 +2598,7 @@ def venta_nueva_guardar():
             try:
                 cant = int(cant) if cant else 1
             except (TypeError, ValueError):
-                cant = 1
+                raise ValueError("La cantidad debe ser un número entero.") from None
             if cant <= 0:
                 raise ValueError("Las cantidades deben ser mayores a cero.")
             cursor.execute("""
@@ -5427,7 +5427,12 @@ def carrito_confirmar_v2():
     # AUTORITATIVO se relee dentro de la TXN que congela el detalle.
     conn_val   = get_connection_tienda()
     cursor_val = conn_val.cursor(dictionary=True)
-    ids_items  = {int(it.get('id_producto') or it.get('id') or 0) for it in items}
+    try:
+        ids_items = {int(it.get('id_producto') or it.get('id') or 0) for it in items}
+    except (AttributeError, TypeError, ValueError):
+        conn_val.close()
+        return {'ok': False,
+                'error': 'Cada producto debe tener un ID y una cantidad enteros válidos.'}, 400
     cursor_val.execute(f"""
         SELECT p.id_producto, p.nombre, p.precio, p.stock,
                COALESCE(of.descuento_unitario, 0) AS descuento
@@ -5450,7 +5455,11 @@ def carrito_confirmar_v2():
                               'nombre': it.get('nombre') or f'producto #{pid}',
                               'motivo': 'Ya no está disponible (eliminado o desactivado)'})
             continue
-        cantidad = int(it.get('cantidad', 1))
+        try:
+            cantidad = int(it.get('cantidad', 1))
+        except (AttributeError, TypeError, ValueError):
+            return {'ok': False,
+                    'error': 'Cada producto debe tener un ID y una cantidad enteros válidos.'}, 400
         if cantidad <= 0:
             return {'ok': False,
                     'error': 'La cantidad debe ser un entero mayor que cero.'}, 400

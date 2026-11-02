@@ -235,6 +235,19 @@ def test_venta_local_cantidad_negativa_es_rechazada_sin_escribir(fx):
     assert _stock(fx) == stock_antes
 
 
+def test_venta_local_cantidad_no_numerica_es_rechazada_sin_escribir(fx):
+    pid = fx['id_producto']
+    stock_antes = _stock(fx)
+    ventas_antes = _n_ventas(fx)
+
+    r = _post_venta(fx, [(pid, 'abc')])
+
+    assert r.status_code == 200
+    assert 'La cantidad debe ser un número entero' in r.get_data(as_text=True)
+    assert _n_ventas(fx) == ventas_antes
+    assert _stock(fx) == stock_antes
+
+
 def test_venta_local_stock_insuficiente_rechazada_y_no_escribe(fx):
     """Sobre el producto SINTETICO del fixture: pedir más de lo que hay da
     flash claro y NADA escrito (rollback de la ruta; verificado en datos
