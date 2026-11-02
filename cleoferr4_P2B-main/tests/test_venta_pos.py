@@ -127,7 +127,7 @@ def fx(monkeypatch):
     raw_t.close()
 
 
-def _post_venta(fx, lineas, metodo='efectivo'):
+def _post_venta(fx, lineas, metodo='efectivo', comp_tipo='boleta', comp_doc=''):
     c = fx['client']
     c.get('/ventas/nueva')
     with c.session_transaction() as s:
@@ -139,7 +139,8 @@ def _post_venta(fx, lineas, metodo='efectivo'):
         'metodo_pago': metodo,
         'id_producto[]': [str(pid) for pid, _ in lineas],
         'cantidad[]': [str(cant) for _, cant in lineas],
-        'comp_tipo': 'boleta',
+        'comp_tipo': comp_tipo,
+        'comp_doc': comp_doc,
     }, follow_redirects=True)
 
 
@@ -244,6 +245,22 @@ def test_venta_local_cantidad_no_numerica_es_rechazada_sin_escribir(fx):
 
     assert r.status_code == 200
     assert 'La cantidad debe ser un número entero' in r.get_data(as_text=True)
+    assert _n_ventas(fx) == ventas_antes
+    assert _stock(fx) == stock_antes
+
+
+def test_factura_con_ruc_invalido_es_400_y_no_registra_venta(fx):
+    pid = fx['id_producto']
+    stock_antes = _stock(fx)
+    ventas_antes = _n_ventas(fx)
+
+    r = _post_venta(fx, [(pid, 1)], comp_tipo='factura',
+                    comp_doc='20123456780')
+
+    assert r.status_code == 400
+    datos = r.get_json()
+    assert datos['ok'] is False
+    assert 'dígito verificador' in datos['error']
     assert _n_ventas(fx) == ventas_antes
     assert _stock(fx) == stock_antes
 

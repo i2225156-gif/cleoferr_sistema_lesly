@@ -2655,10 +2655,10 @@ def venta_nueva_guardar():
             comp_tipo = request.form.get('comp_tipo', 'boleta').strip().lower()
             tipo_comp_db = 'factura' if comp_tipo == 'factura' else 'boleta'
             doc_cliente = (request.form.get('comp_doc') or '').strip() or None
-            if tipo_comp_db == 'factura' and (not doc_cliente or len(doc_cliente) != 11):
-                flash('Factura requiere un RUC válido (11 dígitos). Se emitió boleta.', 'warning')
-                tipo_comp_db = 'boleta'
-                doc_cliente = None
+            if tipo_comp_db == 'factura' and not ruc_valido_para_factura(doc_cliente):
+                conn.rollback()
+                return {'ok': False,
+                        'error': 'El RUC no es válido (revisa el dígito verificador). La venta no se registró.'}, 400
             num_comp = _siguiente_numero_comprobante(cursor, tipo_comp_db)
             # Totales calculados a partir del detalle (precios con IGV 18% incluido)
             cursor.execute(f"""
