@@ -61,9 +61,19 @@
 {% endif %}
 
 <div class="card card-custom">
-    <div class="card-header d-flex justify-content-between align-items-center">
+    <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
         <span><i class="fa fa-exclamation-circle me-2"></i>Listado de alertas</span>
-        <span class="badge bg-danger" id="contador-alertas" title="Alertas pendientes">{{ alertas|length }}</span>
+        <div class="d-flex align-items-center gap-2">
+            <div class="btn-group btn-group-sm" role="group" aria-label="Filtrar alertas por tipo">
+                <a class="btn btn-outline-secondary{{ ' active' if filtro == 'todas' }}"
+                   href="/alertas?tipo=todas">Todas</a>
+                <a class="btn btn-outline-secondary{{ ' active' if filtro == 'stock_bajo' }}"
+                   href="/alertas?tipo=stock_bajo">Stock bajo</a>
+                <a class="btn btn-outline-secondary{{ ' active' if filtro == 'vencimiento' }}"
+                   href="/alertas?tipo=vencimiento">Vencimiento</a>
+            </div>
+            <span class="badge bg-danger" id="contador-alertas" title="Alertas pendientes">{{ alertas|length }}</span>
+        </div>
     </div>
     <div class="card-body p-0">
         <div class="table-responsive">
@@ -86,7 +96,11 @@
                         <td>{{ a.descripcion or '–' }}</td>
                         <td>
                             {%- if a.producto_nombre -%}
+                            {%- if tiene_permiso('productos') -%}
                             <a href="/productos/detalle/{{ a.id_producto }}">{{ a.producto_nombre }}</a>
+                            {%- else -%}
+                            {{ a.producto_nombre }}
+                            {%- endif -%}
                             {%- else -%}
                             –
                             {%- endif -%}
@@ -97,14 +111,29 @@
                             </span>
                         </td>
                         <td>
+                            {%- if a.tipo_clave == 'stock_bajo' and a.id_producto and tiene_permiso('inventario') -%}
+                            <a class="btn btn-sm btn-outline-primary me-1"
+                               href="/inventario?producto={{ a.id_producto }}"
+                               title="Registrar la entrada (reposición) de este producto">Reponer</a>
+                            {%- endif -%}
+                            {%- if a.tipo_clave == 'vencimiento' and a.id_producto and tiene_permiso('ofertas') -%}
+                            <a class="btn btn-sm btn-outline-warning me-1" href="/admin/ofertas"
+                               title="Crear una oferta para este producto">Crear oferta</a>
+                            {%- endif -%}
+                            {%- if a.tipo_clave == 'vencimiento' and a.id_producto and tiene_permiso('productos') -%}
+                            <a class="btn btn-sm btn-outline-secondary me-1"
+                               href="/productos/detalle/{{ a.id_producto }}"
+                               title="Ver la ficha del producto">Ver producto</a>
+                            {%- endif -%}
                             <form method="POST" action="/alertas/resolver/{{ a.id_alerta }}" style="display:inline" id="form-resolver-{{ a.id_alerta }}">
                                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                                <button class="btn btn-sm btn-outline-success" type="submit" title="Marcar resuelta"><i class="fa fa-check"></i></button>
+                                <button class="btn btn-sm btn-outline-success" type="submit" title="Marcar como atendida"><i class="fa fa-check"></i></button>
                             </form>
-                            <small class="text-muted cursor-pointer" 
-                                   data-id="{{ a.id_alerta }}" 
+                            <small class="text-muted cursor-pointer"
+                                   title="No volverá a avisar mientras la situación no cambie"
+                                   data-id="{{ a.id_alerta }}"
                                    data-alert="{{ a.descripcion or '' }}"
-                                   onclick="resolverAlertaAjax({{ a.id_alerta }})">Resolver</small>
+                                   onclick="resolverAlertaAjax({{ a.id_alerta }})">Marcar como atendida</small>
                         </td>
                     </tr>
                     {% else %}

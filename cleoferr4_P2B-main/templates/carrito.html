@@ -229,80 +229,6 @@
                         </div>
                     </div>
 
-                    <!-- Formulario tarjeta -->
-                    <div id="formTarjeta" style="display:none">
-                        <div class="p-3 rounded-3 mb-3" style="background:#f8f9ff;border:2px solid #e0e7ff">
-                            <!-- Card visual preview -->
-                            <div style="background:linear-gradient(135deg,#1a1a2e,#4682B4);border-radius:12px;padding:18px 20px;margin-bottom:16px;color:white;font-family:monospace;position:relative;min-height:90px">
-                                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-                                    <span style="font-size:0.7rem;opacity:0.7;font-family:sans-serif;text-transform:uppercase;letter-spacing:1px">Tarjeta de pago</span>
-                                    <svg width="44" height="30" viewBox="0 0 36 24" fill="none"><circle cx="14" cy="12" r="7" fill="#EB001B" opacity="0.9"/><circle cx="22" cy="12" r="7" fill="#F79E1B" opacity="0.9"/><path d="M18 6.8C19.7 8 20.8 9.9 20.8 12s-1.1 4-2.8 5.2C16.3 16 15.2 14.1 15.2 12s1.1-4 2.8-5.2z" fill="#FF5F00"/></svg>
-                                </div>
-                                <div style="font-size:1.1rem;letter-spacing:4px;margin-bottom:8px" id="previewNum">•••• •••• •••• ••••</div>
-                                <div style="display:flex;gap:24px;font-size:0.72rem;opacity:0.8">
-                                    <span id="previewNom" style="text-transform:uppercase">NOMBRE APELLIDO</span>
-                                    <span id="previewVenc">MM/AA</span>
-                                </div>
-                            </div>
-                            <div class="mb-2">
-                                <label class="form-label fw-semibold" style="font-size:0.85rem">Número de tarjeta</label>
-                                <input type="text" id="numTarjeta" class="form-control" placeholder="0000 0000 0000 0000"
-                                       maxlength="19" oninput="formatCard(this)">
-                            </div>
-                            <div class="mb-2">
-                                <label class="form-label fw-semibold" style="font-size:0.85rem">Nombre en la tarjeta</label>
-                                <input type="text" id="nomTarjeta" class="form-control" placeholder="NOMBRE APELLIDO"
-                                       oninput="document.getElementById('previewNom').textContent=this.value.toUpperCase()||'NOMBRE APELLIDO'">
-                            </div>
-                            <div class="row g-2">
-                                <div class="col-6">
-                                    <label class="form-label fw-semibold" style="font-size:0.85rem">Vencimiento</label>
-                                    <input type="text" id="vencTarjeta" class="form-control" placeholder="MM/AA"
-                                           maxlength="5" oninput="formatExpiry(this)">
-                                </div>
-                                <div class="col-6">
-                                    <label class="form-label fw-semibold" style="font-size:0.85rem">CVV</label>
-                                    <input type="password" id="cvvTarjeta" class="form-control" placeholder="•••" maxlength="4">
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- QR Yape/Plin -->
-                    <div id="formYape" style="display:none">
-                        <div class="text-center p-3 rounded-3" style="background:linear-gradient(135deg,#fdf3ff,#f0f7ff);border:2px solid #e9d5f5">
-                            <div style="display:flex;justify-content:center;gap:8px;margin-bottom:12px">
-                                <span style="background:#7b2d8b;color:white;font-size:0.82rem;font-weight:900;padding:4px 14px;border-radius:20px">YAPE</span>
-                                <span style="background:#1a8cdb;color:white;font-size:0.82rem;font-weight:900;padding:4px 14px;border-radius:20px">PLIN</span>
-                            </div>
-                            <div class="qr-placeholder mb-3" style="display:inline-block;background:white;padding:12px;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,0.1)">
-                                <svg width="150" height="150" viewBox="0 0 140 140" xmlns="http://www.w3.org/2000/svg">
-                                    <rect width="140" height="140" fill="white"/>
-                                    <rect x="10" y="10" width="40" height="40" rx="4" fill="#333"/><rect x="16" y="16" width="28" height="28" rx="2" fill="white"/><rect x="20" y="20" width="20" height="20" rx="1" fill="#333"/>
-                                    <rect x="90" y="10" width="40" height="40" rx="4" fill="#333"/><rect x="96" y="16" width="28" height="28" rx="2" fill="white"/><rect x="100" y="20" width="20" height="20" rx="1" fill="#333"/>
-                                    <rect x="10" y="90" width="40" height="40" rx="4" fill="#333"/><rect x="16" y="96" width="28" height="28" rx="2" fill="white"/><rect x="20" y="100" width="20" height="20" rx="1" fill="#333"/>
-                                    <rect x="55" y="10" width="8" height="8" fill="#333"/><rect x="67" y="10" width="8" height="8" fill="#333"/>
-                                    <rect x="55" y="22" width="8" height="8" fill="#333"/><rect x="67" y="22" width="8" height="8" fill="#333"/>
-                                    <rect x="55" y="34" width="8" height="8" fill="#333"/>
-                                    <rect x="55" y="55" width="8" height="8" fill="#7b2d8b"/><rect x="67" y="55" width="8" height="8" fill="#7b2d8b"/>
-                                    <rect x="79" y="55" width="8" height="8" fill="#7b2d8b"/><rect x="55" y="67" width="8" height="8" fill="#7b2d8b"/>
-                                    <rect x="67" y="67" width="8" height="8" fill="#7b2d8b"/>
-                                    <rect x="90" y="55" width="8" height="8" fill="#333"/><rect x="102" y="55" width="8" height="8" fill="#333"/>
-                                    <rect x="114" y="55" width="8" height="8" fill="#333"/>
-                                    <rect x="55" y="90" width="8" height="8" fill="#333"/><rect x="67" y="90" width="8" height="8" fill="#333"/>
-                                    <rect x="79" y="90" width="8" height="8" fill="#333"/><rect x="55" y="102" width="8" height="8" fill="#333"/>
-                                    <rect x="90" y="90" width="8" height="8" fill="#333"/><rect x="102" y="90" width="8" height="8" fill="#333"/>
-                                    <rect x="114" y="90" width="8" height="8" fill="#333"/>
-                                </svg>
-                            </div>
-                            <p class="fw-bold mb-1" style="color:#7b2d8b;font-size:0.95rem">Escanea con Yape o Plin</p>
-                            <p class="mb-2" style="font-size:0.85rem;color:#555">Monto a pagar: <strong class="fw-bold" style="color:#1a1a2e;font-size:1.1rem" id="montoYape">S/ 0.00</strong></p>
-                            <label class="form-label fw-semibold" style="font-size:0.82rem;color:#666">N° de operación (requerido para confirmar):</label>
-                            <input type="text" id="numOperacion" class="form-control" placeholder="Ingresa el número de operación"
-                                   style="max-width:300px;margin:0 auto;text-align:center">
-                        </div>
-                    </div>
-
                     <div class="d-flex justify-content-end mt-3">
                         <button class="btn btn-naranja px-4" onclick="irPaso2()" id="btnSiguiente1" disabled>
                             Siguiente <i class="fa fa-arrow-right ms-1"></i>
@@ -386,7 +312,7 @@
                             <i class="fa fa-arrow-left me-1"></i> Atrás
                         </button>
                         <button class="btn btn-success px-4 fw-bold" id="btnConfirmarPedido" onclick="confirmarPedidoFinal()">
-                            <i class="fa fa-check me-1"></i> Confirmar pedido
+                            <i class="fa fa-arrow-right me-1"></i> Continuar al pago
                         </button>
                     </div>
                 </div>
@@ -659,26 +585,11 @@ function seleccionarMetodo(m) {
     metodoPago = m;
     document.getElementById('btnTarjeta').classList.toggle('seleccionado', m === 'tarjeta');
     document.getElementById('btnYape').classList.toggle('seleccionado', m === 'yape');
-    document.getElementById('formTarjeta').style.display = m === 'tarjeta' ? 'block' : 'none';
-    document.getElementById('formYape').style.display = m === 'yape' ? 'block' : 'none';
     document.getElementById('btnSiguiente1').disabled = false;
-    // actualizar monto yape
-    const total = getCarrito().reduce((s, i) => s + i.precio * i.cantidad, 0);
-    document.getElementById('montoYape').textContent = 'S/ ' + total.toFixed(2);
 }
 
 function irPaso2() {
     if (!metodoPago) return;
-    if (metodoPago === 'tarjeta') {
-        const num = document.getElementById('numTarjeta').value.replace(/\s/g,'');
-        const nom = document.getElementById('nomTarjeta').value.trim();
-        const venc = document.getElementById('vencTarjeta').value;
-        const cvv = document.getElementById('cvvTarjeta').value;
-        if (num.length < 16 || !nom || venc.length < 5 || cvv.length < 3) {
-            avisoAccion({ mensaje: 'Por favor completa todos los datos de la tarjeta.', tipo: 'error' });
-            return;
-        }
-    }
     irPaso(2);
 }
 
@@ -854,7 +765,6 @@ function confirmarPedidoFinal() {
     if (carrito.length === 0) return;
     const ruc = document.getElementById('inputRuc') ? document.getElementById('inputRuc').value.trim() : '';
     const dni = document.getElementById('inputDni') ? document.getElementById('inputDni').value.trim() : '';
-    const numOp = document.getElementById('numOperacion') ? document.getElementById('numOperacion').value.trim() : '';
     // Validar RUC si es factura
     if (!validarRucFactura(ruc)) return;
     // Bloquear el botón al primer clic para evitar peticiones duplicadas.
@@ -870,7 +780,6 @@ function confirmarPedidoFinal() {
             tipo_comprobante: tipoComprobante,
             ruc: ruc,
             dni: dni,
-            num_operacion: numOp,
             csrf_token: CSRF_TOKEN
         })
     })
@@ -916,25 +825,6 @@ function confirmarPedidoFinal() {
         await avisoAccion({ mensaje: 'Error de conexión. Intenta de nuevo.', tipo: 'error', persistente: true });
         if (btnConfirmar) btnConfirmar.disabled = false;
     });
-}
-
-// Formateo tarjeta
-function formatCard(input) {
-    let v = input.value.replace(/\D/g,'').substring(0,16);
-    input.value = v.replace(/(.{4})/g,'$1 ').trim();
-    // Update card preview
-    const prev = document.getElementById('previewNum');
-    if (prev) {
-        const digits = v.padEnd(16,'•');
-        prev.textContent = digits.substring(0,4) + ' ' + digits.substring(4,8) + ' ' + digits.substring(8,12) + ' ' + digits.substring(12,16);
-    }
-}
-function formatExpiry(input) {
-    let v = input.value.replace(/\D/g,'').substring(0,4);
-    if (v.length >= 3) v = v.substring(0,2) + '/' + v.substring(2);
-    input.value = v;
-    const prev = document.getElementById('previewVenc');
-    if (prev) prev.textContent = v || 'MM/AA';
 }
 
 // Al cargar la página, los precios se refrescan SIEMPRE desde el servidor

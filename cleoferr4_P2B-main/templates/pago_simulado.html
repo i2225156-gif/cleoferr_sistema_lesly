@@ -1,6 +1,7 @@
 {% extends 'base.html' %}
 {% block titulito %}Pago simulado – Cleoferr{% endblock %}
 {% block contenido %}
+{% set metodo_inicial = 'yape' if metodo_pago in ('yape', 'yape_plin') else ('plin' if metodo_pago == 'plin' else ('transferencia' if metodo_pago == 'transferencia' else 'tarjeta')) %}
 <div class="container py-4" style="max-width:720px">
 
   <!-- Bandera SIEMPRE visible en el checkout simulado -->
@@ -20,27 +21,34 @@
         <span class="fw-bold fs-4" style="color:var(--naranja)">S/ {{ '%.2f'|format(total|float) }}</span>
       </div>
 
-      <!-- Selector de método de pago -->
-      <div class="mb-4">
-        <label class="form-label fw-semibold d-block mb-2">Método de pago</label>
+      <!-- Método elegido en el carrito; solo se muestra su formulario -->
+      <div class="d-flex justify-content-between align-items-center mb-3 p-3"
+           style="background:#fff7ed;border:1px solid #fed7aa;border-radius:10px">
+        <span class="fw-semibold">Método de pago: <span id="metodoActualNombre"></span></span>
+        <a href="#" id="linkCambiarMetodo" class="fw-semibold" style="color:var(--naranja)">Cambiar método de pago</a>
+      </div>
+
+      <!-- Selector de método de pago (oculto hasta pulsar "Cambiar método") -->
+      <div class="mb-4 d-none" id="selectorMetodo">
+        <label class="form-label fw-semibold d-block mb-2">Elige otro método de pago</label>
         <div class="btn-group btn-group-toggle w-100" role="group">
           <label class="btn btn-outline-naranja w-25" id="lblMetodoTarjeta">
-            <input type="radio" name="metodo_pago" value="tarjeta" id="metodoTarjeta" autocomplete="off" checked> Tarjeta
+            <input type="radio" name="metodo_pago" value="tarjeta" id="metodoTarjeta" autocomplete="off" {% if metodo_inicial == 'tarjeta' %}checked{% endif %}> Tarjeta
           </label>
           <label class="btn btn-outline-naranja w-25" id="lblMetodoYape">
-            <input type="radio" name="metodo_pago" value="yape" id="metodoYape" autocomplete="off"> Yape
+            <input type="radio" name="metodo_pago" value="yape" id="metodoYape" autocomplete="off" {% if metodo_inicial == 'yape' %}checked{% endif %}> Yape
           </label>
           <label class="btn btn-outline-naranja w-25" id="lblMetodoPlin">
-            <input type="radio" name="metodo_pago" value="plin" id="metodoPlin" autocomplete="off"> Plin
+            <input type="radio" name="metodo_pago" value="plin" id="metodoPlin" autocomplete="off" {% if metodo_inicial == 'plin' %}checked{% endif %}> Plin
           </label>
           <label class="btn btn-outline-naranja w-25" id="lblMetodoTransferencia">
-            <input type="radio" name="metodo_pago" value="transferencia" id="metodoTransferencia" autocomplete="off"> Transferencia
+            <input type="radio" name="metodo_pago" value="transferencia" id="metodoTransferencia" autocomplete="off" {% if metodo_inicial == 'transferencia' %}checked{% endif %}> Transferencia
           </label>
         </div>
       </div>
 
       <!-- === TARJETA === -->
-      <div id="panelTarjeta" class="metodo-panel card p-3 mb-3 border">
+      <div id="panelTarjeta" class="metodo-panel card p-3 mb-3 border{% if metodo_inicial != 'tarjeta' %} d-none{% endif %}">
         <div class="mb-3">
           <label class="form-label fw-semibold">Número de tarjeta</label>
           <input type="text" id="numTarjeta" class="form-control" inputmode="numeric"
@@ -70,7 +78,7 @@
       </div>
 
       <!-- === YAPE === -->
-      <div id="panelYape" class="metodo-panel card p-3 mb-3 border d-none">
+      <div id="panelYape" class="metodo-panel card p-3 mb-3 border{% if metodo_inicial != 'yape' %} d-none{% endif %}">
         <div class="text-center mb-3">
           <div class="qr-placeholder d-inline-block border p-2 rounded" style="width:150px;height:150px;background:#f8f9fa">
             <svg width="150" height="150" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
@@ -89,7 +97,7 @@
       </div>
 
       <!-- === PLIN === -->
-      <div id="panelPlin" class="metodo-panel card p-3 mb-3 border d-none">
+      <div id="panelPlin" class="metodo-panel card p-3 mb-3 border{% if metodo_inicial != 'plin' %} d-none{% endif %}">
         <div class="text-center mb-3">
           <div class="qr-placeholder d-inline-block border p-2 rounded" style="width:150px;height:150px;background:#f8f9fa">
             <svg width="150" height="150" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
@@ -108,7 +116,7 @@
       </div>
 
       <!-- === TRANSFERENCIA === -->
-      <div id="panelTransferencia" class="metodo-panel card p-3 mb-3 border d-none">
+      <div id="panelTransferencia" class="metodo-panel card p-3 mb-3 border{% if metodo_inicial != 'transferencia' %} d-none{% endif %}">
         <div class="row g-3 mb-3">
           <div class="col-md-6">
             <label class="form-label fw-semibold">Banco</label>
@@ -154,6 +162,7 @@ const TARJETA_APRUEBA = '4111111111111111';
 const TARJETA_RECHAZA = '4000000000000002';
 const CSRF_TOKEN = {{ csrf_token|tojson }};
 const ID_TRANSACCION = {{ pago.id_transaccion|tojson }};
+const METODO_INICIAL = {{ metodo_inicial|tojson }};
 
 const radios = document.querySelectorAll('input[name="metodo_pago"]');
 const paneles = {
@@ -164,19 +173,33 @@ const paneles = {
 };
 const btn = document.getElementById('btnPagar');
 const resultado = document.getElementById('resultado');
+const selectorMetodo = document.getElementById('selectorMetodo');
+const linkCambiarMetodo = document.getElementById('linkCambiarMetodo');
+const metodoActualNombre = document.getElementById('metodoActualNombre');
+const NOMBRES_METODO = { tarjeta: 'Tarjeta', yape: 'Yape', plin: 'Plin', transferencia: 'Transferencia' };
 
 function mostrarMetodo(metodo) {
   Object.entries(paneles).forEach(([key, el]) => {
     el.classList.toggle('d-none', key !== metodo);
   });
 }
-radios.forEach(r => r.addEventListener('change', () => {
-  mostrarMetodo(r.value);
+
+function aplicarMetodo(metodo) {
+  radios.forEach(r => { r.checked = r.value === metodo; });
+  mostrarMetodo(metodo);
+  metodoActualNombre.textContent = NOMBRES_METODO[metodo] || metodo;
+  selectorMetodo.classList.add('d-none');
   btn.disabled = true;
   resultado.classList.add('d-none');
   resultado.innerHTML = '';
-}));
-mostrarMetodo('tarjeta');
+}
+
+linkCambiarMetodo.addEventListener('click', (e) => {
+  e.preventDefault();
+  selectorMetodo.classList.remove('d-none');
+});
+radios.forEach(r => r.addEventListener('change', () => aplicarMetodo(r.value)));
+aplicarMetodo(METODO_INICIAL);
 
 // ---- Validación tarjeta ----
 const elNum = document.getElementById('numTarjeta');

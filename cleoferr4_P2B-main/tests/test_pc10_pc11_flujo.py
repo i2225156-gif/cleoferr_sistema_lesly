@@ -138,11 +138,12 @@ def test_operacion_yape_plin_se_guarda_en_la_misma_venta(fx, metodo_final):
     assert _pago_de(fx, trx)['num_operacion'] is None
     codigo = str(100000 + (_uuid.uuid4().int % 900000))
 
-    r = fx['client'].post(f'/pago/simulado/{trx}/procesar', json={
-        'metodo_pago': metodo_final,
-        'codigo_operacion': codigo,
-        'csrf_token': 'token-test',
-    })
+    # Cuerpo EXACTO que envía pago_simulado.html para Yape/Plin:
+    # JSON {metodo_pago, codigo_operacion}; el CSRF va en la cabecera.
+    r = fx['client'].post(
+        f'/pago/simulado/{trx}/procesar',
+        json={'metodo_pago': metodo_final, 'codigo_operacion': codigo},
+        headers={'X-CSRFToken': 'token-test'})
 
     assert r.status_code == 200
     pago = _pago_de(fx, trx)
@@ -150,6 +151,20 @@ def test_operacion_yape_plin_se_guarda_en_la_misma_venta(fx, metodo_final):
     assert pago['metodo_final'] == metodo_final
     assert pago['num_operacion'] == codigo
     assert pago['estado_venta'] == 'pendiente'
+
+
+def test_codigo_de_operacion_duplicado_responde_409_no_error_interno(fx):
+    pedido = _crear_pedido(fx, metodo='tarjeta')
+    trx = pedido['checkout_url'].rstrip('/').rsplit('/', 1)[-1]
+
+    # Mismo cuerpo que el navegador: el código 123456 ya existe en otra venta.
+    r = fx['client'].post(
+        f'/pago/simulado/{trx}/procesar',
+        json={'metodo_pago': 'yape', 'codigo_operacion': '123456'},
+        headers={'X-CSRFToken': 'token-test'})
+
+    assert r.status_code == 409
+    assert 'ya fue registrado' in r.get_json()['error']
 
 
 def test_contrato_http_de_compra_y_pago_no_acepta_datos_de_tarjeta():

@@ -31,11 +31,11 @@ PUBLICOS = {
     'privacidad',
     # catálogo, carrito y pago del cliente
     'catalogo_cliente', 'carrito', 'carrito_agregar',
-    'carrito_confirmar_v2', 'carrito_precios', 'pago_simulado',
-    'pago_simulado_procesar', 'pedido_aceptado',
+    'carrito_actualizar', 'carrito_confirmar_v2', 'carrito_precios',
+    'pago_simulado', 'pago_simulado_procesar', 'pedido_aceptado',
     # pedidos / comprobantes / perfil propios
     'mis_pedidos', 'mis_comprobantes', 'mi_comprobante', 'perfil',
-    'perfil_actualizar_documento',
+    'perfil_actualizar_documento', 'pedido_cancelar',
     # integraciones y consultas usadas también por clientes
     'webhook_pago', 'api_consultar_ruc', 'api_consultar_dni',
     # compartidas del personal (solo exigen sesión)
@@ -136,6 +136,47 @@ def test_a_toda_ruta_protegida_y_mapeada():
     assert admin, 'No se detectó ninguna ruta solo-admin'
 
 
+# ── Test A2: el mapa de protección (services/permisos) ───────────
+def test_a2_mapa_de_rutas_solo_admin_consistente():
+    """El mapa RUTAS_SOLO_ADMIN refleja EXACTAMENTE las rutas del app.
+
+    - toda regla del mapa existe y lleva admin_required;
+    - toda ruta solo-admin de la app está en el mapa (el mapa no se
+      queda corto: una ruta nueva sin mapear queda fuera de la
+      cobertura).
+    """
+    reglas = {r.rule: r.endpoint for r in app.url_map.iter_rules()}
+    mapa = permisos.RUTAS_SOLO_ADMIN
+
+    inexistentes = sorted(set(mapa) - set(reglas))
+    endpoints_malos = sorted(
+        (ruta, mapa[ruta], reglas.get(ruta))
+        for ruta in mapa
+        if reglas.get(ruta) != mapa[ruta]
+    )
+    sin_admin = sorted(
+        ruta for ruta in mapa
+        if not getattr(app.view_functions.get(reglas.get(ruta)),
+                       '_solo_admin', False)
+    )
+    fuera_del_mapa = sorted(
+        regla.rule for regla in app.url_map.iter_rules()
+        if getattr(app.view_functions.get(regla.endpoint),
+                   '_solo_admin', False)
+        and regla.rule not in mapa
+    )
+
+    assert not inexistentes, ('Rutas del mapa que no existen:\n  '
+                              + '\n  '.join(inexistentes))
+    assert not endpoints_malos, ('Ruta->endpoint del mapa incorrecto: '
+                                 '%s' % (endpoints_malos,))
+    assert not sin_admin, ('Rutas del mapa sin admin_required:\n  '
+                            + '\n  '.join(sin_admin))
+    assert not fuera_del_mapa, ('Rutas solo-admin sin registrar en el '
+                                 'mapa de protección:\n  '
+                                 + '\n  '.join(fuera_del_mapa))
+
+
 # ── Test B: permiso_required (GET y AJAX) ────────────────────────
 def test_b_vendedor_sin_permiso_get_redirige(cliente, monkeypatch, entorno):
     entorno(set())
@@ -192,6 +233,11 @@ CASOS_ADMIN = (
     ('/admin/dashboard', 'GET', 'admin_dashboard'),
     ('/admin/pagos_simulados', 'GET', 'admin_pagos_simulados'),
     ('/admin/reservas', 'GET', 'admin_reservas'),
+    # Panel de usuarios y permisos (RF13/RF26): SOLO-ADMIN.
+    ('/admin/usuarios', 'GET', 'admin_usuarios'),
+    ('/admin/usuarios/1/permisos', 'POST', 'admin_usuarios_permisos'),
+    ('/admin/usuarios/1/estado', 'POST', 'admin_usuarios_estado'),
+    ('/admin/usuarios/1/desbloquear', 'POST', 'admin_usuarios_desbloquear'),
 )
 
 

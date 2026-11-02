@@ -22,6 +22,7 @@ try:
     from flask_bcrypt import Bcrypt
     from functools import wraps
     from werkzeug.utils import secure_filename   # ← NUEVO
+    from werkzeug.exceptions import HTTPException
     from dotenv import load_dotenv
 except Exception as e:
     print("\nERROR: faltan dependencias necesarias para ejecutar la aplicación.")
@@ -328,6 +329,9 @@ _CSRF_PROTEGIDAS = {
     # Alertas: resolver una alerta es escritura (POST + CSRF); el fetch de
     # la pagina manda X-CSRFToken y el formulario el token oculto.
     'alertas_resolver',
+    # Panel de usuarios: permisos, estado y desbloqueo son escritura.
+    'admin_usuarios_permisos', 'admin_usuarios_estado',
+    'admin_usuarios_desbloquear',
     # Alta rápida desde el formulario de producto (fetch JSON).
     'nueva_categoria_producto', 'nueva_marca_producto',
 }
@@ -1969,6 +1973,18 @@ def inventario():
     # Unión en memoria: añadir nombre de usuario a cada movimiento
     for m in movimientos:
         m['usuario_nombre'] = usuarios_map.get(m.get('id_usuario'))
+    # Preselección desde /alertas («Reponer»): ?producto=<id> se valida
+    # (entero y producto ACTIVO de la lista) antes de marcarlo; un valor
+    # inválido se ignora (nada preseleccionado, nunca 500).
+    producto_preseleccionado = None
+    crudo = (request.args.get('producto') or '').strip()
+    if crudo:
+        try:
+            pid = int(crudo)
+        except (TypeError, ValueError):
+            pid = None
+        if pid is not None and any(p['id_producto'] == pid for p in productos):
+            producto_preseleccionado = pid
     return render_template('inventario.html',
                            movimientos=movimientos,
                            productos=productos,
@@ -1976,6 +1992,7 @@ def inventario():
                            vendedores=vendedores,
                            pagina=pagina, total=total,
                            por_pagina=POR_PAGINA_ADMIN,
+                           producto_preseleccionado=producto_preseleccionado,
                            filtros_qs=_filtros_sin_pagina())
 
 
@@ -3555,7 +3572,24 @@ def reportes_rango_exportar():
 # la alerta y refresca al resolverla. `fecha` es el ultimo cambio de
 # estado (creacion o resolucion) y se usa para la calma (snooze).
 TIPO_ALERTA_STOCK_BAJO = 1
+TIPO_ALERTA_STOCK_AGOTADO = 2
 TIPO_ALERTA_VENCIMIENTO = 3
+
+# Filtros rápidos de /alertas: LISTA BLANCA del parámetro GET `tipo`.
+# Un valor fuera de la lista se ignora (se ve «todas»): nunca 500 ni una
+# consulta con texto del usuario.
+FILTROS_ALERTAS = {
+    'todas': (),
+    'stock_bajo': (TIPO_ALERTA_STOCK_BAJO, TIPO_ALERTA_STOCK_AGOTADO),
+    'vencimiento': (TIPO_ALERTA_VENCIMIENTO,),
+}
+
+# tipo_alerta.nombre -> clave de la acción que corresponde a la alerta.
+_CLAVE_TIPO_ALERTA = {
+    'stock_bajo': 'stock_bajo',
+    'stock_agotado': 'stock_bajo',
+    'vencimiento_proximo': 'vencimiento',
+}
 
 _RE_REF_STOCK = re.compile(r'tiene\s+(\d+)\s+unidades')
 _RE_REF_VENCIMIENTO = re.compile(r'^(Vence|Vencido)\s+el\s+(\d{2}/\d{2}/\d{4})')
@@ -3722,23 +3756,58 @@ def alertas():
         # Solo las alertas pendientes: las resueltas estan «enteradas» y no
         # se listan (asi resolver quita la fila y no vuelve al recargar).
         # Con tipo_alerta y producto para las columnas TIPO y RELACIONADO.
-        cursor.execute("""
-            SELECT a.*, t.nombre AS tipo_nombre, p.nombre AS producto_nombre
+        # Filtro rápido por `tipo` (lista blanca) y ORDEN POR URGENCIA:
+        # vencidos, luego por vencer (menos días primero) y stock bajo
+        # (menos unidades primero). La urgencia se lee del PRODUCTO
+        # (fecha_vencimiento y stock), que es lo mismo que usa la
+        # sincronización de arriba para crear y actualizar las alertas.
+        filtro = (request.args.get('tipo') or '').strip().lower()
+        if filtro not in FILTROS_ALERTAS:
+            filtro = 'todas'
+        tipos = FILTROS_ALERTAS[filtro]
+        where_tipo = ''
+        params = {
+            'venc': TIPO_ALERTA_VENCIMIENTO,
+            'bajo': TIPO_ALERTA_STOCK_BAJO,
+            'agotado': TIPO_ALERTA_STOCK_AGOTADO,
+        }
+        if tipos:
+            where_tipo = ' AND a.id_tipo_alerta IN %(tipos)s'
+            params['tipos'] = tipos
+        cursor.execute(f"""
+            SELECT a.*, t.nombre AS tipo_nombre, p.nombre AS producto_nombre,
+                   p.stock AS producto_stock,
+                   p.fecha_vencimiento AS producto_fecha_vencimiento
               FROM alerta a
               LEFT JOIN tipo_alerta t ON t.id_tipo_alerta = a.id_tipo_alerta
               LEFT JOIN producto p ON p.id_producto = a.id_producto
-             WHERE a.resuelta = FALSE
-             ORDER BY a.fecha DESC LIMIT 200
-        """)
+             WHERE a.resuelta = FALSE{where_tipo}
+             ORDER BY
+               CASE
+                 WHEN a.id_tipo_alerta = %(venc)s
+                      AND p.fecha_vencimiento < CURRENT_DATE THEN 0
+                 WHEN a.id_tipo_alerta = %(venc)s THEN 1
+                 WHEN a.id_tipo_alerta IN (%(bajo)s, %(agotado)s) THEN 2
+                 ELSE 3
+               END,
+               CASE WHEN a.id_tipo_alerta = %(venc)s
+                    THEN p.fecha_vencimiento END ASC NULLS LAST,
+               CASE WHEN a.id_tipo_alerta IN (%(bajo)s, %(agotado)s)
+                    THEN p.stock END ASC NULLS LAST,
+               a.id_alerta DESC
+             LIMIT 200
+        """, params)
         alertas = cursor.fetchall()
         for a in alertas:
+            a['tipo_clave'] = _CLAVE_TIPO_ALERTA.get(a.get('tipo_nombre'), '')
             a['tipo_nombre'] = _nombre_tipo_alerta(a.get('tipo_nombre'))
     except Exception:
         alertas = []
         conn.rollback()
     finally:
         conn.close()
-    return render_template('alertas.html', alertas=alertas, bajo_stock=bajo_stock)
+    return render_template('alertas.html', alertas=alertas,
+                           bajo_stock=bajo_stock, filtro=filtro)
 
 
 @app.route('/alertas/resolver/<int:id>', methods=['POST'])
@@ -5943,6 +6012,10 @@ def pago_simulado_procesar(id_transaccion):
                                         'ya_confirmado', 'ya_rechazado'),
                 'estado': res['estado'], 'motivo': res.get('motivo') or motivo,
                 'id_pedido': pago['id_venta']}, 200
+    except _pg_errores.UniqueViolation:
+        conn.rollback()
+        return {'ok': False,
+                'error': 'Este número de operación ya fue registrado en otro pedido. Verifica el código de tu Yape o Plin.'}, 409
     except Exception:
         conn.rollback()
         app.logger.exception("Error procesando pago simulado %s", id_transaccion)
@@ -6601,6 +6674,153 @@ def admin_dashboard():
                            ventas_por_dia=ventas_por_dia,
                            pedidos_por_estado=pedidos_por_estado,
                            reservas_vencidas=reservas_vencidas)
+
+
+# ── Gestión de usuarios y permisos del personal (SOLO ADMIN) ──────
+# RF13/RF26: el administrador ve el personal (vendedores y
+# administradores), su estado y los módulos de cada vendedor, y puede
+# conceder/revocar módulos, activar/desactivar cuentas y desbloquearlas.
+# Los permisos rigen de inmediato: before_request los recarga en cada
+# petición (sin caché).
+@app.route('/admin/usuarios')
+@login_required
+@admin_required
+def admin_usuarios():
+    """Pantalla del personal: correo, rol, estado, intentos y módulos.
+
+    Solo lectura de la BD AUTH. Los módulos que NUNCA se asignan
+    (dashboard, pagos simulados, reservas, los borrados y esta misma
+    pantalla) no aparecen como casillas: son solo-administrador.
+    """
+    conn = get_connection_auth()
+    try:
+        filas = permisos.personal(conn)
+    finally:
+        conn.close()
+    return render_template('admin_usuarios.html', personal=filas,
+                           catalogo=permisos.CATALOGO,
+                           seccion_activa='usuarios')
+
+
+@app.route('/admin/usuarios/<int:id>/permisos', methods=['POST'])
+@login_required
+@admin_required
+def admin_usuarios_permisos(id):
+    """Sincroniza los módulos del vendedor (UNA sola transacción).
+
+    Solo cuentas de vendedor: un administrador tiene todos los módulos y
+    su cuenta no se edita aquí. Lista blanca estricta: una casilla fuera
+    del CATALOGO se rechaza con 400 y no se modifica nada.
+    """
+    claves = request.form.getlist('permisos')
+    if any(clave not in permisos.CATALOGO for clave in claves):
+        abort(400)
+    conn = get_connection_auth()
+    try:
+        fila = permisos.rol_de_usuario(conn, id)
+        if fila is None:
+            flash('El usuario no existe.', 'danger')
+            return redirect(url_for('admin_usuarios'))
+        if fila['rol'] != 'vendedor':
+            flash('Los módulos solo se editan en cuentas de vendedor: '
+                  'un administrador tiene acceso completo.', 'warning')
+            return redirect(url_for('admin_usuarios'))
+        try:
+            permisos.sincronizar_permisos(conn, session.get('usuario_id'),
+                                          id, claves)
+        except ValueError:
+            abort(400)
+        conn.commit()
+        app.logger.info('Permisos actualizados: usuario_id=%s por '
+                        'administrador_id=%s', id, session.get('usuario_id'))
+        flash('Módulos actualizados correctamente.', 'success')
+    except HTTPException:
+        raise
+    except Exception:
+        conn.rollback()
+        app.logger.exception('Error al actualizar los permisos del '
+                             'usuario_id=%s', id)
+        flash('No se pudieron actualizar los módulos. Revisa el log.',
+              'danger')
+    finally:
+        conn.close()
+    return redirect(url_for('admin_usuarios'))
+
+
+@app.route('/admin/usuarios/<int:id>/estado', methods=['POST'])
+@login_required
+@admin_required
+def admin_usuarios_estado(id):
+    """Activa o desactiva la cuenta (baja lógica).
+
+    Protecciones: nadie puede desactivarse a sí mismo y el sistema
+    nunca puede quedar sin un administrador activo.
+    """
+    accion = (request.form.get('accion') or '').strip().lower()
+    if accion not in ('activar', 'desactivar'):
+        abort(400)
+    conn = get_connection_auth()
+    try:
+        fila = permisos.rol_de_usuario(conn, id)
+        if fila is None:
+            flash('El usuario no existe.', 'danger')
+            return redirect(url_for('admin_usuarios'))
+        activar = (accion == 'activar')
+        if not activar:
+            if id == session.get('usuario_id'):
+                flash('No puedes desactivar tu propia cuenta.', 'warning')
+                return redirect(url_for('admin_usuarios'))
+            if (fila['rol'] == 'administrador'
+                    and permisos.administradores_activos(
+                        conn, excluir_id=id) == 0):
+                flash('No se puede desactivar: el sistema necesita al menos '
+                      'un administrador activo.', 'warning')
+                return redirect(url_for('admin_usuarios'))
+        permisos.establecer_estado(conn, id, activar)
+        conn.commit()
+        app.logger.info('Estado del usuario_id=%s cambiado a %s por '
+                        'administrador_id=%s', id,
+                        'activo' if activar else 'inactivo',
+                        session.get('usuario_id'))
+        flash('Usuario %s correctamente.'
+              % ('activado' if activar else 'desactivado'), 'success')
+    except HTTPException:
+        raise
+    except Exception:
+        conn.rollback()
+        app.logger.exception('Error al cambiar el estado del usuario_id=%s',
+                             id)
+        flash('No se pudo cambiar el estado. Revisa el log.', 'danger')
+    finally:
+        conn.close()
+    return redirect(url_for('admin_usuarios'))
+
+
+@app.route('/admin/usuarios/<int:id>/desbloquear', methods=['POST'])
+@login_required
+@admin_required
+def admin_usuarios_desbloquear(id):
+    """Desbloquea la cuenta: intentos fallidos a 0 y sin bloqueo."""
+    conn = get_connection_auth()
+    try:
+        fila = permisos.rol_de_usuario(conn, id)
+        if fila is None:
+            flash('El usuario no existe.', 'danger')
+            return redirect(url_for('admin_usuarios'))
+        permisos.desbloquear_cuenta(conn, id)
+        conn.commit()
+        app.logger.info('Cuenta desbloqueada: usuario_id=%s por '
+                        'administrador_id=%s', id, session.get('usuario_id'))
+        flash('Cuenta desbloqueada: intentos fallidos a cero.', 'success')
+    except HTTPException:
+        raise
+    except Exception:
+        conn.rollback()
+        app.logger.exception('Error al desbloquear el usuario_id=%s', id)
+        flash('No se pudo desbloquear la cuenta. Revisa el log.', 'danger')
+    finally:
+        conn.close()
+    return redirect(url_for('admin_usuarios'))
 
 
 import requests as _requests

@@ -22,7 +22,7 @@
                 <div class="col-md-2">
                     <label class="form-label fw-semibold">Tipo</label>
                     <select name="tipo" class="form-select" id="tipoSelect" required>
-                        <option value="entrada">📦 Entrada</option>
+                        <option value="entrada"{% if producto_preseleccionado %} selected{% endif %}>📦 Entrada</option>
                         <option value="salida">📤 Salida</option>
                     </select>
                 </div>
@@ -31,7 +31,7 @@
                     <select name="id_producto" class="form-select" required>
                         <option value="">-- Seleccionar --</option>
                         {% for p in productos %}
-                            <option value="{{ p.id_producto }}">{{ p.nombre }} (Stock: {{ p.stock }})</option>
+                            <option value="{{ p.id_producto }}"{% if p.id_producto == producto_preseleccionado %} selected{% endif %}>{{ p.nombre }} (Stock: {{ p.stock }})</option>
                         {% endfor %}
                     </select>
                 </div>

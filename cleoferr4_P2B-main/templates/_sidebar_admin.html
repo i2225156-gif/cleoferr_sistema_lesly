@@ -99,6 +99,9 @@
       <span class="badge bg-danger ms-auto">{{ reservas_vencidas }}</span>
       {% endif %}
     </a>
+    <a href="/admin/usuarios" class="sidebar-item {{ 'activo' if seccion_activa == 'usuarios' else '' }}">
+      <i class="fa fa-users-cog me-2"></i>Usuarios
+    </a>
     {% endif %}
   </div>
 
