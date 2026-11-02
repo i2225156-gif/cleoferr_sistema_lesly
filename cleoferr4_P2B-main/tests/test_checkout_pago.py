@@ -17,6 +17,7 @@ import pytest
 import db_supabase
 import app as modulo_app
 from app import app
+from services.pasarela import crear_pasarela
 from services.pasarela.simulada import TARJETA_APROBADA, TARJETA_RECHAZADA
 
 
@@ -232,6 +233,23 @@ def test_procesar_aprobado_confirma_por_la_unica_puerta(fx):
     assert len(eventos) == 1  # un único evento, sin duplicados
     assert eventos[0]['estado_resultante'] == 'confirmado'
     assert eventos[0]['procesado_en'] is not None
+
+
+def test_procesar_con_otra_instancia_de_pasarela_usa_estado_de_bd(fx, monkeypatch):
+    d = _crear_pedido(fx)
+    trx = _pago_de_venta(fx, d['id_pedido'])['id_transaccion']
+
+    # Otra instancia equivale a otra función serverless: no comparte _pagos
+    # ni _cargos con la instancia que ejecutó crear_pago.
+    monkeypatch.setattr(modulo_app, '_PASARELA', crear_pasarela('simulated'))
+    r = fx['client'].post(f'/pago/simulado/{trx}/procesar',
+                          json={'resultado': 'aprobado', 'csrf_token': 'token-test'})
+
+    assert r.status_code == 200
+    assert r.get_json()['estado'] == 'confirmado'
+    pago = _pago_de(fx, trx)
+    assert pago['estado'] == 'confirmado'
+    assert pago['venta_estado'] == 'confirmado'
 
 
 def test_procesar_rechazado_no_toca_la_venta(fx):
