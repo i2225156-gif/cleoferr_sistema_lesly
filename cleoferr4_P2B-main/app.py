@@ -171,7 +171,12 @@ def guardar_imagen(file_field):
         return None
     ext          = archivo.filename.rsplit('.', 1)[1].lower()
     nombre_unico = f"{uuid.uuid4().hex}.{ext}"
-    archivo.save(os.path.join(UPLOAD_FOLDER, nombre_unico))
+    try:
+        archivo.save(os.path.join(UPLOAD_FOLDER, nombre_unico))
+    except OSError:
+        app.logger.warning("No se pudo guardar la imagen del producto por un error de disco.")
+        flash('No se pudo guardar la imagen. El producto se guardará sin imagen nueva.', 'warning')
+        return None
     return nombre_unico
 db.init_app(app)
 bcrypt = Bcrypt(app)
