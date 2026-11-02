@@ -5450,7 +5450,10 @@ def carrito_confirmar_v2():
                               'nombre': it.get('nombre') or f'producto #{pid}',
                               'motivo': 'Ya no está disponible (eliminado o desactivado)'})
             continue
-        cantidad = max(1, int(it.get('cantidad', 1)))
+        cantidad = int(it.get('cantidad', 1))
+        if cantidad <= 0:
+            return {'ok': False,
+                    'error': 'La cantidad debe ser un entero mayor que cero.'}, 400
         stock_db = int(prod['stock'] or 0)
         if stock_db < 1:
             excluidos.append({'id_producto': pid, 'nombre': prod['nombre'],

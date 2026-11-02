@@ -119,6 +119,20 @@ def _n_ventas(fx):
     return fx['cur'].fetchone()['n']
 
 
+# ── cantidades inválidas ──────────────────────────────────────────
+
+def test_cantidad_negativa_es_400_y_no_crea_pedido(fx):
+    r = _checkout(fx, [{'id_producto': fx['p']['b'], 'cantidad': -3}])
+
+    assert r.status_code == 400
+    datos = r.get_json()
+    assert datos['ok'] is False
+    assert 'cantidad' in datos['error'].lower()
+    assert 'mayor que cero' in datos['error'].lower()
+    assert _n_ventas(fx) == 0
+    assert _stock(fx, fx['p']['b']) == 3
+
+
 # ── fase previa de excluidos se mantiene ────────────────────────────
 
 def test_excluidos_previos_sin_stock_sigue_igual(fx):
