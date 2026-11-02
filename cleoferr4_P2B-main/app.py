@@ -35,7 +35,8 @@ except Exception as e:
     sys.exit(1)
 
 from db import db
-from db_supabase import get_connection_auth, get_connection_tienda
+from db_supabase import (get_connection_auth, get_connection_tienda,
+                         opciones_pool)
 from psycopg2 import errors as _pg_errores
 from services import captcha
 from services import permisos
@@ -85,11 +86,9 @@ if not _tienda_uri:
     raise RuntimeError("DATABASE_URI_TIENDA no definida en el archivo .env.")
 app.config["SQLALCHEMY_DATABASE_URI"] = _tienda_uri
 
-app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
-    "pool_pre_ping": True,
-    "pool_recycle": 280,
-    "pool_timeout": 30
-}
+# Misma política de pool que db_supabase: QueuePool local y NullPool en
+# serverless, para no duplicar conexiones retenidas por instancia.
+app.config['SQLALCHEMY_ENGINE_OPTIONS'] = opciones_pool()
 
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
