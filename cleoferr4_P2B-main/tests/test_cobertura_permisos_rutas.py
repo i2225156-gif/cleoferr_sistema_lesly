@@ -235,6 +235,7 @@ CASOS_ADMIN = (
     ('/admin/reservas', 'GET', 'admin_reservas'),
     # Panel de usuarios y permisos (RF13/RF26): SOLO-ADMIN.
     ('/admin/usuarios', 'GET', 'admin_usuarios'),
+    ('/admin/usuarios/nuevo', 'POST', 'admin_usuarios_nuevo'),
     ('/admin/usuarios/1/permisos', 'POST', 'admin_usuarios_permisos'),
     ('/admin/usuarios/1/estado', 'POST', 'admin_usuarios_estado'),
     ('/admin/usuarios/1/desbloquear', 'POST', 'admin_usuarios_desbloquear'),

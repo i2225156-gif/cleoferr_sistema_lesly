@@ -55,7 +55,8 @@ from services.ofertas import (SQL_IMPORTE_LINEA, SQL_PRECIO_VIGENTE,
                               precios_vigentes)
 from services.reportes import (NOMBRES_TIPO, TIPOS_REPORTE, reporte,
                                sql_top_productos)
-from services.validacion import (correo as _correo_valido, documento_proveedor,
+from services.validacion import (contrasena as _contrasena_valida,
+                                 correo as _correo_valido, documento_proveedor,
                                  entero, nombre_persona,
                                  numero, requerido, telefono as _telefono_valido,
                                  texto)
@@ -333,7 +334,8 @@ _CSRF_PROTEGIDAS = {
     # Alertas: resolver una alerta es escritura (POST + CSRF); el fetch de
     # la pagina manda X-CSRFToken y el formulario el token oculto.
     'alertas_resolver',
-    # Panel de usuarios: permisos, estado y desbloqueo son escritura.
+    # Panel de usuarios: alta, permisos, estado y desbloqueo son escritura.
+    'admin_usuarios_nuevo',
     'admin_usuarios_permisos', 'admin_usuarios_estado',
     'admin_usuarios_desbloquear',
     # Alta rápida desde el formulario de producto (fetch JSON).
@@ -4507,9 +4509,10 @@ def registro_cliente():
         return _login_cliente(
                                error='Las contraseñas no coinciden.',
                                registro_activo=True)
-    if len(contrasena) < 6:
+    _, error_clave = _contrasena_valida(contrasena)
+    if error_clave:
         return _login_cliente(
-                               error='La contraseña debe tener al menos 6 caracteres.',
+                               error=error_clave,
                                registro_activo=True)
 
     # Ley 29733: la casilla de privacidad es OBLIGATORIA y se valida
@@ -6724,6 +6727,93 @@ def admin_usuarios():
     return render_template('admin_usuarios.html', personal=filas,
                            catalogo=permisos.CATALOGO,
                            seccion_activa='usuarios')
+
+
+@app.route('/admin/usuarios/nuevo', methods=['POST'])
+@login_required
+@admin_required
+def admin_usuarios_nuevo():
+    """Crea una cuenta de vendedor con la plantilla de permisos del rol.
+
+    Todo ocurre en UNA transacción: validación, unicidad del correo,
+    alta, copia de rol_permiso y auditoría de cada permiso. La
+    contraseña va solo al hash; jamás a logs, flashes ni HTML.
+    """
+    correo, error = _correo_valido(request.form.get('correo'), 120)
+    if error:
+        flash(error, 'danger')
+        return redirect(url_for('admin_usuarios'))
+    clave = request.form.get('contrasena') or ''
+    confirmar = request.form.get('confirmar') or ''
+    _, error = _contrasena_valida(clave)
+    if error:
+        flash(error, 'danger')
+        return redirect(url_for('admin_usuarios'))
+    if clave != confirmar:
+        flash('Las contraseñas no coinciden.', 'danger')
+        return redirect(url_for('admin_usuarios'))
+
+    id_admin = session.get('usuario_id')
+    conn = get_connection_auth()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("""SELECT id_usuario FROM usuario
+                           WHERE LOWER(TRIM(email)) = %s""", (correo,))
+        if cursor.fetchone():
+            flash('Ya existe una cuenta con ese correo electrónico.', 'warning')
+            return redirect(url_for('admin_usuarios'))
+
+        cursor.execute("""SELECT id_rol FROM rol
+                           WHERE LOWER(TRIM(nombre)) = 'vendedor'
+                             AND activo = TRUE""")
+        fila_rol = cursor.fetchone()
+        if fila_rol is None:
+            raise RuntimeError('El rol vendedor no está disponible')
+
+        hash_pw = bcrypt.generate_password_hash(clave).decode('utf-8')
+        cursor.execute("""INSERT INTO usuario
+                               (email, contrasena, id_rol, nombres, activo,
+                                intentos_fallidos)
+                          VALUES (%s, %s, %s, %s, TRUE, 0)
+                          RETURNING id_usuario""",
+                       (correo, hash_pw, fila_rol['id_rol'], 'Vendedor'))
+        id_nuevo = cursor.fetchone()['id_usuario']
+
+        cursor.execute("""INSERT INTO usuario_permiso
+                               (id_usuario, id_permiso, asignado_por,
+                                fecha_asignacion)
+                          SELECT %s, rp.id_permiso, %s, now()
+                            FROM rol_permiso rp
+                            JOIN permiso p ON p.id_permiso = rp.id_permiso
+                           WHERE rp.id_rol = %s AND p.activo = TRUE
+                          ON CONFLICT (id_usuario, id_permiso) DO NOTHING""",
+                       (id_nuevo, id_admin, fila_rol['id_rol']))
+        if not cursor.rowcount:
+            for permiso_clave in permisos.POR_DEFECTO_VENDEDOR:
+                permisos.dar_permiso(conn, id_admin, id_nuevo, permiso_clave)
+
+        conn.commit()
+
+        cursor.execute("""SELECT p.nombre
+                            FROM usuario_permiso up
+                            JOIN permiso p ON p.id_permiso = up.id_permiso
+                           WHERE up.id_usuario = %s
+                           ORDER BY p.nombre""", (id_nuevo,))
+        modulos = [permisos.CATALOGO.get(fila['nombre'], fila['nombre'])
+                   for fila in cursor.fetchall()]
+        app.logger.info('Vendedor creado: usuario_id=%s por administrador_id=%s',
+                        id_nuevo, id_admin)
+        flash('Vendedor creado; sus módulos iniciales son: %s.'
+              % (', '.join(modulos) or 'ninguno'), 'success')
+    except HTTPException:
+        raise
+    except Exception:
+        conn.rollback()
+        app.logger.exception('Error al crear el vendedor')
+        flash('No se pudo crear el vendedor. Revisa el log.', 'danger')
+    finally:
+        conn.close()
+    return redirect(url_for('admin_usuarios'))
 
 
 @app.route('/admin/usuarios/<int:id>/permisos', methods=['POST'])

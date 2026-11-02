@@ -156,6 +156,7 @@ RUTAS_SOLO_ADMIN = {
     '/admin/reservas':                    'admin_reservas',
     '/admin/reservas/liberar':            'admin_reservas_liberar',
     '/admin/usuarios':                    'admin_usuarios',
+    '/admin/usuarios/nuevo':              'admin_usuarios_nuevo',
     '/admin/usuarios/<int:id>/permisos':  'admin_usuarios_permisos',
     '/admin/usuarios/<int:id>/estado':    'admin_usuarios_estado',
     '/admin/usuarios/<int:id>/desbloquear': 'admin_usuarios_desbloquear',

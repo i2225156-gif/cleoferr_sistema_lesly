@@ -356,3 +356,192 @@ def test_log_de_auditoria_solo_con_ids(bd, caplog):
                    follow_redirects=False)
     assert 'usuario_id=%d' % id_vendedor in caplog.text
     assert email not in caplog.text
+
+
+# ── 6. Alta de vendedor desde el panel ───────────────────────────
+CLAVE_NUEVA = 'ClaveVendedor123'
+
+
+def _usuario_por_correo(conn, correo):
+    cur = conn.cursor()
+    cur.execute("""SELECT u.id_usuario, u.contrasena, u.activo,
+                          LOWER(TRIM(r.nombre))
+                     FROM usuario u
+                     JOIN rol r ON r.id_rol = u.id_rol
+                    WHERE LOWER(TRIM(u.email)) = %s""",
+                (correo.strip().lower(),))
+    fila = cur.fetchone()
+    cur.close()
+    return fila
+
+
+def _plantilla_vendedor(conn):
+    cur = conn.cursor()
+    cur.execute("""SELECT p.nombre
+                     FROM rol_permiso rp
+                     JOIN rol r ON r.id_rol = rp.id_rol
+                     JOIN permiso p ON p.id_permiso = rp.id_permiso
+                    WHERE LOWER(TRIM(r.nombre)) = 'vendedor'
+                      AND p.activo = TRUE""")
+    nombres = sorted(fila[0] for fila in cur.fetchall())
+    cur.close()
+    return nombres
+
+
+def _permisos_asignados(conn, id_usuario):
+    cur = conn.cursor()
+    cur.execute("""SELECT p.nombre, up.asignado_por
+                     FROM usuario_permiso up
+                     JOIN permiso p ON p.id_permiso = up.id_permiso
+                    WHERE up.id_usuario = %s""", (id_usuario,))
+    filas = cur.fetchall()
+    cur.close()
+    return {fila[0]: fila[1] for fila in filas}
+
+
+def _correo_nuevo():
+    return 'nuevo_%s@cleoferr.local' % uuid.uuid4().hex[:10]
+
+
+def test_admin_crea_vendedor_con_plantilla_y_hash(bd):
+    id_admin, _ = _crear_usuario(bd, 'administrador')
+    correo = _correo_nuevo()
+    admin = app.test_client()
+    _sesion(admin, id_admin, 'administrador')
+
+    r = admin.post('/admin/usuarios/nuevo',
+                   data={'csrf_token': TOKEN, 'correo': correo,
+                         'contrasena': CLAVE_NUEVA,
+                         'confirmar': CLAVE_NUEVA},
+                   follow_redirects=True)
+
+    assert r.status_code == 200
+    html = r.get_data(as_text=True)
+    assert 'Vendedor creado; sus módulos iniciales son:' in html
+    assert CLAVE_NUEVA not in html
+
+    fila = _usuario_por_correo(bd, correo)
+    assert fila is not None
+    id_nuevo, hash_pw, activo, rol = fila
+    assert rol == 'vendedor'
+    assert activo is True
+    assert modulo_app.bcrypt.check_password_hash(hash_pw, CLAVE_NUEVA)
+
+    plantilla = _plantilla_vendedor(bd)
+    asignados = _permisos_asignados(bd, id_nuevo)
+    assert sorted(asignados) == plantilla
+    assert set(asignados.values()) == {id_admin}
+
+
+def test_vendedor_nuevo_puede_iniciar_sesion(bd):
+    id_admin, _ = _crear_usuario(bd, 'administrador')
+    correo = _correo_nuevo()
+    admin = app.test_client()
+    _sesion(admin, id_admin, 'administrador')
+    admin.post('/admin/usuarios/nuevo',
+               data={'csrf_token': TOKEN, 'correo': correo,
+                     'contrasena': CLAVE_NUEVA,
+                     'confirmar': CLAVE_NUEVA})
+
+    login = app.test_client()
+    with login.session_transaction() as s:
+        s['_csrf_token'] = TOKEN
+    r = login.post('/login',
+                   data={'csrf_token': TOKEN, 'correo': correo.upper(),
+                         'clave': CLAVE_NUEVA},
+                   follow_redirects=False)
+    assert r.status_code == 302
+    assert r.headers['Location'].endswith('/inicio_personal')
+    with login.session_transaction() as s:
+        assert s['rol'] == 'vendedor'
+
+
+def test_correo_duplicado_sin_distinguir_mayusculas(bd):
+    id_admin, _ = _crear_usuario(bd, 'administrador')
+    correo = _correo_nuevo()
+    admin = app.test_client()
+    _sesion(admin, id_admin, 'administrador')
+    datos = {'csrf_token': TOKEN, 'correo': correo,
+             'contrasena': CLAVE_NUEVA, 'confirmar': CLAVE_NUEVA}
+    assert admin.post('/admin/usuarios/nuevo', data=datos).status_code == 302
+
+    datos['correo'] = correo.upper()
+    r = admin.post('/admin/usuarios/nuevo', data=datos,
+                   follow_redirects=True)
+    assert r.status_code == 200
+    assert 'Ya existe una cuenta con ese correo electrónico.' in \
+        r.get_data(as_text=True)
+
+    cur = bd.cursor()
+    cur.execute("""SELECT COUNT(1) FROM usuario
+                    WHERE LOWER(TRIM(email)) = %s""", (correo.lower(),))
+    total = cur.fetchone()[0]
+    cur.close()
+    assert total == 1
+
+
+@pytest.mark.parametrize('correo, clave, confirmar', [
+    ('sin-arroba', CLAVE_NUEVA, CLAVE_NUEVA),
+    (_correo_nuevo(), '123', '123'),
+    (_correo_nuevo(), CLAVE_NUEVA, 'OtraClave123'),
+])
+def test_creacion_invalida_no_crea_cuenta(bd, correo, clave, confirmar):
+    id_admin, _ = _crear_usuario(bd, 'administrador')
+    admin = app.test_client()
+    _sesion(admin, id_admin, 'administrador')
+
+    r = admin.post('/admin/usuarios/nuevo',
+                   data={'csrf_token': TOKEN, 'correo': correo,
+                         'contrasena': clave, 'confirmar': confirmar},
+                   follow_redirects=True)
+
+    assert r.status_code == 200
+    if '@' in correo:
+        assert _usuario_por_correo(bd, correo) is None
+
+
+def test_vendedor_no_puede_crear_usuarios(bd):
+    id_vendedor, _ = _crear_usuario(bd, 'vendedor')
+    vendedor = app.test_client()
+    _sesion(vendedor, id_vendedor, 'vendedor')
+    datos = {'csrf_token': TOKEN, 'correo': _correo_nuevo(),
+             'contrasena': CLAVE_NUEVA, 'confirmar': CLAVE_NUEVA}
+
+    r = vendedor.post('/admin/usuarios/nuevo', data=datos,
+                      follow_redirects=False)
+    assert r.status_code == 302
+    assert r.headers['Location'].endswith('/inicio_personal')
+
+    ajax = vendedor.post('/admin/usuarios/nuevo', data=datos,
+                         headers={'X-Requested-With': 'XMLHttpRequest'},
+                         follow_redirects=False)
+    assert ajax.status_code == 403
+    assert ajax.get_json()['ok'] is False
+
+
+def test_alta_de_vendedor_sin_csrf_da_400(bd):
+    id_admin, _ = _crear_usuario(bd, 'administrador')
+    admin = app.test_client()
+    _sesion(admin, id_admin, 'administrador')
+
+    r = admin.post('/admin/usuarios/nuevo',
+                   data={'correo': _correo_nuevo(),
+                         'contrasena': CLAVE_NUEVA,
+                         'confirmar': CLAVE_NUEVA})
+    assert r.status_code == 400
+
+
+def test_alta_no_filtra_clave_ni_correo_en_logs(bd, caplog):
+    id_admin, _ = _crear_usuario(bd, 'administrador')
+    correo = _correo_nuevo()
+    admin = app.test_client()
+    _sesion(admin, id_admin, 'administrador')
+
+    with caplog.at_level(logging.INFO):
+        admin.post('/admin/usuarios/nuevo',
+                   data={'csrf_token': TOKEN, 'correo': correo,
+                         'contrasena': CLAVE_NUEVA,
+                         'confirmar': CLAVE_NUEVA})
+
+    assert CLAVE_NUEVA not in caplog.text
+    assert correo not in caplog.text
