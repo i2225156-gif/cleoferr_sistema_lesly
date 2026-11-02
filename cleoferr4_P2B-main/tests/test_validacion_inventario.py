@@ -9,6 +9,9 @@ inexistente, y los caminos felices entrada/salida con stock actualizado
 El CHECK de precio_unitario >= 0 va en db/10_inventario_precio_check.sql
 (SIN ejecutar): el rechazo en servidor ya lo impide antes de la BD.
 """
+import threading
+import uuid
+
 import psycopg2
 import psycopg2.extras
 import pytest
@@ -25,17 +28,31 @@ class ConnProxy:
 
     def __init__(self, raw):
         self._raw = raw
+        self._savepoint = None
+        self._seq = 0
 
     def cursor(self, dictionary=False, **kwargs):
         if dictionary:
             return self._raw.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         return self._raw.cursor()
 
+    def begin(self):
+        self._seq += 1
+        self._savepoint = f'peticion_inventario_{self._seq}'
+        self.cursor().execute(f'SAVEPOINT {self._savepoint}')
+
     def commit(self):
-        pass
+        if self._savepoint:
+            self.cursor().execute(f'RELEASE SAVEPOINT {self._savepoint}')
+            self._savepoint = None
 
     def rollback(self):
-        self._raw.rollback()
+        if self._savepoint:
+            self.cursor().execute(f'ROLLBACK TO SAVEPOINT {self._savepoint}')
+            self.cursor().execute(f'RELEASE SAVEPOINT {self._savepoint}')
+            self._savepoint = None
+        else:
+            self._raw.rollback()
 
     def close(self):
         pass
@@ -63,12 +80,14 @@ def fx(monkeypatch):
     """)
     pid = cur.fetchone()['id_producto']
     monkeypatch.setattr(modulo_app, 'get_connection_tienda', lambda: proxy)
-    yield {'c': _vendedor(), 'cur': cur, 'pid': pid}
-    proxy.rollback()
+    monkeypatch.setattr(modulo_app, '_permisos_staff', lambda: {'inventario'})
+    yield {'c': _vendedor(), 'cur': cur, 'pid': pid, 'proxy': proxy}
+    raw.rollback()
     raw.close()
 
 
 def _registrar(fx, **campos):
+    fx['proxy'].begin()
     datos = {'tipo': 'entrada', 'id_producto': str(fx['pid']),
              'cantidad': '3', 'precio_unitario': '0.50',
              'observacion': 'compra de prueba', 'id_proveedor': '',
@@ -105,6 +124,7 @@ def test_tipo_invalido_flash_claro_no_crudo(fx):
 
 def test_cantidad_no_numerica_sin_500(fx):
     """Antes: int('abc') reventaba con 500. Ahora: flash claro."""
+    fx['proxy'].begin()
     r = fx['c'].post('/inventario/registrar',
                      data={'tipo': 'entrada', 'id_producto': str(fx['pid']),
                            'cantidad': 'abc'},
@@ -184,6 +204,149 @@ def test_salida_actualiza_stock_y_respecta_limite(fx):
     html = _registrar(fx, tipo='salida', cantidad='10')
     assert 'Nuevo stock: 40' in html
     assert _stock(fx) == 40
+    fx['cur'].execute("SELECT stock_resultante FROM inventario_movimiento"
+                      " WHERE id_producto = %s", (fx['pid'],))
+    assert fx['cur'].fetchone()['stock_resultante'] == 40
     html = _registrar(fx, tipo='salida', cantidad='999')
     assert 'Stock insuficiente. Disponible: 40' in html
     assert _stock(fx) == 40      # no cambió
+    assert _movimientos(fx) == 1
+
+
+# ── concurrencia real sobre un producto sintético ───────────────────
+
+class CursorBarrera:
+    """Obliga a ambas peticiones a leer el stock antes de actualizar."""
+
+    def __init__(self, cur, barrera):
+        self._cur = cur
+        self._barrera = barrera
+        self._sincronizar = False
+
+    def execute(self, sql, params=None):
+        self._sincronizar = 'SELECT stock FROM producto' in sql
+        return self._cur.execute(sql, params)
+
+    def fetchone(self):
+        fila = self._cur.fetchone()
+        if self._sincronizar:
+            self._sincronizar = False
+            self._barrera.wait(timeout=15)
+        return fila
+
+    def __getattr__(self, nombre):
+        return getattr(self._cur, nombre)
+
+
+class ConnConcurrente(ConnProxy):
+    def __init__(self, raw, barrera):
+        super().__init__(raw)
+        self._barrera = barrera
+
+    def cursor(self, dictionary=False, **kwargs):
+        if dictionary:
+            cur = self._raw.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        else:
+            cur = self._raw.cursor()
+        return CursorBarrera(cur, self._barrera)
+
+    def commit(self):
+        self._raw.commit()
+
+
+@pytest.fixture()
+def producto_concurrente():
+    """Producto visible para dos conexiones; se elimina sin dejar residuos."""
+    pids = []
+
+    def crear(stock):
+        raw = db_supabase.engine_tienda.raw_connection()
+        try:
+            cur = raw.cursor()
+            cur.execute("""
+                INSERT INTO producto (nombre, precio, stock)
+                VALUES (%s, 1.00, %s) RETURNING id_producto
+            """, (f"{MARCA}-conc-{uuid.uuid4().hex}", stock))
+            pid = cur.fetchone()[0]
+            raw.commit()
+            pids.append(pid)
+            return pid
+        finally:
+            raw.close()
+
+    yield crear
+
+    raw = db_supabase.engine_tienda.raw_connection()
+    try:
+        cur = raw.cursor()
+        for pid in pids:
+            cur.execute("DELETE FROM inventario_movimiento WHERE id_producto = %s", (pid,))
+            cur.execute("DELETE FROM producto WHERE id_producto = %s", (pid,))
+        raw.commit()
+    finally:
+        raw.rollback()
+        raw.close()
+
+
+def _dos_movimientos_simultaneos(monkeypatch, pid, tipo, cantidad):
+    barrera = threading.Barrier(2)
+    local = threading.local()
+    raws = []
+    resultados = {}
+    monkeypatch.setattr(modulo_app, 'get_connection_tienda', lambda: local.conn)
+
+    def trabajador(nombre):
+        raw = db_supabase.engine_tienda.raw_connection()
+        raws.append(raw)
+        local.conn = ConnConcurrente(raw, barrera)
+        try:
+            cliente = _vendedor()
+            with cliente.session_transaction() as sesion:
+                sesion['rol'] = 'administrador'
+            respuesta = cliente.post('/inventario/registrar', data={
+                'tipo': tipo, 'id_producto': str(pid), 'cantidad': str(cantidad),
+                'precio_unitario': '', 'observacion': f'{MARCA}-{nombre}',
+                'id_proveedor': '', 'id_vendedor': ''})
+            with cliente.session_transaction() as sesion:
+                mensajes = sesion.get('_flashes', [])
+            resultados[nombre] = (respuesta.status_code, mensajes)
+        except Exception as exc:
+            resultados[nombre] = repr(exc)
+
+    hilos = [threading.Thread(target=trabajador, args=(nombre,)) for nombre in ('A', 'B')]
+    for hilo in hilos:
+        hilo.start()
+    for hilo in hilos:
+        hilo.join(timeout=30)
+    assert all(not hilo.is_alive() for hilo in hilos)
+    for raw in raws:
+        raw.rollback()
+        raw.close()
+    assert sorted(valor[0] for valor in resultados.values()) == [302, 302], resultados
+
+    raw = db_supabase.engine_tienda.raw_connection()
+    try:
+        cur = raw.cursor()
+        cur.execute("SELECT stock FROM producto WHERE id_producto = %s", (pid,))
+        stock = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM inventario_movimiento WHERE id_producto = %s", (pid,))
+        movimientos = cur.fetchone()[0]
+        return stock, movimientos
+    finally:
+        raw.rollback()
+        raw.close()
+
+
+def test_dos_salidas_simultaneas_solo_procede_una(monkeypatch, producto_concurrente):
+    pid = producto_concurrente(10)
+    stock, movimientos = _dos_movimientos_simultaneos(monkeypatch, pid, 'salida', 6)
+    assert movimientos == 1
+    assert stock == 4
+    assert stock >= 0
+
+
+def test_dos_entradas_simultaneas_suman_ambas(monkeypatch, producto_concurrente):
+    pid = producto_concurrente(10)
+    stock, movimientos = _dos_movimientos_simultaneos(monkeypatch, pid, 'entrada', 5)
+    assert movimientos == 2
+    assert stock == 20

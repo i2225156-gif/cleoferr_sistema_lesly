@@ -2040,11 +2040,6 @@ def registrar_movimiento():
                 return redirect(url_for('inventario'))
 
         stock_actual = prod['stock']
-        if tipo == 'salida' and cantidad > stock_actual:
-            flash(f"Stock insuficiente. Disponible: {stock_actual}", "danger")
-            return redirect(url_for('inventario'))
-
-        nuevo_stock = stock_actual + cantidad if tipo == 'entrada' else stock_actual - cantidad
 
         # Si es salida y se seleccionó un vendedor, obtener su nombre y añadir a observación
         # (la tabla usuario vive en la BD Auth, por eso se consulta por separado)
@@ -2065,13 +2060,32 @@ def registrar_movimiento():
         # Para compatibilidad con la estructura actual, solo llenamos id_proveedor para entradas.
         proveedor_db_value = id_proveedor if tipo == 'entrada' and id_proveedor else None
 
+        if tipo == 'entrada':
+            cursor.execute("""
+                UPDATE producto SET stock = stock + %s
+                WHERE id_producto = %s RETURNING stock
+            """, (cantidad, id_producto))
+        else:
+            cursor.execute("""
+                UPDATE producto SET stock = stock - %s
+                WHERE id_producto = %s AND stock >= %s RETURNING stock
+            """, (cantidad, id_producto, cantidad))
+        actualizado = cursor.fetchone()
+        if actualizado is None:
+            conn.rollback()
+            if tipo == 'salida':
+                flash(f"Stock insuficiente. Disponible: {stock_actual}", "danger")
+            else:
+                flash("Producto no encontrado.", "danger")
+            return redirect(url_for('inventario'))
+        nuevo_stock = actualizado['stock']
+
         cursor.execute("""
             INSERT INTO inventario_movimiento
                 (tipo, id_producto, id_proveedor, cantidad, precio_unitario, observacion, id_usuario, stock_resultante)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         """, (tipo, id_producto, proveedor_db_value, cantidad, precio_unit, observacion, id_usuario, nuevo_stock))
 
-        cursor.execute("UPDATE producto SET stock=%s WHERE id_producto=%s", (nuevo_stock, id_producto))
         conn.commit()
         flash(f"Movimiento de {'entrada' if tipo=='entrada' else 'salida'} registrado. Nuevo stock: {nuevo_stock}", "success")
     except Exception:
