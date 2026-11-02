@@ -220,6 +220,27 @@ def test_navbar_sigue_en_paginas_no_admin(fx):
     assert 'navbar navbar-cleoferr navbar-expand-lg' in html  # catálogo lo conserva
 
 
+def test_mi_perfil_visible_solo_con_sesion_cliente(fx):
+    marcador = 'id="enlace-mi-perfil"'
+    html = _sesion('cliente', 11).get('/catalogo').get_data(as_text=True)
+    assert marcador in html
+    assert 'href="/perfil"' in html
+    assert 'Mi perfil' in html
+
+    for cliente in (fx['admin'], fx['vendedor'], app.test_client()):
+        html = cliente.get('/catalogo').get_data(as_text=True)
+        assert marcador not in html
+        assert 'href="/perfil"' not in html
+
+
+def test_mi_perfil_en_menu_movil_y_tema_oscuro(fx):
+    html = _sesion('cliente', 11).get('/catalogo').get_data(as_text=True)
+    assert 'data-bs-target="#navbarCleoferr"' in html
+    assert 'id="navbarCleoferr"' in html
+    assert '@media (max-width: 991.98px)' in html
+    assert 'body.dark-mode .navbar-cleoferr .btn-nav' in html
+
+
 # ── C2b: Productos (listado, formulario y detalle) ────────────────
 
 def test_productos_admin_con_sidebar_y_activo(fx):
