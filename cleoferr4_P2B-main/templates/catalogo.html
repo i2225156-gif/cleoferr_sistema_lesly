@@ -182,6 +182,13 @@
         </button>
         <div class="cat-dropdown-menu" id="catMenu"></div>
     </div>
+    <div class="cat-dropdown">
+        <button class="cat-dropdown-btn" onclick="toggleMarcas()" id="marcaBtn">
+            <span><i class="fa fa-industry me-2" style="color:var(--naranja)"></i>MARCAS</span>
+            <i class="fa fa-chevron-down" style="font-size:0.72rem"></i>
+        </button>
+        <div class="cat-dropdown-menu" id="marcaMenu"></div>
+    </div>
     <div class="banner-ofertas">
         <div>
             <div class="banner-texto">Ofertas de la semana</div>
@@ -196,7 +203,8 @@
     <div class="col-6 col-md-4 col-lg-3 prod-item"
          data-nombre="{{ p.nombre | lower }}"
          data-desc="{{ (p.descripcion or '') | lower }}"
-         data-categoria="{{ p.categoria or '' }}">
+         data-categoria="{{ p.categoria or '' }}"
+         data-marca="{{ p.marca or '' }}">
         <div class="prod-card" onclick="abrirProducto({{ p.id_producto }}, '{{ p.nombre|replace("'", "\\'") }}', {{ p.precio_final|float }}, {{ p.stock|int if p.stock else 0 }}, '{{ (p.descripcion or '')|replace("'", "\\'")|replace('\n', ' ') }}', '{{ p.imagen or '' }}', '{{ p.marca or '' }}', {{ p.precio|float }}, {{ p.descuento|float }})" style="cursor:pointer">
             <div class="prod-img">
                 {% if p.imagen %}
@@ -500,43 +508,79 @@ function mostrarToast(msg) {
 
 actualizarContador();
 
+function agregarOpcionFiltro(menu, texto, icono, seleccionada, accion) {
+    const a = document.createElement('a');
+    a.href = '#';
+    const i = document.createElement('i');
+    i.className = 'fa ' + icono;
+    i.style.color = 'var(--naranja)';
+    a.appendChild(i);
+    // Categorías y marcas son texto libre: nunca pasan por innerHTML.
+    a.appendChild(document.createTextNode(' ' + texto));
+    if (seleccionada) a.classList.add('seleccionada');
+    a.onclick = e => { e.preventDefault(); accion(a); };
+    menu.appendChild(a);
+}
+
+function cambiarRotuloFiltro(idBoton, icono, texto) {
+    const span = document.getElementById(idBoton).querySelector('span');
+    const i = document.createElement('i');
+    i.className = 'fa ' + icono + ' me-2';
+    i.style.color = 'var(--naranja)';
+    span.replaceChildren(i, document.createTextNode(texto));
+}
+
 (function() {
     const cats = new Set();
+    const marcas = new Set();
     document.querySelectorAll('.prod-item').forEach(i => {
         if (i.dataset.categoria) cats.add(i.dataset.categoria);
+        if (i.dataset.marca) marcas.add(i.dataset.marca);
     });
-    const menu = document.getElementById('catMenu');
-    const todas = document.createElement('a');
-    todas.href = '#';
-    todas.innerHTML = '<i class="fa fa-border-all" style="color:var(--naranja)"></i> Todas las categorías';
-    todas.classList.add('seleccionada');
-    todas.onclick = e => { e.preventDefault(); filtrarCategoria('', todas); };
-    menu.appendChild(todas);
-    cats.forEach(cat => {
-        const a = document.createElement('a');
-        a.href = '#';
-        a.innerHTML = `<i class="fa fa-tag" style="color:var(--naranja)"></i> ${cat}`;
-        a.onclick = e => { e.preventDefault(); filtrarCategoria(cat, a); };
-        menu.appendChild(a);
-    });
+    const menuCats = document.getElementById('catMenu');
+    agregarOpcionFiltro(menuCats, 'Todas las categorías', 'fa-border-all', true,
+                        a => filtrarCategoria('', a));
+    cats.forEach(cat => agregarOpcionFiltro(
+        menuCats, cat, 'fa-tag', false, a => filtrarCategoria(cat, a)));
+
+    const menuMarcas = document.getElementById('marcaMenu');
+    agregarOpcionFiltro(menuMarcas, 'Todas las marcas', 'fa-border-all', true,
+                        a => filtrarMarca('', a));
+    // Los datos nacen de productos activos: una marca sin ellos no aparece.
+    marcas.forEach(marca => agregarOpcionFiltro(
+        menuMarcas, marca, 'fa-industry', false, a => filtrarMarca(marca, a)));
 })();
 
 function toggleCats() {
+    document.getElementById('marcaMenu').classList.remove('abierto');
     document.getElementById('catMenu').classList.toggle('abierto');
+}
+function toggleMarcas() {
+    document.getElementById('catMenu').classList.remove('abierto');
+    document.getElementById('marcaMenu').classList.toggle('abierto');
 }
 document.addEventListener('click', e => {
     if (!e.target.closest('.cat-dropdown'))
-        document.getElementById('catMenu').classList.remove('abierto');
+        document.querySelectorAll('.cat-dropdown-menu').forEach(
+            menu => menu.classList.remove('abierto'));
 });
 
 let categoriaActiva = '';
+let marcaActiva = '';
 function filtrarCategoria(cat, el) {
     categoriaActiva = cat;
-    document.querySelectorAll('.cat-dropdown-menu a').forEach(a => a.classList.remove('seleccionada'));
+    document.querySelectorAll('#catMenu a').forEach(a => a.classList.remove('seleccionada'));
     el.classList.add('seleccionada');
-    const icon = '<i class="fa fa-th-large me-2" style="color:var(--naranja)"></i>';
-    document.getElementById('catBtn').querySelector('span').innerHTML = icon + (cat || 'CATEGORÍAS');
+    cambiarRotuloFiltro('catBtn', 'fa-th-large', cat || 'CATEGORÍAS');
     document.getElementById('catMenu').classList.remove('abierto');
+    filtrarProductos();
+}
+function filtrarMarca(marca, el) {
+    marcaActiva = marca;
+    document.querySelectorAll('#marcaMenu a').forEach(a => a.classList.remove('seleccionada'));
+    el.classList.add('seleccionada');
+    cambiarRotuloFiltro('marcaBtn', 'fa-industry', marca || 'MARCAS');
+    document.getElementById('marcaMenu').classList.remove('abierto');
     filtrarProductos();
 }
 
@@ -546,25 +590,22 @@ function filtrarProductos() {
     document.querySelectorAll('.prod-item').forEach(item => {
         const okB = !q || item.dataset.nombre.includes(q) || item.dataset.desc.includes(q);
         const okC = !categoriaActiva || item.dataset.categoria === categoriaActiva;
-        if (okB && okC) { item.style.display = ''; visible++; }
+        const okM = !marcaActiva || item.dataset.marca === marcaActiva;
+        if (okB && okC && okM) { item.style.display = ''; visible++; }
         else item.style.display = 'none';
     });
     document.getElementById('sinResultados').style.display = visible === 0 ? 'block' : 'none';
-    document.getElementById('terminoBusqueda').textContent = q || categoriaActiva;
+    document.getElementById('terminoBusqueda').textContent =
+        q || [categoriaActiva, marcaActiva].filter(Boolean).join(' / ');
 }
 
 function limpiarFiltros() {
     document.getElementById('campoBuscar').value = '';
-    categoriaActiva = '';
-    document.querySelectorAll('.prod-item').forEach(i => i.style.display = '');
-    document.getElementById('sinResultados').style.display = 'none';
-    const primera = document.querySelector('.cat-dropdown-menu a');
-    if (primera) {
-        document.querySelectorAll('.cat-dropdown-menu a').forEach(a => a.classList.remove('seleccionada'));
-        primera.classList.add('seleccionada');
-        const icon = '<i class="fa fa-th-large me-2" style="color:var(--naranja)"></i>';
-        document.getElementById('catBtn').querySelector('span').innerHTML = icon + 'CATEGORÍAS';
-    }
+    const primeraCategoria = document.querySelector('#catMenu a');
+    const primeraMarca = document.querySelector('#marcaMenu a');
+    if (primeraCategoria) filtrarCategoria('', primeraCategoria);
+    if (primeraMarca) filtrarMarca('', primeraMarca);
+    filtrarProductos();
 }
 
 // ── Modal de detalle de producto ─────────────────────────

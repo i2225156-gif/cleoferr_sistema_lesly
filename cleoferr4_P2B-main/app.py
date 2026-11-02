@@ -8,6 +8,7 @@ import hashlib
 import json
 import logging
 import re
+import unicodedata
 import traceback
 # A�'ADIR despuǸs de: import uuid
 from datetime import datetime
@@ -327,6 +328,8 @@ _CSRF_PROTEGIDAS = {
     # Alertas: resolver una alerta es escritura (POST + CSRF); el fetch de
     # la pagina manda X-CSRFToken y el formulario el token oculto.
     'alertas_resolver',
+    # Alta rápida desde el formulario de producto (fetch JSON).
+    'nueva_categoria_producto', 'nueva_marca_producto',
 }
 
 
@@ -1254,6 +1257,78 @@ def nuevo_producto():
     marcas = cursor.fetchall()
     conn.close()
     return render_template('producto_form.html', categorias=categorias, marcas=marcas)
+
+
+def _clave_nombre_taxonomia(nombre):
+    """Clave de comparación: minúsculas y sin marcas diacríticas."""
+    descompuesto = unicodedata.normalize('NFKD', nombre.strip().casefold())
+    return ''.join(c for c in descompuesto if not unicodedata.combining(c))
+
+
+def _nueva_taxonomia_producto(tipo):
+    """Alta transaccional compartida por categoría y marca.
+
+    Mientras no exista el índice único propuesto en db/13, el bloqueo de
+    tabla serializa el chequeo y el INSERT entre las altas de esta ruta.
+    """
+    tabla, id_col = {'categoria': ('categoria', 'id_categoria'),
+                     'marca': ('marca', 'id_marca')}[tipo]
+    datos = request.get_json(silent=True)
+    if not isinstance(datos, dict):
+        return {'ok': False, 'mensaje': 'Envía un objeto JSON válido.'}, 400
+    valor_nombre = datos.get('nombre')
+    if valor_nombre is not None and not isinstance(valor_nombre, str):
+        return {'ok': False,
+                'mensaje': 'El nombre debe ser texto.'}, 400
+    nombre, error = requerido(tipo, valor_nombre, 60)
+    if error:
+        return {'ok': False, 'mensaje': error}, 400
+
+    conn = None
+    try:
+        conn = get_connection_tienda()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(f"LOCK TABLE {tabla} IN SHARE ROW EXCLUSIVE MODE")
+        cursor.execute(f"SELECT {id_col}, nombre FROM {tabla}")
+        clave_nueva = _clave_nombre_taxonomia(nombre)
+        existente = next(
+            (fila for fila in cursor.fetchall()
+             if _clave_nombre_taxonomia(fila['nombre']) == clave_nueva), None)
+        if existente:
+            conn.commit()
+            return {'ok': True, 'creada': False, tipo: existente,
+                    'mensaje': 'Ya existía; la seleccioné.'}, 200
+
+        cursor.execute(
+            f"INSERT INTO {tabla} (nombre) VALUES (%s) "
+            f"RETURNING {id_col}, nombre", (nombre,))
+        creada = cursor.fetchone()
+        conn.commit()
+        return {'ok': True, 'creada': True, tipo: creada,
+                'mensaje': 'Creada y seleccionada correctamente.'}, 201
+    except Exception:
+        if conn is not None:
+            conn.rollback()
+        app.logger.exception("Error al crear %s de producto", tipo)
+        return {'ok': False,
+                'mensaje': 'No se pudo guardar. Inténtalo de nuevo.'}, 503
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+@app.route('/productos/categorias/nueva', methods=['POST'])
+@login_required
+@permiso_required('productos')
+def nueva_categoria_producto():
+    return _nueva_taxonomia_producto('categoria')
+
+
+@app.route('/productos/marcas/nueva', methods=['POST'])
+@login_required
+@permiso_required('productos')
+def nueva_marca_producto():
+    return _nueva_taxonomia_producto('marca')
 
 
 def _id_foranea(cursor, campo_form, tabla, id_col, etiqueta):

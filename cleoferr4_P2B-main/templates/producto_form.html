@@ -103,8 +103,12 @@
     </div>
 </div>
                 <div class="col-md-6">
-                    <label class="form-label fw-semibold">Categoría *</label>
-                    <select name="id_categoria" class="form-select" required>
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                        <label for="selectCategoria" class="form-label fw-semibold mb-0">Categoría *</label>
+                        <button type="button" class="btn btn-sm btn-outline-secondary"
+                                onclick="abrirNuevaTaxonomia('categoria')">+ Nueva</button>
+                    </div>
+                    <select name="id_categoria" id="selectCategoria" class="form-select" required>
                         <option value="">-- Seleccionar --</option>
                         {% for c in categorias %}
                             <option value="{{ c.id_categoria }}"
@@ -115,8 +119,12 @@
                     </select>
                 </div>
                 <div class="col-md-6">
-                    <label class="form-label fw-semibold">Marca *</label>
-                    <select name="id_marca" class="form-select" required>
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                        <label for="selectMarca" class="form-label fw-semibold mb-0">Marca *</label>
+                        <button type="button" class="btn btn-sm btn-outline-secondary"
+                                onclick="abrirNuevaTaxonomia('marca')">+ Nueva</button>
+                    </div>
+                    <select name="id_marca" id="selectMarca" class="form-select" required>
                         <option value="">-- Seleccionar --</option>
                         {% for m in marcas %}
                             <option value="{{ m.id_marca }}"
@@ -138,7 +146,119 @@
         </form>
     </div>
 </div>
+
+<div class="modal fade" id="modalNuevaTaxonomia" tabindex="-1"
+     aria-labelledby="modalNuevaTaxonomiaTitulo" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered modal-sm">
+        <div class="modal-content" style="border:none;border-radius:14px;overflow:hidden">
+            <div class="modal-header" style="background:var(--gris-oscuro);color:#fff;border:none">
+                <h5 class="modal-title fw-bold" id="modalNuevaTaxonomiaTitulo"></h5>
+                <button type="button" class="btn-close btn-close-white"
+                        data-bs-dismiss="modal" aria-label="Cerrar"></button>
+            </div>
+            <form id="formNuevaTaxonomia">
+                <div class="modal-body">
+                    <label for="nombreNuevaTaxonomia" id="labelNuevaTaxonomia"
+                           class="form-label fw-semibold"></label>
+                    <input type="text" id="nombreNuevaTaxonomia" class="form-control"
+                           maxlength="60" required autocomplete="off">
+                </div>
+                <div class="modal-footer border-0">
+                    <button type="button" class="btn btn-outline-secondary"
+                            data-bs-dismiss="modal">Cancelar</button>
+                    <button type="submit" id="btnGuardarTaxonomia"
+                            class="btn btn-naranja fw-bold">Guardar</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
 <script>
+const configuracionTaxonomias = {
+    categoria: {
+        url: {{ url_for('nueva_categoria_producto')|tojson }},
+        select: 'selectCategoria', id: 'id_categoria', singular: 'categoría'
+    },
+    marca: {
+        url: {{ url_for('nueva_marca_producto')|tojson }},
+        select: 'selectMarca', id: 'id_marca', singular: 'marca'
+    }
+};
+const csrfTaxonomia = {{ csrf_token|tojson }};
+let tipoTaxonomiaActual = null;
+let instanciaNuevaTaxonomia = null;
+
+function modalNuevaTaxonomia() {
+    if (!instanciaNuevaTaxonomia) {
+        instanciaNuevaTaxonomia = bootstrap.Modal.getOrCreateInstance(
+            document.getElementById('modalNuevaTaxonomia'));
+    }
+    return instanciaNuevaTaxonomia;
+}
+
+function abrirNuevaTaxonomia(tipo) {
+    const config = configuracionTaxonomias[tipo];
+    if (!config) return;
+    tipoTaxonomiaActual = tipo;
+    document.getElementById('modalNuevaTaxonomiaTitulo').textContent =
+        'Nueva ' + config.singular;
+    document.getElementById('labelNuevaTaxonomia').textContent =
+        'Nombre de la ' + config.singular;
+    const input = document.getElementById('nombreNuevaTaxonomia');
+    input.value = '';
+    const modal = modalNuevaTaxonomia();
+    document.getElementById('modalNuevaTaxonomia').addEventListener(
+        'shown.bs.modal', () => input.focus(), { once: true });
+    modal.show();
+}
+
+document.getElementById('formNuevaTaxonomia').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    const tipo = tipoTaxonomiaActual;
+    const config = configuracionTaxonomias[tipo];
+    if (!config) return;
+    const input = document.getElementById('nombreNuevaTaxonomia');
+    const boton = document.getElementById('btnGuardarTaxonomia');
+    boton.disabled = true;
+    try {
+        const respuesta = await fetch(config.url, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+                'X-Requested-With': 'XMLHttpRequest',
+                'X-CSRFToken': csrfTaxonomia
+            },
+            body: JSON.stringify({ nombre: input.value })
+        });
+        const datos = await respuesta.json().catch(() => null);
+        if (!datos) throw new Error('El servidor devolvió una respuesta no válida.');
+        if (!respuesta.ok || !datos.ok) {
+            throw new Error(datos.mensaje || 'No se pudo guardar.');
+        }
+        const item = datos[tipo];
+        const select = document.getElementById(config.select);
+        const valor = String(item[config.id]);
+        let opcion = Array.from(select.options).find(o => o.value === valor);
+        if (!opcion) {
+            // Option/textContent: el nombre siempre es texto, nunca HTML.
+            opcion = new Option(item.nombre, valor);
+            select.add(opcion);
+        }
+        opcion.selected = true;
+        select.value = valor;
+        modalNuevaTaxonomia().hide();
+        avisoAccion({ mensaje: datos.mensaje, tipo: 'ok' });
+    } catch (error) {
+        avisoAccion({ mensaje: error.message || 'Error de conexión. Inténtalo de nuevo.',
+                      tipo: 'error' });
+    } finally {
+        boton.disabled = false;
+    }
+});
+
 const inputImagen = document.getElementById('inputImagen');
 
 inputImagen.addEventListener('change', function () {

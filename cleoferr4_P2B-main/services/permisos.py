@@ -89,6 +89,8 @@ RUTAS_POR_PERMISO = {
     '/productos':                      'productos',
     '/productos/detalle/<int:id>':     'productos',
     '/productos/nuevo':                'productos',
+    '/productos/categorias/nueva':     'productos',
+    '/productos/marcas/nueva':         'productos',
     '/productos/guardar':              'productos',
     '/productos/editar/<int:id>':      'productos',
     '/productos/actualizar/<int:id>':  'productos',
