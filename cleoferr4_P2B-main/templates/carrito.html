@@ -229,80 +229,6 @@
                         </div>
                     </div>
 
-                    <!-- Formulario tarjeta -->
-                    <div id="formTarjeta" style="display:none">
-                        <div class="p-3 rounded-3 mb-3" style="background:#f8f9ff;border:2px solid #e0e7ff">
-                            <!-- Card visual preview -->
-                            <div style="background:linear-gradient(135deg,#1a1a2e,#4682B4);border-radius:12px;padding:18px 20px;margin-bottom:16px;color:white;font-family:monospace;position:relative;min-height:90px">
-                                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-                                    <span style="font-size:0.7rem;opacity:0.7;font-family:sans-serif;text-transform:uppercase;letter-spacing:1px">Tarjeta de pago</span>
-                                    <svg width="44" height="30" viewBox="0 0 36 24" fill="none"><circle cx="14" cy="12" r="7" fill="#EB001B" opacity="0.9"/><circle cx="22" cy="12" r="7" fill="#F79E1B" opacity="0.9"/><path d="M18 6.8C19.7 8 20.8 9.9 20.8 12s-1.1 4-2.8 5.2C16.3 16 15.2 14.1 15.2 12s1.1-4 2.8-5.2z" fill="#FF5F00"/></svg>
-                                </div>
-                                <div style="font-size:1.1rem;letter-spacing:4px;margin-bottom:8px" id="previewNum">•••• •••• •••• ••••</div>
-                                <div style="display:flex;gap:24px;font-size:0.72rem;opacity:0.8">
-                                    <span id="previewNom" style="text-transform:uppercase">NOMBRE APELLIDO</span>
-                                    <span id="previewVenc">MM/AA</span>
-                                </div>
-                            </div>
-                            <div class="mb-2">
-                                <label class="form-label fw-semibold" style="font-size:0.85rem">Número de tarjeta</label>
-                                <input type="text" id="numTarjeta" class="form-control" placeholder="0000 0000 0000 0000"
-                                       maxlength="19" oninput="formatCard(this)">
-                            </div>
-                            <div class="mb-2">
-                                <label class="form-label fw-semibold" style="font-size:0.85rem">Nombre en la tarjeta</label>
-                                <input type="text" id="nomTarjeta" class="form-control" placeholder="NOMBRE APELLIDO"
-                                       oninput="document.getElementById('previewNom').textContent=this.value.toUpperCase()||'NOMBRE APELLIDO'">
-                            </div>
-                            <div class="row g-2">
-                                <div class="col-6">
-                                    <label class="form-label fw-semibold" style="font-size:0.85rem">Vencimiento</label>
-                                    <input type="text" id="vencTarjeta" class="form-control" placeholder="MM/AA"
-                                           maxlength="5" oninput="formatExpiry(this)">
-                                </div>
-                                <div class="col-6">
-                                    <label class="form-label fw-semibold" style="font-size:0.85rem">CVV</label>
-                                    <input type="password" id="cvvTarjeta" class="form-control" placeholder="•••" maxlength="4">
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- QR Yape/Plin -->
-                    <div id="formYape" style="display:none">
-                        <div class="text-center p-3 rounded-3" style="background:linear-gradient(135deg,#fdf3ff,#f0f7ff);border:2px solid #e9d5f5">
-                            <div style="display:flex;justify-content:center;gap:8px;margin-bottom:12px">
-                                <span style="background:#7b2d8b;color:white;font-size:0.82rem;font-weight:900;padding:4px 14px;border-radius:20px">YAPE</span>
-                                <span style="background:#1a8cdb;color:white;font-size:0.82rem;font-weight:900;padding:4px 14px;border-radius:20px">PLIN</span>
-                            </div>
-                            <div class="qr-placeholder mb-3" style="display:inline-block;background:white;padding:12px;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,0.1)">
-                                <svg width="150" height="150" viewBox="0 0 140 140" xmlns="http://www.w3.org/2000/svg">
-                                    <rect width="140" height="140" fill="white"/>
-                                    <rect x="10" y="10" width="40" height="40" rx="4" fill="#333"/><rect x="16" y="16" width="28" height="28" rx="2" fill="white"/><rect x="20" y="20" width="20" height="20" rx="1" fill="#333"/>
-                                    <rect x="90" y="10" width="40" height="40" rx="4" fill="#333"/><rect x="96" y="16" width="28" height="28" rx="2" fill="white"/><rect x="100" y="20" width="20" height="20" rx="1" fill="#333"/>
-                                    <rect x="10" y="90" width="40" height="40" rx="4" fill="#333"/><rect x="16" y="96" width="28" height="28" rx="2" fill="white"/><rect x="20" y="100" width="20" height="20" rx="1" fill="#333"/>
-                                    <rect x="55" y="10" width="8" height="8" fill="#333"/><rect x="67" y="10" width="8" height="8" fill="#333"/>
-                                    <rect x="55" y="22" width="8" height="8" fill="#333"/><rect x="67" y="22" width="8" height="8" fill="#333"/>
-                                    <rect x="55" y="34" width="8" height="8" fill="#333"/>
-                                    <rect x="55" y="55" width="8" height="8" fill="#7b2d8b"/><rect x="67" y="55" width="8" height="8" fill="#7b2d8b"/>
-                                    <rect x="79" y="55" width="8" height="8" fill="#7b2d8b"/><rect x="55" y="67" width="8" height="8" fill="#7b2d8b"/>
-                                    <rect x="67" y="67" width="8" height="8" fill="#7b2d8b"/>
-                                    <rect x="90" y="55" width="8" height="8" fill="#333"/><rect x="102" y="55" width="8" height="8" fill="#333"/>
-                                    <rect x="114" y="55" width="8" height="8" fill="#333"/>
-                                    <rect x="55" y="90" width="8" height="8" fill="#333"/><rect x="67" y="90" width="8" height="8" fill="#333"/>
-                                    <rect x="79" y="90" width="8" height="8" fill="#333"/><rect x="55" y="102" width="8" height="8" fill="#333"/>
-                                    <rect x="90" y="90" width="8" height="8" fill="#333"/><rect x="102" y="90" width="8" height="8" fill="#333"/>
-                                    <rect x="114" y="90" width="8" height="8" fill="#333"/>
-                                </svg>
-                            </div>
-                            <p class="fw-bold mb-1" style="color:#7b2d8b;font-size:0.95rem">Escanea con Yape o Plin</p>
-                            <p class="mb-2" style="font-size:0.85rem;color:#555">Monto a pagar: <strong class="fw-bold" style="color:#1a1a2e;font-size:1.1rem" id="montoYape">S/ 0.00</strong></p>
-                            <label class="form-label fw-semibold" style="font-size:0.82rem;color:#666">N° de operación (requerido para confirmar):</label>
-                            <input type="text" id="numOperacion" class="form-control" placeholder="Ingresa el número de operación"
-                                   style="max-width:300px;margin:0 auto;text-align:center">
-                        </div>
-                    </div>
-
                     <div class="d-flex justify-content-end mt-3">
                         <button class="btn btn-naranja px-4" onclick="irPaso2()" id="btnSiguiente1" disabled>
                             Siguiente <i class="fa fa-arrow-right ms-1"></i>
@@ -385,8 +311,8 @@
                         <button class="btn btn-outline-secondary px-4" onclick="irPaso(2)">
                             <i class="fa fa-arrow-left me-1"></i> Atrás
                         </button>
-                        <button class="btn btn-success px-4 fw-bold" onclick="confirmarPedidoFinal()">
-                            <i class="fa fa-check me-1"></i> Confirmar pedido
+                        <button class="btn btn-success px-4 fw-bold" id="btnConfirmarPedido" onclick="confirmarPedidoFinal()">
+                            <i class="fa fa-arrow-right me-1"></i> Continuar al pago
                         </button>
                     </div>
                 </div>
@@ -442,16 +368,21 @@ function renderCarrito() {
         const tr = document.createElement('tr');
         tr.innerHTML = `
             <td>
-                <div class="fw-semibold" style="color:var(--gris-oscuro)">${item.nombre}</div>
+                <div class="fw-semibold" style="color:var(--gris-oscuro)">${esc(item.nombre)}</div>
                 <small class="text-muted">#${item.id}</small>
             </td>
             <td class="fw-bold" style="color:var(--naranja)">${precioCell}</td>
             <td>
                 <div class="qty-control">
-                    <button class="qty-btn" onclick="cambiarCantidad(${idx}, -1)">−</button>
-                    <span class="qty-num">${item.cantidad}</span>
-                    <button class="qty-btn" onclick="cambiarCantidad(${idx}, +1)">+</button>
+                    <button class="qty-btn" onclick="cambiarCantidad(${idx}, -1)"
+                            ${item.cantidad <= 1 ? 'disabled' : ''}>−</button>
+                    <span class="qty-num" id="qty-${idx}">${item.cantidad}</span>
+                    <button class="qty-btn" onclick="cambiarCantidad(${idx}, +1)"
+                            ${item.cantidad >= (item.stock || 99) ? 'disabled' : ''}>+</button>
                 </div>
+                <small class="text-muted d-block" style="font-size:0.7rem">
+                    Stock disponible: ${item.stock || '–'}
+                </small>
             </td>
             <td class="fw-bold">${subCell}</td>
             <td>
@@ -503,6 +434,7 @@ function refrescarPrecios() {
                 it.precio      = pv.precio_final;   // el servidor decide
                 it.precio_base = pv.precio;
                 it.descuento   = pv.descuento;
+                it.stock       = pv.stock;          // stock disponible del servidor
             }
         });
         preciosConfirmados = true;   // recién ahora se muestran importes
@@ -513,9 +445,38 @@ function refrescarPrecios() {
 
 function cambiarCantidad(idx, delta) {
     const carrito = getCarrito();
-    carrito[idx].cantidad += delta;
-    if (carrito[idx].cantidad <= 0) carrito.splice(idx, 1);
-    saveCarrito(carrito);
+    if (!carrito[idx]) return;
+    const item = carrito[idx];
+    const stockMax = item.stock || 99;
+    let nueva = item.cantidad + delta;
+    if (nueva < 1) nueva = 1;
+    if (nueva > stockMax) nueva = stockMax;
+    if (nueva === item.cantidad) return;
+
+    // Validar contra el backend antes de guardar
+    fetch('/carrito/actualizar', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRFToken': CSRF_TOKEN },
+        body: JSON.stringify({ id_producto: item.id, cantidad: nueva })
+    })
+    .then(r => r.json())
+    .then(d => {
+        if (d.ok) {
+            carrito[idx].cantidad = d.cantidad;
+            if (d.aviso_stock) {
+                avisoAccion({ mensaje: d.aviso_stock, tipo: 'warning' });
+            }
+            document.getElementById('qty-' + idx).textContent = d.cantidad;
+            saveCarrito(carrito);
+        } else {
+            avisoAccion({ mensaje: d.error || 'No se pudo actualizar la cantidad.', tipo: 'error' });
+        }
+    })
+    .catch(() => {
+        // Fallback sin backend: ajustar localmente
+        carrito[idx].cantidad = nueva;
+        saveCarrito(carrito);
+    });
 }
 function eliminarItem(idx) {
     const carrito = getCarrito();
@@ -540,6 +501,50 @@ let metodoPago = null, tipoComprobante = null, razonSocialActual = '', nombreCom
 async function abrirModalPago() {
     const carrito = getCarrito();
     if (carrito.length === 0) return;
+
+    // ── Revalidación de stock antes de abrir el modal (paso 1) ──
+    const ids = carrito.map(i => i.id);
+    if (ids.length > 0) {
+        try {
+            const resp = await fetch('/carrito/precios', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-CSRFToken': CSRF_TOKEN },
+                body: JSON.stringify({ ids: ids })
+            });
+            const d = await resp.json();
+            if (d.ok && d.precios) {
+                let huboCambios = false;
+                carrito.forEach(it => {
+                    const pv = d.precios[it.id];
+                    if (pv) {
+                        const stockMax = pv.stock || 0;
+                        if (it.cantidad > stockMax) {
+                            it.cantidad = stockMax > 0 ? stockMax : 0;
+                            huboCambios = true;
+                        }
+                        it.stock = stockMax;
+                    }
+                });
+                // Eliminar items con stock 0
+                const filtrado = carrito.filter(i => (i.cantidad || 0) > 0);
+                if (filtrado.length !== carrito.length) {
+                    saveCarrito(filtrado);
+                    huboCambios = true;
+                } else if (huboCambios) {
+                    saveCarrito(carrito);
+                }
+                if (huboCambios) {
+                    await avisoAccion({
+                        mensaje: 'Algunas cantidades se ajustaron al stock disponible.',
+                        tipo: 'warning'
+                    });
+                }
+            }
+        } catch (e) {
+            // Si falla la revalidación, seguimos igual (el backend valida al confirmar)
+        }
+    }
+
     // Verificar si está logueado; si no, redirigir al login
     {% if not session.usuario_id or session.rol != 'cliente' %}
     const irLogin = await confirmarAccion({
@@ -580,26 +585,11 @@ function seleccionarMetodo(m) {
     metodoPago = m;
     document.getElementById('btnTarjeta').classList.toggle('seleccionado', m === 'tarjeta');
     document.getElementById('btnYape').classList.toggle('seleccionado', m === 'yape');
-    document.getElementById('formTarjeta').style.display = m === 'tarjeta' ? 'block' : 'none';
-    document.getElementById('formYape').style.display = m === 'yape' ? 'block' : 'none';
     document.getElementById('btnSiguiente1').disabled = false;
-    // actualizar monto yape
-    const total = getCarrito().reduce((s, i) => s + i.precio * i.cantidad, 0);
-    document.getElementById('montoYape').textContent = 'S/ ' + total.toFixed(2);
 }
 
 function irPaso2() {
     if (!metodoPago) return;
-    if (metodoPago === 'tarjeta') {
-        const num = document.getElementById('numTarjeta').value.replace(/\s/g,'');
-        const nom = document.getElementById('nomTarjeta').value.trim();
-        const venc = document.getElementById('vencTarjeta').value;
-        const cvv = document.getElementById('cvvTarjeta').value;
-        if (num.length < 16 || !nom || venc.length < 5 || cvv.length < 3) {
-            avisoAccion({ mensaje: 'Por favor completa todos los datos de la tarjeta.', tipo: 'error' });
-            return;
-        }
-    }
     irPaso(2);
 }
 
@@ -658,7 +648,7 @@ document.addEventListener('DOMContentLoaded', function() {
                             const condicion = d.condicion || '';
                             document.getElementById('rucEstado').innerHTML =
                                 `<span style="color:${estado.toLowerCase().includes('activo') ? '#28a745' : '#dc3545'};font-weight:600">
-                                    ${estado}${condicion ? ' · ' + condicion : ''}
+                                    ${esc(estado)}${condicion ? ' · ' + esc(condicion) : ''}
                                 </span>`;
                             rucDatos.style.display = 'block';
                             rucError.style.display = 'none';
@@ -756,15 +746,15 @@ function irPaso3() {
         <div class="mb-2"><strong>Método de pago:</strong> ${metodoLabel}</div>
         <div class="mb-2"><strong>Comprobante:</strong> ${compLabel}`;
     if (tipoComprobante === 'factura' && ruc) {
-        html += ` – RUC: ${ruc}`;
-        if (razonSocialActual) html += `<br><span style="font-size:0.85rem;color:#555">${razonSocialActual}</span>`;
+        html += ` – RUC: ${esc(ruc)}`;
+        if (razonSocialActual) html += `<br><span style="font-size:0.85rem;color:#555">${esc(razonSocialActual)}</span>`;
     }
     if (tipoComprobante === 'boleta_electronica' && dni) {
-        html += ` – DNI: ${dni}`;
-        if (nombreCompletoDni) html += `<br><span style="font-size:0.85rem;color:#555">${nombreCompletoDni}</span>`;
+        html += ` – DNI: ${esc(dni)}`;
+        if (nombreCompletoDni) html += `<br><span style="font-size:0.85rem;color:#555">${esc(nombreCompletoDni)}</span>`;
     }
     html += `</div><div class="mb-2"><strong>Productos:</strong></div><ul style="margin:0;padding-left:18px">`;
-    carrito.forEach(i => { html += `<li>${i.nombre} × ${i.cantidad} = S/ ${(i.precio * i.cantidad).toFixed(2)}</li>`; });
+    carrito.forEach(i => { html += `<li>${esc(i.nombre)} × ${i.cantidad} = S/ ${(i.precio * i.cantidad).toFixed(2)}</li>`; });
     html += `</ul><div class="mt-2 fw-bold" style="font-size:1rem;color:var(--naranja)">TOTAL: S/ ${total.toFixed(2)}</div>`;
     document.getElementById('resumenConfirmar').innerHTML = html;
     irPaso(3);
@@ -775,9 +765,12 @@ function confirmarPedidoFinal() {
     if (carrito.length === 0) return;
     const ruc = document.getElementById('inputRuc') ? document.getElementById('inputRuc').value.trim() : '';
     const dni = document.getElementById('inputDni') ? document.getElementById('inputDni').value.trim() : '';
-    const numOp = document.getElementById('numOperacion') ? document.getElementById('numOperacion').value.trim() : '';
     // Validar RUC si es factura
     if (!validarRucFactura(ruc)) return;
+    // Bloquear el botón al primer clic para evitar peticiones duplicadas.
+    // Se reactiva solo si la respuesta es un error (para poder reintentar).
+    const btnConfirmar = document.getElementById('btnConfirmarPedido');
+    if (btnConfirmar) btnConfirmar.disabled = true;
     fetch('/carrito/confirmar_v2', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -787,7 +780,6 @@ function confirmarPedidoFinal() {
             tipo_comprobante: tipoComprobante,
             ruc: ruc,
             dni: dni,
-            num_operacion: numOp,
             csrf_token: CSRF_TOKEN
         })
     })
@@ -826,30 +818,13 @@ function confirmarPedidoFinal() {
             } else {
                 await avisoAccion({ mensaje: 'Error al procesar el pedido: ' + (d.error || 'intenta de nuevo'), tipo: 'error', persistente: true });
             }
+            if (btnConfirmar) btnConfirmar.disabled = false;
         }
     })
     .catch(async () => {
         await avisoAccion({ mensaje: 'Error de conexión. Intenta de nuevo.', tipo: 'error', persistente: true });
+        if (btnConfirmar) btnConfirmar.disabled = false;
     });
-}
-
-// Formateo tarjeta
-function formatCard(input) {
-    let v = input.value.replace(/\D/g,'').substring(0,16);
-    input.value = v.replace(/(.{4})/g,'$1 ').trim();
-    // Update card preview
-    const prev = document.getElementById('previewNum');
-    if (prev) {
-        const digits = v.padEnd(16,'•');
-        prev.textContent = digits.substring(0,4) + ' ' + digits.substring(4,8) + ' ' + digits.substring(8,12) + ' ' + digits.substring(12,16);
-    }
-}
-function formatExpiry(input) {
-    let v = input.value.replace(/\D/g,'').substring(0,4);
-    if (v.length >= 3) v = v.substring(0,2) + '/' + v.substring(2);
-    input.value = v;
-    const prev = document.getElementById('previewVenc');
-    if (prev) prev.textContent = v || 'MM/AA';
 }
 
 // Al cargar la página, los precios se refrescan SIEMPRE desde el servidor

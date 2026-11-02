@@ -19,7 +19,7 @@
    horizontal del cuerpo (sidebar fijo y contenido con margen). #}
 <nav class="admin-sidebar d-flex flex-column{% if sidebar_colapsado %} admin-sidebar-off{% endif %}" id="adminSidebar" style="background:#1a1a2e">
   <div class="p-3 border-bottom" style="border-color:#30363d!important">
-    <a href="{{ '/admin/dashboard' if session.rol == 'administrador' else '/pedidos' }}"
+    <a href="{% if session.rol == 'administrador' %}/admin/dashboard{% elif session.rol == 'vendedor' %}/inicio_personal{% else %}/pedidos{% endif %}"
        class="text-decoration-none d-flex align-items-center gap-2">
       <i class="fa fa-tools" style="color:var(--naranja);font-size:1.4rem"></i>
       <span class="fw-bold text-white" style="font-size:0.95rem">CLEOFERR Admin</span>
@@ -33,42 +33,62 @@
   </div>
 
   <div class="flex-grow-1 py-2 admin-sidebar-scroll">
+    {# Cada módulo se muestra SOLO si la sesión tiene su permiso: #}
+    {# tiene_permiso() es False para clientes y True siempre para admin. #}
     {% if session.rol == 'administrador' %}
     <a href="/admin/dashboard" class="sidebar-item {{ 'activo' if seccion_activa == 'dashboard' else '' }}">
       <i class="fa fa-chart-line me-2"></i>Dashboard
     </a>
     {% endif %}
+    {% if tiene_permiso('productos') %}
     <a href="/productos" class="sidebar-item {{ 'activo' if seccion_activa == 'productos' else '' }}">
       <i class="fa fa-box me-2"></i>Productos
     </a>
+    {% endif %}
+    {% if tiene_permiso('ofertas') %}
     <a href="/admin/ofertas" class="sidebar-item {{ 'activo' if seccion_activa == 'ofertas' else '' }}">
       <i class="fa fa-tags me-2"></i>Ofertas
     </a>
+    {% endif %}
+    {% if tiene_permiso('pedidos') %}
     <a href="/pedidos" class="sidebar-item {{ 'activo' if seccion_activa == 'pedidos' else '' }}">
       <i class="fa fa-shopping-cart me-2"></i>Pedidos
     </a>
+    {% endif %}
+    {% if tiene_permiso('clientes') %}
     <a href="/clientes" class="sidebar-item {{ 'activo' if seccion_activa == 'clientes' else '' }}">
       <i class="fa fa-users me-2"></i>Clientes
     </a>
+    {% endif %}
+    {% if tiene_permiso('proveedores') %}
     <a href="/proveedores" class="sidebar-item {{ 'activo' if seccion_activa == 'proveedores' else '' }}">
       <i class="fa fa-truck me-2"></i>Proveedores
     </a>
+    {% endif %}
+    {% if tiene_permiso('inventario') %}
     <a href="/inventario" class="sidebar-item {{ 'activo' if seccion_activa == 'inventario' else '' }}">
       <i class="fa fa-warehouse me-2"></i>Inventario
     </a>
+    {% endif %}
+    {% if tiene_permiso('alertas') %}
     <a href="/alertas" class="sidebar-item {{ 'activo' if seccion_activa == 'alertas' else '' }}">
       <i class="fa fa-bell me-2"></i>Alertas
       {% if alertas_pendientes and alertas_pendientes > 0 %}
       <span class="badge bg-danger ms-auto">{{ alertas_pendientes }}</span>
       {% endif %}
     </a>
+    {% endif %}
+    {% if tiene_permiso('reportes') %}
     <a href="/reportes" class="sidebar-item {{ 'activo' if seccion_activa == 'reportes' else '' }}">
       <i class="fa fa-file-alt me-2"></i>Reportes
     </a>
+    {% endif %}
     <div class="sidebar-separator"></div>
+    {% if tiene_permiso('ventas') %}
     <a href="/caja" class="sidebar-item {{ 'activo' if seccion_activa == 'caja' else '' }}">
       <i class="fa fa-cash-register me-2"></i>Caja
     </a>
+    {% endif %}
     {% if session.rol == 'administrador' %}
     <a href="/admin/pagos_simulados" class="sidebar-item {{ 'activo' if seccion_activa == 'pagos_simulados' else '' }}">
       <i class="fa fa-flask me-2"></i>Pagos simulados
@@ -78,6 +98,9 @@
       {% if reservas_vencidas and reservas_vencidas > 0 %}
       <span class="badge bg-danger ms-auto">{{ reservas_vencidas }}</span>
       {% endif %}
+    </a>
+    <a href="/admin/usuarios" class="sidebar-item {{ 'activo' if seccion_activa == 'usuarios' else '' }}">
+      <i class="fa fa-users-cog me-2"></i>Usuarios
     </a>
     {% endif %}
   </div>

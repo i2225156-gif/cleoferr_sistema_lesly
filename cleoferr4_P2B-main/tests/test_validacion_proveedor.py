@@ -108,7 +108,7 @@ def test_contacto_vacio_permitido(fx):
 
 def test_telefono_excesivo_rechazado(fx):
     html = _guardar(fx, telefono='9' * 21)
-    assert 'no puede superar 20 caracteres' in html
+    assert 'El teléfono solo debe contener números (7 a 9 dígitos).' in html
 
 
 def test_direccion_excesiva_rechazada(fx):

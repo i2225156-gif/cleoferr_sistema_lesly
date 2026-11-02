@@ -83,7 +83,9 @@ def fx(monkeypatch):
     capturas = []
 
     def _correo_mock(destino, asunto, cuerpo_html, cuerpo_texto=None):
-        capturas.append({'destino': destino, 'asunto': asunto})
+        capturas.append({'destino': destino, 'asunto': asunto,
+                         'cuerpo_html': cuerpo_html,
+                         'cuerpo_texto': cuerpo_texto or ''})
         return 'ok'
 
     monkeypatch.setattr(modulo_app, 'enviar_correo', _correo_mock)
@@ -107,9 +109,10 @@ def _post(c, ruta, **campos):
 
 
 def _codigo_de(fx):
+    """El OTP viaja en el CUERPO del correo, nunca en el asunto."""
     assert fx['capturas'], 'el mock del correo no capturó nada'
-    m = re.search(r'\b(\d{6})\b', fx['capturas'][-1]['asunto'])
-    assert m, fx['capturas'][-1]['asunto']
+    m = re.search(r'\b(\d{6})\b', fx['capturas'][-1]['cuerpo_texto'])
+    assert m, fx['capturas'][-1]['cuerpo_texto']
     return m.group(1)
 
 
@@ -126,7 +129,9 @@ def test_login_staff_correcto(fx):
     c = _cliente()
     r = _post(c, '/login', correo=CORREO_STAFF, clave=CLAVE)
     assert r.status_code == 302
-    assert '/productos' in r.headers['Location']
+    # El personal aterriza en /inicio_personal (la ruta que decide a donde
+    # va segun su rol y sus permisos), no en una pantalla fija.
+    assert '/inicio_personal' in r.headers['Location']
     with c.session_transaction() as s:
         assert s['rol'] == 'vendedor'
         assert s['usuario_id'] is not None

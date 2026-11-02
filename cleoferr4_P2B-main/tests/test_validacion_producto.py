@@ -10,6 +10,8 @@ db.session de SQLAlchemy y no se podían testear sin persistir (el
 precedente de test_productos_eliminar dejaba el alta/edición 'cubierta
 por revisión'). También cubre las páginas 404/500 sin detalles técnicos.
 """
+import io
+
 import psycopg2
 import psycopg2.extras
 import pytest
@@ -223,6 +225,55 @@ def test_actualizar_inexistente_da_404(fx):
     r = fx['c'].post('/productos/actualizar/999999',
                      data={'nombre': 'x', 'precio': '1', 'stock': '1'})
     assert r.status_code == 404
+
+
+# ── almacenamiento de imágenes no disponible ─────────────────────
+
+def _fallar_guardado_en_disco(monkeypatch):
+    def sin_disco(self, destino):
+        raise OSError('disco de solo lectura')
+    monkeypatch.setattr('werkzeug.datastructures.FileStorage.save', sin_disco)
+
+
+def test_alta_con_error_de_disco_guarda_producto_sin_imagen(fx, monkeypatch):
+    _fallar_guardado_en_disco(monkeypatch)
+    nombre = 'Testf2 Sin disco'
+    r = fx['c'].post('/productos/guardar', data={
+        'nombre': nombre, 'precio': '10.50', 'stock': '5',
+        'descripcion': '', 'estado': 'activo',
+        'imagen': (io.BytesIO(b'imagen sintetica'), 'producto.png'),
+    }, follow_redirects=True)
+
+    assert r.status_code == 200
+    html = r.get_data(as_text=True)
+    assert 'El producto se guardará sin imagen nueva' in html
+    fx['cur'].execute(
+        "SELECT imagen FROM producto WHERE nombre = %s", (nombre,))
+    assert fx['cur'].fetchone()['imagen'] is None
+
+
+def test_edicion_con_error_de_disco_conserva_imagen_anterior(fx, monkeypatch):
+    fx['cur'].execute("""
+        INSERT INTO producto (nombre, precio, stock, imagen)
+        VALUES ('Testf2 Imagen original', 9.99, 3, 'anterior.png')
+        RETURNING id_producto
+    """)
+    pid = fx['cur'].fetchone()['id_producto']
+    _fallar_guardado_en_disco(monkeypatch)
+
+    r = fx['c'].post(f'/productos/actualizar/{pid}', data={
+        'nombre': 'Testf2 Imagen editada', 'precio': '12', 'stock': '7',
+        'descripcion': '', 'estado': 'activo',
+        'imagen': (io.BytesIO(b'imagen sintetica'), 'nueva.png'),
+    }, follow_redirects=True)
+
+    assert r.status_code == 200
+    assert 'El producto se guardará sin imagen nueva' in r.get_data(as_text=True)
+    fx['cur'].execute(
+        "SELECT nombre, imagen FROM producto WHERE id_producto = %s", (pid,))
+    fila = fx['cur'].fetchone()
+    assert fila['nombre'] == 'Testf2 Imagen editada'
+    assert fila['imagen'] == 'anterior.png'
 
 
 # ── páginas de error sin detalles técnicos ───────────────────────

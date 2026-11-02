@@ -95,5 +95,49 @@
       {% endif %}
     </div>
   </div>
+
+  <!-- Pagos pendientes de verificación por la administradora (Yape, Plin, Transferencia) -->
+  <div class="card shadow-sm mt-4" style="border-radius:12px">
+    <div class="card-body">
+      <h6 class="fw-bold mb-3"><i class="fa fa-bank me-2"></i>Pagos pendientes de verificación</h6>
+      <p class="text-muted small mb-3">
+        Los pagos por Yape, Plin y Transferencia quedan aquí hasta que confirma
+        o rechaza la operación.
+      </p>
+      {% if pagos_pendientes_verificacion %}
+      <div class="table-responsive">
+        <table class="table table-sm table-hover align-middle mb-0">
+          <thead>
+            <tr>
+              <th>Venta</th><th>Método</th><th>Monto</th><th>Código / Nro. operación</th><th>Acciones</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for t in pagos_pendientes_verificacion %}
+            <tr>
+              <td>#{{ t.id_venta }}</td>
+              <td><span class="badge bg-info">{{ (t.metodo_pago or 'transferencia')|upper }}</span></td>
+              <td>S/ {{ '%.2f'|format(t.monto|float) }}</td>
+              <td>{{ t.codigo_operacion or t.numero_operacion or '–' }}</td>
+              <td>
+                <form method="POST" action="/admin/pagos_simulados/pago/{{ t.id_pago }}/confirmar" class="d-inline" onsubmit="return confirm('¿Confirmar este pago?');">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                  <button type="submit" class="btn btn-success btn-sm">Confirmar</button>
+                </form>
+                <form method="POST" action="/admin/pagos_simulados/pago/{{ t.id_pago }}/rechazar" class="d-inline" onsubmit="return confirm('¿Rechazar este pago?');">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                  <button type="submit" class="btn btn-danger btn-sm">Rechazar</button>
+                </form>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <p class="text-muted mb-0">No hay pagos pendientes de verificación.</p>
+      {% endif %}
+    </div>
+  </div>
 </div>
 {% endblock %}

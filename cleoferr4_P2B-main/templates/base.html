@@ -84,6 +84,19 @@
             gap: 8px;
         }
 
+        @media (max-width: 991.98px) {
+            .navbar-cleoferr .nav-menu,
+            .navbar-cleoferr .nav-user {
+                flex-direction: column;
+                align-items: stretch;
+                margin: 0.75rem 0 0 !important;
+            }
+            .navbar-cleoferr .nav-user > span { text-align: center; }
+            .navbar-cleoferr .nav-link-custom,
+            .navbar-cleoferr .btn-nav { display: block; text-align: center; }
+            .navbar-cleoferr #btnTema { margin-left: 0; }
+        }
+
         .badge-rol {
             background: var(--azul);
             color: white;
@@ -229,6 +242,7 @@
         body.dark-mode .dropdown-menu { background: #161b22; border-color: #30363d; }
         body.dark-mode .dropdown-item { color: #c9d1d9; }
         body.dark-mode .dropdown-item:hover { background: #21262d; }
+        body.dark-mode .navbar-cleoferr .btn-nav { color: #fff; border-color: rgba(255,255,255,0.6); }
         body.dark-mode input, body.dark-mode textarea, body.dark-mode select { color: #c9d1d9; }
 
         /* Botón dark/light */
@@ -338,7 +352,7 @@
 <body>
 
 {% block navbar %}
-<nav class="navbar navbar-cleoferr navbar-expand-lg">
+<nav class="navbar navbar-cleoferr navbar-expand-lg navbar-dark">
   <div class="container-fluid">
     <a class="navbar-brand-custom" href="{% if session.rol == 'cliente' %}/catalogo{% else %}/productos{% endif %}">
       <div align="center">
@@ -349,6 +363,14 @@
       </div>
     </a>
 
+        {% if session.usuario_id %}
+        <button class="navbar-toggler" type="button" data-bs-toggle="collapse"
+                data-bs-target="#navbarCleoferr" aria-controls="navbarCleoferr"
+                aria-expanded="false" aria-label="Abrir menú de navegación">
+            <span class="navbar-toggler-icon"></span>
+        </button>
+        {% endif %}
+        <div class="collapse navbar-collapse" id="navbarCleoferr">
         {% if session.usuario_id and session.rol != 'cliente' %}
         <div class="nav-menu mx-3">
             <a class="nav-link-custom {% if request.path == '/productos' %}active{% endif %}" href="/productos">
@@ -378,6 +400,11 @@
                 <i class="fa fa-user me-1"></i>{{ session.nombre }}
             </span>
             <span class="badge-rol">{{ session.rol }}</span>
+            {% if session.rol == 'cliente' %}
+            <a class="btn-nav" id="enlace-mi-perfil" href="/perfil">
+                <i class="fa fa-user-circle me-1"></i>Mi perfil
+            </a>
+            {% endif %}
             <a class="btn-nav" href="/cambiar_clave">
                 <i class="fa fa-key me-1"></i>Clave
             </a>
@@ -389,9 +416,24 @@
             </a>
         </div>
         {% endif %}
+        </div>
     </div>
 </nav>
 {% endblock %}
+
+<script>
+// Escape de texto libre para innerHTML (UNA sola función para todas las
+// páginas): los nombres de producto/cliente y cualquier dato del usuario
+// NUNCA se interpolan crudos en un innerHTML.
+function esc(texto) {
+    const s = String(texto === undefined || texto === null ? '' : texto);
+    return s.replace(/&/g, '&' + 'amp;')
+            .replace(/</g, '&' + 'lt;')
+            .replace(/>/g, '&' + 'gt;')
+            .replace(/"/g, '&' + 'quot;')
+            .replace(/'/g, '&' + '#39;');
+}
+</script>
 
 <div class="container-fluid px-4 py-3">
 

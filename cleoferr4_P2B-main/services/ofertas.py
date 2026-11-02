@@ -126,7 +126,7 @@ def precios_vigentes(cursor, ids):
     if not ids:
         return {}
     sql = f"""
-        SELECT p.id_producto, p.precio,
+        SELECT p.id_producto, p.precio, p.stock,
                of.id_oferta, of.tipo, of.valor,
                COALESCE(of.descuento_unitario, 0) AS descuento_unitario,
                p.precio - COALESCE(of.descuento_unitario, 0) AS precio_final

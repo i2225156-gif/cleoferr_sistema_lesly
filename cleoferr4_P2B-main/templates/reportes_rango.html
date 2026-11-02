@@ -1,0 +1,94 @@
+{% extends 'admin_base.html' %}
+{% set seccion_activa = 'reportes' %}
+{% block titulito %}Reporte por rango – Cleoferr{% endblock %}
+{% block admin_contenido %}
+{% from 'components/paginacion.html' import paginacion %}
+
+<div class="page-header">
+    <div>
+        <h2><i class="fa fa-chart-line me-2"></i>REPORTE POR RANGO</h2>
+        <p>
+            {{ tipo_nombre }} del {{ desde.strftime('%d/%m/%Y') }} al
+            {{ hasta.strftime('%d/%m/%Y') }} (día calendario Perú).
+        </p>
+    </div>
+    <div class="d-flex gap-2">
+        <a href="/reportes/rango/exportar?tipo={{ tipo }}&desde={{ desde.strftime('%Y-%m-%d') }}&hasta={{ hasta.strftime('%Y-%m-%d') }}" class="btn btn-outline-secondary"><i class="fa fa-file-export me-1"></i>Exportar (Excel)</a>
+        <a href="/reportes" class="btn btn-outline-secondary"><i class="fa fa-arrow-left me-1"></i>Panel</a>
+    </div>
+</div>
+
+<form method="GET" action="/reportes/generar" class="row g-3 mb-3">
+    <div class="col-md-3">
+        <label class="form-label fw-semibold">Tipo de reporte</label>
+        <select name="tipo" class="form-select">
+            {% for t in tipos %}
+            <option value="{{ t }}"{{ ' selected' if t == tipo }}>{{ nombres_tipo.get(t, t) }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div class="col-md-3">
+        <label class="form-label fw-semibold">Fecha desde</label>
+        <input type="date" name="desde" class="form-control" value="{{ desde.strftime('%Y-%m-%d') }}">
+    </div>
+    <div class="col-md-3">
+        <label class="form-label fw-semibold">Fecha hasta</label>
+        <input type="date" name="hasta" class="form-control" value="{{ hasta.strftime('%Y-%m-%d') }}">
+    </div>
+    <div class="col-md-3 d-flex align-items-end">
+        <button class="btn btn-naranja"><i class="fa fa-chart-line me-1"></i>Generar</button>
+    </div>
+</form>
+
+{% if aviso %}
+<div class="alert alert-warning" id="aviso-reporte"><i class="fa fa-exclamation-triangle me-1"></i>{{ aviso }}</div>
+{% endif %}
+
+<div class="card card-custom">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <span><i class="fa fa-table me-2"></i>{{ tipo_nombre }}</span>
+        <span class="badge bg-secondary">{{ total }} registro(s)</span>
+    </div>
+    <div class="card-body">
+        {% if resumen %}
+        <div class="row g-3 mb-3" id="resumen-reporte">
+            {% for r in resumen %}
+            <div class="col-md-3">
+                <div class="stat-value" data-resumen="{{ r.clave }}">{{ r.valor }}</div>
+                <div class="stat-label">{{ r.label }}</div>
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+        {% if filas %}
+        <div class="table-responsive">
+            <table class="table table-custom table-hover mb-0" id="tabla-reporte">
+                <thead>
+                    <tr>
+                        {% for h in headers %}
+                        <th>{{ h }}</th>
+                        {% endfor %}
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for fila in filas %}
+                    <tr class="fila-reporte">
+                        {% for celda in fila %}
+                        <td>{{ celda }}</td>
+                        {% endfor %}
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {{ paginacion(pagina, total, por_pagina, filtros_qs) }}
+        {% else %}
+        <p class="text-muted mb-0" id="reporte-vacio">
+            <i class="fa fa-inbox me-1"></i>
+            Sin datos en el rango seleccionado.
+        </p>
+        {% endif %}
+    </div>
+</div>
+
+{% endblock %}

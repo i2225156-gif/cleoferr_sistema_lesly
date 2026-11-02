@@ -22,7 +22,7 @@
                 <div class="col-md-2">
                     <label class="form-label fw-semibold">Tipo</label>
                     <select name="tipo" class="form-select" id="tipoSelect" required>
-                        <option value="entrada">📦 Entrada</option>
+                        <option value="entrada"{% if producto_preseleccionado %} selected{% endif %}>📦 Entrada</option>
                         <option value="salida">📤 Salida</option>
                     </select>
                 </div>
@@ -31,7 +31,7 @@
                     <select name="id_producto" class="form-select" required>
                         <option value="">-- Seleccionar --</option>
                         {% for p in productos %}
-                            <option value="{{ p.id_producto }}">{{ p.nombre }} (Stock: {{ p.stock }})</option>
+                            <option value="{{ p.id_producto }}"{% if p.id_producto == producto_preseleccionado %} selected{% endif %}>{{ p.nombre }} (Stock: {{ p.stock }})</option>
                         {% endfor %}
                     </select>
                 </div>
@@ -87,7 +87,7 @@
             <div><i class="fa fa-history me-2"></i>Historial de Movimientos <span class="badge bg-secondary ms-2">{{ total }}</span></div>
             <div class="d-flex gap-2">
                 <a href="/reportes/inventario/exportar" class="btn btn-outline-secondary btn-sm"><i class="fa fa-file-export me-1"></i>Exportar</a>
-                <a href="/reportes/inventario" class="btn btn-outline-info btn-sm"><i class="fa fa-chart-line me-1"></i>Ver reportes</a>
+                <a href="/reportes" class="btn btn-outline-info btn-sm"><i class="fa fa-chart-line me-1"></i>Ver reportes</a>
             </div>
         </div>
     </div>

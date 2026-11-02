@@ -1,0 +1,109 @@
+{% extends 'admin_base.html' %}
+{% set seccion_activa = 'usuarios' %}
+{% block titulito %}Usuarios y permisos – Cleoferr{% endblock %}
+
+{% block admin_contenido %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <h4 class="fw-bold mb-0"><i class="fa fa-users-cog me-2"></i>Usuarios y permisos del personal</h4>
+</div>
+
+<div class="alert alert-light border" style="font-size:0.82rem">
+  <i class="fa fa-shield-alt me-1" style="color:var(--naranja)"></i>
+  Las casillas activan los <strong>módulos</strong> de cada vendedor y rigen
+  <strong>de inmediato</strong> (no hay caché). Dashboard, pagos simulados,
+  reservas, los borrados y esta misma pantalla son
+  <strong>solo del administrador</strong>: no se pueden asignar.
+</div>
+
+{% if not personal %}
+<div class="card shadow-sm" style="border-radius:12px">
+  <div class="card-body">
+    <p class="text-muted mb-0">No hay cuentas de personal registradas.</p>
+  </div>
+</div>
+{% endif %}
+
+{% for u in personal %}
+{% set etiquetas = {'activo': 'Activo', 'bloqueado': 'Bloqueado',
+                    'inactivo': 'Desactivado'} %}
+{% set clases = {'activo': 'bg-success', 'bloqueado': 'bg-danger',
+                 'inactivo': 'bg-secondary'} %}
+<div class="card shadow-sm mb-3" style="border-radius:12px">
+  <div class="card-body">
+    <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
+      <div>
+        <div class="fw-bold" style="color:var(--gris-oscuro)">{{ u.email }}</div>
+        <div class="text-muted" style="font-size:0.8rem">
+          #{{ u.id_usuario }} · Rol: {{ u.rol|capitalize }} ·
+          Estado: <span class="badge {{ clases[u.estado] }}">{{ etiquetas[u.estado] }}</span> ·
+          Intentos fallidos: {{ u.intentos_fallidos }}
+          {% if u.bloqueado_hasta %}
+          · Bloqueado hasta: {{ u.bloqueado_hasta.strftime('%d/%m/%Y %H:%M') }}
+          {% endif %}
+        </div>
+      </div>
+      <div class="d-flex gap-2 flex-wrap">
+        {% if u.activo %}
+        <form method="POST" action="/admin/usuarios/{{ u.id_usuario }}/estado"
+              class="d-inline"
+              data-confirm="¿Desactivar esta cuenta? El usuario no podrá iniciar sesión."
+              data-confirm-titulo="Desactivar usuario"
+              data-confirm-tipo="peligro">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="accion" value="desactivar">
+          <button class="btn btn-sm btn-outline-warning">Desactivar</button>
+        </form>
+        {% else %}
+        <form method="POST" action="/admin/usuarios/{{ u.id_usuario }}/estado"
+              class="d-inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="accion" value="activar">
+          <button class="btn btn-sm btn-outline-success">Activar</button>
+        </form>
+        {% endif %}
+        {% if u.estado == 'bloqueado' or u.intentos_fallidos > 0 %}
+        <form method="POST" action="/admin/usuarios/{{ u.id_usuario }}/desbloquear"
+              class="d-inline"
+              data-confirm="¿Desbloquear esta cuenta? Se borran los intentos fallidos."
+              data-confirm-titulo="Desbloquear usuario">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button class="btn btn-sm btn-outline-primary">Desbloquear</button>
+        </form>
+        {% endif %}
+      </div>
+    </div>
+
+    {% if u.es_admin %}
+    <div class="alert alert-secondary mt-3 mb-0" style="font-size:0.8rem">
+      <i class="fa fa-user-shield me-1"></i>
+      Acceso completo: un administrador dispone de todos los módulos, por eso
+      sus casillas no se editan aquí.
+    </div>
+    {% else %}
+    <form method="POST" action="/admin/usuarios/{{ u.id_usuario }}/permisos"
+          class="mt-3">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="fw-semibold mb-2" style="font-size:0.85rem">Módulos asignados</div>
+      <div class="row g-2">
+        {% for clave, etiqueta in catalogo.items() %}
+        <div class="col-6 col-md-3">
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" name="permisos"
+                   id="perm_{{ u.id_usuario }}_{{ clave }}"
+                   value="{{ clave }}"
+                   {% if clave in u.permisos %}checked{% endif %}>
+            <label class="form-check-label" for="perm_{{ u.id_usuario }}_{{ clave }}"
+                   style="font-size:0.85rem">{{ etiqueta }}</label>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+      <button class="btn btn-sm btn-naranja fw-bold mt-3">
+        <i class="fa fa-save me-1"></i>Guardar módulos
+      </button>
+    </form>
+    {% endif %}
+  </div>
+</div>
+{% endfor %}
+{% endblock %}

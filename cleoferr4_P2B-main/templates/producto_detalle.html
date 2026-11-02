@@ -35,7 +35,7 @@
     <div class="col-md-4">
         <div class="card card-custom text-center p-4">
             {% if producto.imagen %}
-                <img src="{{ url_for('static', filename='img/' ~ producto.imagen) }}"
+                <img src="{{ producto.imagen if producto.imagen.startswith('http') else url_for('static', filename='img/' ~ producto.imagen) }}"
                      class="detalle-img mx-auto" alt="{{ producto.nombre }}">
             {% else %}
                 <div class="detalle-img-placeholder mx-auto">

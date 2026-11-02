@@ -30,6 +30,11 @@
                     </div>
                     <div class="flex-grow-1">
                         <h6 class="fw-bold mb-1">{{ p.nombre }}</h6>
+                        {% if p.tipo_documento and p.numero_documento %}
+                        <p class="mb-1 small"><i class="fa fa-id-card me-1"></i>{{ p.tipo_documento }} {{ p.numero_documento }}</p>
+                        {% else %}
+                        <p class="mb-1"><span class="badge bg-secondary text-white small">Sin documento</span></p>
+                        {% endif %}
                         {% if p.contacto %}<p class="mb-1 text-muted small"><i class="fa fa-user me-1"></i>{{ p.contacto }}</p>{% endif %}
                         {% if p.telefono %}<p class="mb-1 text-muted small"><i class="fa fa-phone me-1"></i>{{ p.telefono }}</p>{% endif %}
                         {% if p.email %}<p class="mb-1 text-muted small"><i class="fa fa-envelope me-1"></i>{{ p.email }}</p>{% endif %}
@@ -46,6 +51,7 @@
                           data-confirm-titulo="Eliminar proveedor"
                           data-confirm-tipo="peligro"
                           data-confirm-aceptar="Eliminar">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                         <button type="submit" class="btn btn-sm btn-outline-danger" title="Eliminar">
                             <i class="fa fa-trash"></i>
                         </button>

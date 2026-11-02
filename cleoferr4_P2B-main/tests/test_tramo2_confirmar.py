@@ -65,6 +65,13 @@ def _estado_venta(cur, id_venta):
     return cur.fetchone()['estado']
 
 
+def _stock_venta(cur, id_venta):
+    cur.execute("""SELECT p.id_producto, p.stock FROM producto p
+                     JOIN detalle_venta d ON d.id_producto = p.id_producto
+                    WHERE d.id_venta = %s ORDER BY p.id_producto""", (id_venta,))
+    return [(f['id_producto'], f['stock']) for f in cur.fetchall()]
+
+
 def _auditoria(cur, cond="TRUE"):
     cur.execute(f"SELECT COUNT(*) AS n FROM auditoria WHERE {cond}")
     return cur.fetchone()['n']
@@ -108,11 +115,14 @@ def test_pago_aprobado_sobre_venta_cancelada_no_resucita(fx):
     cur.execute("""UPDATE venta SET id_estado_venta =
                    (SELECT id_estado_venta FROM estado_venta WHERE nombre='cancelado')
                    WHERE id_venta = %s""", (fx['id_venta'],))
+    stock_antes = _stock_venta(cur, fx['id_venta'])
+    aud_antes = _auditoria(cur, "accion = 'pago_sobre_venta_cancelada'")
     r = confirmar_pago(fx['id_pago'], _resultado(fx['id_transaccion']), conn=conn)
     assert r['estado'] == 'venta_cancelada'
     assert _estado_pago(cur, fx['id_pago']) == 'pendiente'
     assert _estado_venta(cur, fx['id_venta']) == 'cancelado'
-    assert _auditoria(cur, "accion = 'pago_sobre_venta_cancelada'") == 1
+    assert _stock_venta(cur, fx['id_venta']) == stock_antes
+    assert _auditoria(cur, "accion = 'pago_sobre_venta_cancelada'") == aud_antes + 1
 
 
 def test_rechazado_ya_rechazado(fx):
