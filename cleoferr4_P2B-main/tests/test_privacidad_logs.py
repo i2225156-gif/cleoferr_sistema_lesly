@@ -209,6 +209,59 @@ def test_recuperacion_contrasena_no_registra_el_correo_si_smtp_lo_rechaza(fx, mo
     assert 'No se pudo enviar el correo' in logs
 
 
+def test_registro_con_excepcion_de_correo_no_da_500_ni_registra_pii(fx, monkeypatch):
+    correo = 'registro.fallo@example.com'
+    respuesta_captcha = _captcha(fx['c'])
+    fx['conn'].cur.respuestas = [
+        {'id_tipo_documento': 1},
+        {'n': 4},
+        None,
+        {'id_cliente': 55},
+    ]
+
+    def falla_correo(*args, **kwargs):
+        raise RuntimeError('SMTP: registro.fallo@example.com Ana 987654321')
+
+    monkeypatch.setattr(modulo_app, 'enviar_correo', falla_correo)
+    r = fx['c'].post('/registro_cliente', data={
+        'csrf_token': 'token-test',
+        'nombre': 'Ana', 'apellido': 'Prueba',
+        'correo': correo, 'telefono': '987654321',
+        'tipo_documento': 'dni', 'nro_documento': '',
+        'direccion': 'Av. Prueba 123',
+        'contrasena': 'clave-123', 'confirmar': 'clave-123',
+        'acepta_privacidad': '1', 'captcha_respuesta': respuesta_captcha,
+    })
+
+    assert r.status_code == 200
+    assert 'No se pudo enviar el correo' in r.get_data(as_text=True)
+    logs = fx['caplog'].text
+    assert 'Error de envío de correo en registro_cliente' in logs
+    assert correo not in logs
+    assert 'Ana' not in logs
+    assert '987654321' not in logs
+
+
+def test_recuperacion_con_excepcion_de_correo_no_da_500_ni_registra_pii(fx, monkeypatch):
+    correo = 'recuperacion.fallo@example.com'
+    fx['conn'].cur.respuestas = [None, {'id_cliente': 66, 'nombre': 'Ana'}]
+
+    def falla_correo(*args, **kwargs):
+        raise RuntimeError('SMTP: recuperacion.fallo@example.com Ana 987654321')
+
+    monkeypatch.setattr(modulo_app, 'enviar_correo', falla_correo)
+    r = fx['c'].post('/recuperar_contrasena',
+                     data={'correo': correo, 'csrf_token': 'token-test'})
+
+    assert r.status_code == 200
+    assert 'No se pudo enviar el correo' in r.get_data(as_text=True)
+    logs = fx['caplog'].text
+    assert 'Error de envío de correo en recuperar_contrasena' in logs
+    assert correo not in logs
+    assert 'Ana' not in logs
+    assert '987654321' not in logs
+
+
 # ── la barrera global ───────────────────────────────────────────
 
 def test_el_filtro_enmascara_cualquier_correo_del_log(fx):

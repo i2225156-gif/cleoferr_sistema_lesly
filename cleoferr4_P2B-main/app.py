@@ -4665,12 +4665,16 @@ def registro_cliente():
     # En sesion solo queda el correo (el codigo vive hasheado en la BD Auth)
     session['reg_correo'] = correo
 
-    resultado = enviar_correo(
-        correo,
-        'Tu codigo de verificacion CLEOFERR',
-        _correo_html_codigo(nombre, codigo, 'Tu codigo de verificacion para crear tu cuenta es:'),
-        f"Hola {nombre},\n\nTu codigo de verificacion es: {codigo}\n\nValido por 10 minutos."
-    )
+    try:
+        resultado = enviar_correo(
+            correo,
+            'Tu codigo de verificacion CLEOFERR',
+            _correo_html_codigo(nombre, codigo, 'Tu codigo de verificacion para crear tu cuenta es:'),
+            f"Hola {nombre},\n\nTu codigo de verificacion es: {codigo}\n\nValido por 10 minutos."
+        )
+    except Exception:
+        app.logger.error("Error de envío de correo en registro_cliente.")
+        resultado = 'error'
 
     if resultado == 'smtp_no_configurado':
         return _login_cliente(
@@ -4864,12 +4868,16 @@ def recuperar_contrasena():
     finally:
         conn.close()
 
-    resultado = enviar_correo(
-        correo,
-        'Tu código de verificación - Inversiones Cleoferr',
-        _correo_html_codigo(nombre, codigo, 'Tu código para restablecer tu contraseña es:'),
-        f"Hola {nombre},\n\nTu código para recuperar tu contraseña es: {codigo}\n\nVálido por 10 minutos."
-    )
+    try:
+        resultado = enviar_correo(
+            correo,
+            'Tu código de verificación - Inversiones Cleoferr',
+            _correo_html_codigo(nombre, codigo, 'Tu código para restablecer tu contraseña es:'),
+            f"Hola {nombre},\n\nTu código para recuperar tu contraseña es: {codigo}\n\nVálido por 10 minutos."
+        )
+    except Exception:
+        app.logger.error("Error de envío de correo en recuperar_contrasena.")
+        resultado = 'error'
     if resultado == 'smtp_no_configurado':
         return render_template('recuperar_contrasena.html',
                                error=('El envío de correos no está configurado en el servidor. '
