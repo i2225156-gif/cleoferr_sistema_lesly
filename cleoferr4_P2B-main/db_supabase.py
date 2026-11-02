@@ -18,21 +18,55 @@ from sqlalchemy import create_engine
 
 load_dotenv()
 
-# B0: QueuePool en el cliente. El host de este proyecto es el pooler de Supabase
-# en modo SESIÓN (puerto 5432), que tolera conexiones persistentes. El error
+# B0: dos políticas de pool según el entorno.
+#
+# Local: QueuePool. El host de este proyecto es el pooler de Supabase en modo
+# SESIÓN (puerto 5432), que tolera conexiones persistentes. El error
 # "set_session cannot be used inside a transaction" que motivó NullPool se evita
 # con el rollback defensivo de _CompatConnection.close() antes de devolver la
 # conexión al pool, junto con pool_pre_ping.
-from sqlalchemy.pool import QueuePool
+#
+# Serverless (Vercel): NullPool. Cada invocación es efímera y la plataforma
+# escala instancias en paralelo; conservar conexiones multiplicaría el consumo
+# del pooler de Supabase hasta agotar sus límites. NullPool abre una conexión
+# por operación y la cierra al terminar.
+from sqlalchemy.pool import NullPool, QueuePool
 
-_ENGINE_OPTIONS = {
-    "poolclass": QueuePool,
-    "pool_size": 5,
-    "max_overflow": 10,
-    "pool_timeout": 30,
-    "pool_recycle": 280,
-    "pool_pre_ping": True,
-}
+_POOL_SIZE_POR_DEFECTO = 5
+_MAX_OVERFLOW_POR_DEFECTO = 10
+_POOL_TIMEOUT_POR_DEFECTO = 30
+_POOL_RECYCLE_POR_DEFECTO = 280
+
+
+def _entero_env(nombre, defecto, minimo):
+    """Lee un entero de entorno; si falta o no es válido, usa el defecto."""
+    try:
+        valor = int(os.environ.get(nombre, defecto))
+    except (TypeError, ValueError):
+        return defecto
+    return valor if valor >= minimo else defecto
+
+
+def en_serverless():
+    """Vercel define esta variable en sus funciones serverless."""
+    return bool(os.environ.get("VERCEL"))
+
+
+def opciones_pool():
+    """Opciones de engine SQLAlchemy según el entorno de ejecución."""
+    if en_serverless():
+        return {"poolclass": NullPool}
+    return {
+        "poolclass": QueuePool,
+        "pool_size": _entero_env("DB_POOL_SIZE", _POOL_SIZE_POR_DEFECTO, 1),
+        "max_overflow": _entero_env("DB_MAX_OVERFLOW",
+                                    _MAX_OVERFLOW_POR_DEFECTO, 0),
+        "pool_timeout": _entero_env("DB_POOL_TIMEOUT",
+                                    _POOL_TIMEOUT_POR_DEFECTO, 1),
+        "pool_recycle": _entero_env("DB_POOL_RECYCLE",
+                                    _POOL_RECYCLE_POR_DEFECTO, 1),
+        "pool_pre_ping": True,
+    }
 
 
 def _crear_engine(nombre_var):
@@ -43,7 +77,7 @@ def _crear_engine(nombre_var):
             "Esta aplicación requiere dos URIs de Supabase (Auth y Tienda) "
             "configuradas por separado."
         )
-    return create_engine(uri, **_ENGINE_OPTIONS)
+    return create_engine(uri, **opciones_pool())
 
 
 # Engine para la BD de autenticación (usuario, cliente, rol, sesion)
