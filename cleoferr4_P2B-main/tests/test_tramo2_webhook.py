@@ -1,4 +1,4 @@
-"""Tramo 2 (2b): webhook /webhooks/pago/simulada.
+"""Tramo 2 (2b): webhook /webhooks/pago/<pasarela configurada>.
 
 La ruta REAL se ejercita con el test client; la conexión a BD se sustituye
 por un proxy con commit() no-op dentro de una transacción con rollback:
@@ -7,7 +7,6 @@ nada persiste. La firma usa el secreto real del .env (nunca se imprime).
 import hashlib
 import hmac
 import json
-import os
 import time
 import uuid as _uuid
 from decimal import Decimal
@@ -20,7 +19,8 @@ import db_supabase
 import app as modulo_app
 from app import app
 from services.pasarela import EstadoPago
-from services.pasarela.simulada import FIRMA_CABECERA, PasarelaSimulada
+from services.pasarela.config import configuracion_pago
+from services.pasarela.simulada import FIRMA_CABECERA
 
 
 class ConnProxy:
@@ -65,25 +65,26 @@ def fx(monkeypatch):
         INSERT INTO pago (id_venta, id_tipo_pago, id_caja, estado, monto,
                           id_transaccion, pasarela)
         VALUES (%s, (SELECT id_tipo_pago FROM tipo_pago WHERE nombre='efectivo'),
-                NULL, 'pendiente', 100.00, %s, 'simulada')
-        RETURNING id_pago, id_transaccion
-    """, (id_venta, f"sim_test_{_uuid.uuid4().hex[:10]}"))
+                NULL, 'pendiente', 100.00, %s, %s)
+        RETURNING id_pago, id_transaccion, pasarela
+    """, (id_venta, f"chr_sim_{_uuid.uuid4().hex[:16]}", modulo_app._PASARELA.nombre))
     fila = cur.fetchone()
     monkeypatch.setattr(modulo_app, 'get_connection_tienda', lambda: proxy)
     yield {'client': app.test_client(), 'cur': cur, 'proxy': proxy,
            'id_venta': id_venta, 'id_pago': fila['id_pago'],
-           'id_transaccion': fila['id_transaccion']}
+           'id_transaccion': fila['id_transaccion'],
+           'url': f"/webhooks/pago/{fila['pasarela']}"}
     proxy.rollback()
     raw.close()
 
 
 def _firmar(trx, estado, monto):
-    p = PasarelaSimulada(secreto_webhook=os.environ['PAGO_SIMULADA_WEBHOOK_SECRETO'])
-    return p.firmar_evento(trx, estado, monto)
+    # Firma la misma instancia que verifica la ruta: mismo secreto efectivo.
+    return modulo_app._PASARELA.firmar_evento(trx, estado, monto)
 
 
 def _firmar_manual(datos):
-    secreto = os.environ['PAGO_SIMULADA_WEBHOOK_SECRETO'].encode()
+    secreto = configuracion_pago()['secreto_webhook'].encode()
     payload = json.dumps(datos, separators=(',', ':')).encode('utf-8')
     firma = hmac.new(secreto, payload, hashlib.sha256).hexdigest()
     return payload, {FIRMA_CABECERA: firma}
@@ -97,7 +98,7 @@ def _estado(fx, tabla, columna, clave, valor_clave):
 
 def test_firma_valida_confirma(fx):
     payload, headers = _firmar(fx['id_transaccion'], EstadoPago.CONFIRMADO, Decimal('100.00'))
-    r = fx['client'].post('/webhooks/pago/simulada', data=payload, headers=headers)
+    r = fx['client'].post(fx['url'], data=payload, headers=headers)
     assert r.status_code == 200
     cuerpo = r.get_json()
     assert cuerpo['estado'] == 'confirmado' and cuerpo['ok'] is True
@@ -115,7 +116,7 @@ def test_firma_valida_confirma(fx):
 
 def test_firma_invalida_400_y_queda_registrada(fx):
     payload, headers = _firmar(fx['id_transaccion'], EstadoPago.CONFIRMADO, Decimal('100.00'))
-    r = fx['client'].post('/webhooks/pago/simulada', data=payload,
+    r = fx['client'].post(fx['url'], data=payload,
                           headers={FIRMA_CABECERA: 'falsificada'})
     assert r.status_code == 400
     assert 'firma' in r.get_json()['error']
@@ -131,7 +132,7 @@ def test_firma_vencida_400(fx):
         'tipo': 'pago_actualizado', 'estado': 'confirmado',
         'monto': '100.00', 'timestamp': time.time() - 3600,
     })
-    r = fx['client'].post('/webhooks/pago/simulada', data=payload, headers=headers)
+    r = fx['client'].post(fx['url'], data=payload, headers=headers)
     assert r.status_code == 400
     assert 'tolerancia' in r.get_json()['error']
     assert _estado(fx, 'pago', 'estado', 'id_pago', fx['id_pago']) == 'pendiente'
@@ -142,9 +143,9 @@ def test_firma_vencida_400(fx):
 
 def test_evento_repetido_no_duplica(fx):
     payload, headers = _firmar(fx['id_transaccion'], EstadoPago.CONFIRMADO, Decimal('100.00'))
-    r1 = fx['client'].post('/webhooks/pago/simulada', data=payload, headers=headers)
+    r1 = fx['client'].post(fx['url'], data=payload, headers=headers)
     assert r1.get_json()['estado'] == 'confirmado'
-    r2 = fx['client'].post('/webhooks/pago/simulada', data=payload, headers=headers)
+    r2 = fx['client'].post(fx['url'], data=payload, headers=headers)
     assert r2.status_code == 200
     assert r2.get_json()['estado'] == 'repetido'
     cur = fx['cur']
@@ -155,7 +156,7 @@ def test_evento_repetido_no_duplica(fx):
 
 def test_monto_distinto_rechazado_por_validacion(fx):
     payload, headers = _firmar(fx['id_transaccion'], EstadoPago.CONFIRMADO, Decimal('999.00'))
-    r = fx['client'].post('/webhooks/pago/simulada', data=payload, headers=headers)
+    r = fx['client'].post(fx['url'], data=payload, headers=headers)
     assert r.status_code == 200
     cuerpo = r.get_json()
     assert cuerpo['estado'] == 'invalido' and cuerpo['ok'] is False
@@ -171,7 +172,7 @@ def test_estado_desconocido_ignorado_y_nunca_en_pago(fx):
         'tipo': 'pago_actualizado', 'estado': 'estado_inventado',
         'monto': '100.00', 'timestamp': time.time(),
     })
-    r = fx['client'].post('/webhooks/pago/simulada', data=payload, headers=headers)
+    r = fx['client'].post(fx['url'], data=payload, headers=headers)
     assert r.status_code == 200
     assert r.get_json()['estado'] == 'ignorado'
     assert _estado(fx, 'pago', 'estado', 'id_pago', fx['id_pago']) == 'pendiente'
@@ -186,7 +187,7 @@ def test_pago_aprobado_sobre_venta_cancelada_marca_sin_resucitar(fx):
                    (SELECT id_estado_venta FROM estado_venta WHERE nombre='cancelado')
                    WHERE id_venta = %s""", (fx['id_venta'],))
     payload, headers = _firmar(fx['id_transaccion'], EstadoPago.CONFIRMADO, Decimal('100.00'))
-    r = fx['client'].post('/webhooks/pago/simulada', data=payload, headers=headers)
+    r = fx['client'].post(fx['url'], data=payload, headers=headers)
     cuerpo = r.get_json()
     assert cuerpo['estado'] == 'venta_cancelada'
     assert _estado(fx, 'pago', 'estado', 'id_pago', fx['id_pago']) == 'pendiente'
@@ -197,8 +198,8 @@ def test_pago_aprobado_sobre_venta_cancelada_marca_sin_resucitar(fx):
 
 
 def test_sin_pago_asociado(fx):
-    payload, headers = _firmar('sim_inexistente_xyz', EstadoPago.CONFIRMADO, Decimal('10.00'))
-    r = fx['client'].post('/webhooks/pago/simulada', data=payload, headers=headers)
+    payload, headers = _firmar('chr_sim_inexistente_xyz', EstadoPago.CONFIRMADO, Decimal('10.00'))
+    r = fx['client'].post(fx['url'], data=payload, headers=headers)
     assert r.status_code == 200
     assert r.get_json()['estado'] == 'sin_pago_asociado'
 
