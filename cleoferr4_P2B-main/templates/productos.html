@@ -183,7 +183,7 @@
                         <td><span class="fw-bold text-muted">{{ p.id_producto }}</span></td>
                         <td>
                             {% if p.imagen %}
-                                <img src="{{ p.imagen if p.imagen.startswith('http') else url_for('static', filename='img/' ~ p.imagen) }}"
+                                <img src="{{ p.imagen|url_imagen }}"
                                      class="producto-img" alt="{{ p.nombre }}"
                                      onerror="this.style.display='none'; this.nextElementSibling.style.display='flex'">
                                 <div class="producto-img-placeholder" style="display:none">

@@ -222,6 +222,22 @@ def guardar_imagen(file_field):
         flash('No se pudo guardar la imagen. El producto se guardará sin imagen nueva.', 'warning')
         return None
     return nombre_unico
+
+
+def url_imagen(valor):
+    """URL final de una imagen de producto: remota o local de static/img.
+
+    Vacío devuelve '' para que las plantillas conserven su icono/placeholder.
+    """
+    valor = (valor or '').strip()
+    if not valor:
+        return ''
+    if valor.lower().startswith(('http://', 'https://')):
+        return valor
+    return url_for('static', filename='img/' + valor)
+
+
+app.jinja_env.filters['url_imagen'] = url_imagen
 db.init_app(app)
 bcrypt = Bcrypt(app)
 

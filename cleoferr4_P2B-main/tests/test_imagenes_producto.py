@@ -11,7 +11,7 @@ import pytest
 
 import app as modulo_app
 import db_supabase
-from app import app
+from app import app, url_imagen
 
 PNG = b'\x89PNG\r\n\x1a\n' + b'imagen sintetica'
 URL_REMOTA = 'https://proyecto.supabase.co/storage/v1/object/public/productos/foto.png'
@@ -152,3 +152,72 @@ def test_editar_con_imagen_remota_no_borra_ni_falla(fx):
     fila = fx['cur'].fetchone()
     assert fila['nombre'] == 'Testimg Remota editada'
     assert fila['imagen'] == URL_REMOTA
+
+# ── url_imagen y su uso en catálogo / listado ─────────────────────
+
+def test_url_imagen_resuelve_remota_y_local():
+    with app.test_request_context('/'):
+        assert url_imagen('https://proyecto.supabase.co/foto.png') == \
+            'https://proyecto.supabase.co/foto.png'
+        assert url_imagen('http://ejemplo.test/foto.png') == \
+            'http://ejemplo.test/foto.png'
+        assert url_imagen('casco.jpg') == '/static/img/casco.jpg'
+        assert url_imagen('') == ''
+    assert app.jinja_env.filters['url_imagen'] is url_imagen
+
+
+def _insertar_producto(fx, nombre, imagen):
+    fx['cur'].execute("""
+        INSERT INTO producto (nombre, precio, stock, imagen, activo)
+        VALUES (%s, 10.50, 5, %s, TRUE)
+        RETURNING id_producto
+    """, (nombre, imagen))
+    return fx['cur'].fetchone()['id_producto']
+
+
+def _listado(fx):
+    # El producto sintético es el de id más alto: aparece en la última página.
+    return fx['c'].get('/productos?pagina=999999').get_data(as_text=True)
+
+
+def test_catalogo_y_lista_muestran_la_url_remota(fx):
+    _insertar_producto(fx, 'Testurl Remota', URL_REMOTA)
+
+    catalogo = fx['c'].get('/catalogo').get_data(as_text=True)
+    productos = _listado(fx)
+
+    assert URL_REMOTA in catalogo
+    assert URL_REMOTA in productos
+
+
+def test_imagen_existente_por_nombre_sigue_resolviendose(fx):
+    _insertar_producto(fx, 'Testurl Local', 'casco.jpg')
+
+    catalogo = fx['c'].get('/catalogo').get_data(as_text=True)
+    productos = _listado(fx)
+
+    assert '/static/img/casco.jpg' in catalogo
+    assert '/static/img/casco.jpg' in productos
+
+
+def test_valor_malicioso_no_se_inyecta_como_html(fx):
+    payload = '"><script>alert(1)</script>'
+    _insertar_producto(fx, 'Testurl Maliciosa', payload)
+
+    for html in (fx['c'].get('/catalogo').get_data(as_text=True),
+                 _listado(fx)):
+        assert '<script>alert(1)</script>' not in html
+        # La URL se codifica/escapa: la etiqueta nunca queda como HTML vivo.
+        assert ('&lt;script&gt;' in html
+                or '%3cscript%3e' in html.lower())
+
+
+def test_producto_sin_imagen_mantiene_el_placeholder(fx):
+    _insertar_producto(fx, 'Testurl Sin imagen', None)
+
+    catalogo = fx['c'].get('/catalogo').get_data(as_text=True)
+    productos = _listado(fx)
+
+    assert 'data-imagen=""' in catalogo
+    assert 'fa fa-wrench' in catalogo
+    assert 'producto-img-placeholder' in productos
