@@ -86,7 +86,7 @@
         <div style="font-size:0.88rem; color:#888">
             <span style="color:#E8580A; font-weight:600">Haz clic aquí</span> o arrastra una imagen
         </div>
-        <div style="font-size:0.75rem; color:#bbb; margin-top:4px">JPG, PNG, WEBP, GIF · Máximo 5 MB</div>
+        <div style="font-size:0.75rem; color:#bbb; margin-top:4px">JPG, PNG, WEBP, GIF · Máximo 4 MB</div>
     </div>
 
     <div id="previewWrap" style="display:none; border:2px solid #e0e0e0; border-radius:10px;
@@ -264,8 +264,8 @@ const inputImagen = document.getElementById('inputImagen');
 inputImagen.addEventListener('change', function () {
     const archivo = this.files[0];
     if (!archivo) return;
-    if (archivo.size > 5 * 1024 * 1024) {
-        avisoAccion({ mensaje: 'La imagen supera los 5 MB.', tipo: 'error' });
+    if (archivo.size > 4 * 1024 * 1024) {
+        avisoAccion({ mensaje: 'La imagen supera los 4 MB.', tipo: 'error' });
         this.value = '';   // igual que hoy: el campo se limpia y el archivo nunca se envía
         return;
     }

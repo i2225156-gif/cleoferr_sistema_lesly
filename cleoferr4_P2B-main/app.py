@@ -38,6 +38,7 @@ from db import db
 from db_supabase import (get_connection_auth, get_connection_tienda,
                          opciones_pool)
 from psycopg2 import errors as _pg_errores
+from services import almacenamiento
 from services import captcha
 from services import permisos
 from services.comprobantes import (EMISOR, UMBRAL_BOLETA_SIN_DOC,
@@ -101,7 +102,10 @@ app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_SECURE']   = bool(os.environ.get('VERCEL'))
 UPLOAD_FOLDER      = os.path.join(app.root_path, 'static', 'img')
 ALLOWED_EXTENSIONS = {'jpg', 'jpeg', 'png', 'webp', 'gif'}
-app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024   # 5 MB máximo
+MAX_IMAGE_BYTES    = 4 * 1024 * 1024                 # 4 MB por imagen
+# Vercel limita el cuerpo de la petición a 4.5 MB: dejamos margen para el
+# multipart sin permitir imágenes de más de 4 MB.
+app.config['MAX_CONTENT_LENGTH'] = int(4.5 * 1024 * 1024)
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 
@@ -162,6 +166,20 @@ def allowed_file(filename):
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
+def _tipo_mime_imagen(contenido):
+    """Tipo MIME real según los magic bytes (None si no es imagen válida)."""
+    if contenido.startswith(b'\xff\xd8\xff'):
+        return 'image/jpeg'
+    if contenido.startswith(b'\x89PNG\r\n\x1a\n'):
+        return 'image/png'
+    if contenido.startswith((b'GIF87a', b'GIF89a')):
+        return 'image/gif'
+    if (len(contenido) >= 12 and contenido[:4] == b'RIFF'
+            and contenido[8:12] == b'WEBP'):
+        return 'image/webp'
+    return None
+
+
 def guardar_imagen(file_field):
     archivo = request.files.get(file_field)
     if not archivo or archivo.filename == '':
@@ -169,9 +187,35 @@ def guardar_imagen(file_field):
     if not allowed_file(archivo.filename):
         flash('Formato no permitido. Usa JPG, PNG, WEBP o GIF.', 'danger')
         return None
-    ext          = archivo.filename.rsplit('.', 1)[1].lower()
+    ext = archivo.filename.rsplit('.', 1)[1].lower()
+    contenido = archivo.read()
+    if len(contenido) > MAX_IMAGE_BYTES:
+        flash('La imagen supera los 4 MB. El producto se guardará sin imagen nueva.',
+              'warning')
+        return None
+    tipo_mime = _tipo_mime_imagen(contenido)
+    if tipo_mime is None:
+        flash('Formato no permitido. El archivo no es una imagen JPG, PNG, '
+              'WEBP o GIF válida.', 'danger')
+        return None
+
     nombre_unico = f"{uuid.uuid4().hex}.{ext}"
+
+    # En Vercel el disco es de solo lectura: si Storage está configurado, la
+    # imagen vive allí y en producto.imagen se guarda la URL completa.
+    if almacenamiento.configurado():
+        url = almacenamiento.subir(contenido, nombre_unico, tipo_mime)
+        if url:
+            return url
+        app.logger.warning(
+            "No se pudo subir la imagen del producto a Storage.")
+        flash('No se pudo subir la imagen. El producto se guardará sin imagen nueva.',
+              'warning')
+        return None
+
+    # Desarrollo local: se conserva el guardado en static/img.
     try:
+        archivo.stream.seek(0)
         archivo.save(os.path.join(UPLOAD_FOLDER, nombre_unico))
     except OSError:
         app.logger.warning("No se pudo guardar la imagen del producto por un error de disco.")
