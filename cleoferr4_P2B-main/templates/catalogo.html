@@ -205,10 +205,20 @@
          data-desc="{{ (p.descripcion or '') | lower }}"
          data-categoria="{{ p.categoria or '' }}"
          data-marca="{{ p.marca or '' }}">
-        <div class="prod-card" onclick="abrirProducto({{ p.id_producto }}, '{{ p.nombre|replace("'", "\\'") }}', {{ p.precio_final|float }}, {{ p.stock|int if p.stock else 0 }}, '{{ (p.descripcion or '')|replace("'", "\\'")|replace('\n', ' ') }}', '{{ p.imagen or '' }}', '{{ p.marca or '' }}', {{ p.precio|float }}, {{ p.descuento|float }})" style="cursor:pointer">
+        <div class="prod-card"
+             data-id="{{ p.id_producto }}"
+             data-nombre="{{ p.nombre }}"
+             data-precio="{{ p.precio_final|float }}"
+             data-stock="{{ p.stock|int if p.stock else 0 }}"
+             data-desc="{{ p.descripcion or '' }}"
+             data-imagen="{{ p.imagen|url_imagen }}"
+             data-marca="{{ p.marca or '' }}"
+             data-precio-base="{{ p.precio|float }}"
+             data-descuento="{{ p.descuento|float }}"
+             style="cursor:pointer">
             <div class="prod-img">
                 {% if p.imagen %}
-<img src="{{ p.imagen if p.imagen.startswith('http') else url_for('static', filename='img/' ~ p.imagen) }}"
+<img src="{{ p.imagen|url_imagen }}"
                      alt="{{ p.nombre }}"
                      onerror="this.parentElement.innerHTML='<i class=\'fa fa-wrench fa-3x\' style=\'color:#ccc\'></i>'">
                 {% else %}
@@ -631,7 +641,7 @@ function abrirProducto(id, nombre, precio, stock, desc, imagen, marca, precioBas
     const img = document.getElementById('mpImagen');
     const ph  = document.getElementById('mpPlaceholder');
     if (imagen) {
-        img.src = imagen.startsWith('http') ? imagen : '/static/img/' + imagen;
+        img.src = imagen;
         img.style.display = 'block'; ph.style.display = 'none';
         img.onerror = () => { img.style.display='none'; ph.style.display='block'; };
     } else {
@@ -710,6 +720,16 @@ document.addEventListener('keydown', e => {
         document.getElementById('modalProducto').classList.remove('abierto');
         document.body.style.overflow = '';
     }
+});
+
+// La URL de la imagen llega YA resuelta desde el servidor.
+document.querySelectorAll('.prod-card').forEach(card => {
+    card.addEventListener('click', () => {
+        const d = card.dataset;
+        abrirProducto(parseInt(d.id, 10), d.nombre, parseFloat(d.precio),
+                      parseInt(d.stock, 10) || 0, d.desc, d.imagen, d.marca,
+                      parseFloat(d.precioBase), parseFloat(d.descuento));
+    });
 });
 </script>
 {% endblock %}

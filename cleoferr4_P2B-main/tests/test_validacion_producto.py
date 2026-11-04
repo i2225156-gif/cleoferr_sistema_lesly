@@ -241,7 +241,8 @@ def test_alta_con_error_de_disco_guarda_producto_sin_imagen(fx, monkeypatch):
     r = fx['c'].post('/productos/guardar', data={
         'nombre': nombre, 'precio': '10.50', 'stock': '5',
         'descripcion': '', 'estado': 'activo',
-        'imagen': (io.BytesIO(b'imagen sintetica'), 'producto.png'),
+        'imagen': (io.BytesIO(b'\x89PNG\r\n\x1a\nimagen sintetica'),
+                   'producto.png'),
     }, follow_redirects=True)
 
     assert r.status_code == 200
@@ -264,7 +265,8 @@ def test_edicion_con_error_de_disco_conserva_imagen_anterior(fx, monkeypatch):
     r = fx['c'].post(f'/productos/actualizar/{pid}', data={
         'nombre': 'Testf2 Imagen editada', 'precio': '12', 'stock': '7',
         'descripcion': '', 'estado': 'activo',
-        'imagen': (io.BytesIO(b'imagen sintetica'), 'nueva.png'),
+        'imagen': (io.BytesIO(b'\x89PNG\r\n\x1a\nimagen sintetica'),
+                   'nueva.png'),
     }, follow_redirects=True)
 
     assert r.status_code == 200

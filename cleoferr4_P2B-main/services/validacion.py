@@ -88,6 +88,15 @@ def correo(valor, maximo=None):
     return limpio.lower(), None
 
 
+def contrasena(valor, minimo=6):
+    """Contraseña requerida con la regla del registro de clientes."""
+    if not valor:
+        return None, 'La contraseña es obligatoria.'
+    if len(valor) < minimo:
+        return None, f'La contraseña debe tener al menos {minimo} caracteres.'
+    return valor, None
+
+
 def documento_proveedor(tipo, numero):
     """Documento de identidad OBLIGATORIO del proveedor (RUC, DNI o CE).
 

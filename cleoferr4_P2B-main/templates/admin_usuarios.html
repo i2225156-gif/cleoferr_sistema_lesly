@@ -3,8 +3,12 @@
 {% block titulito %}Usuarios y permisos – Cleoferr{% endblock %}
 
 {% block admin_contenido %}
-<div class="d-flex justify-content-between align-items-center mb-4">
+<div class="d-flex justify-content-between align-items-center mb-4 flex-wrap gap-2">
   <h4 class="fw-bold mb-0"><i class="fa fa-users-cog me-2"></i>Usuarios y permisos del personal</h4>
+  <button class="btn btn-naranja fw-bold" data-bs-toggle="modal"
+          data-bs-target="#modalNuevoVendedor">
+    <i class="fa fa-user-plus me-1"></i>Nuevo vendedor
+  </button>
 </div>
 
 <div class="alert alert-light border" style="font-size:0.82rem">
@@ -13,6 +17,66 @@
   <strong>de inmediato</strong> (no hay caché). Dashboard, pagos simulados,
   reservas, los borrados y esta misma pantalla son
   <strong>solo del administrador</strong>: no se pueden asignar.
+</div>
+
+<div class="modal fade" id="modalNuevoVendedor" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content border-0" style="border-radius:14px;overflow:hidden">
+      <div class="modal-header" style="background:var(--gris-oscuro);color:white;border:none">
+        <h5 class="modal-title fw-bold">
+          <i class="fa fa-user-plus me-2"></i>Nuevo vendedor
+        </h5>
+        <button type="button" class="btn-close btn-close-white"
+                data-bs-dismiss="modal"></button>
+      </div>
+      <form method="POST" action="/admin/usuarios/nuevo">
+        <div class="modal-body p-4">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <div class="mb-3">
+            <label class="form-label fw-semibold" for="nuevoVendedorCorreo">Correo electrónico</label>
+            <input type="email" name="correo" id="nuevoVendedorCorreo"
+                   class="form-control" maxlength="120" required
+                   placeholder="vendedora@cleoferr.com" autocomplete="off">
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-semibold" for="nuevoVendedorClave">Contraseña inicial</label>
+            <div style="position:relative">
+              <input type="password" name="contrasena" id="nuevoVendedorClave"
+                     class="form-control pe-5" required minlength="6"
+                     placeholder="Mínimo 6 caracteres" autocomplete="new-password">
+              <button type="button"
+                      onclick="togglePwNuevo('nuevoVendedorClave','iconNuevoVendedor')"
+                      style="position:absolute;right:0;top:0;height:100%;background:transparent;border:none;padding:0 14px;color:#aaa;cursor:pointer">
+                <i class="fa fa-eye" id="iconNuevoVendedor"></i>
+              </button>
+            </div>
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-semibold" for="nuevoVendedorConf">Confirmar contraseña</label>
+            <div style="position:relative">
+              <input type="password" name="confirmar" id="nuevoVendedorConf"
+                     class="form-control pe-5" required minlength="6"
+                     placeholder="Repite la contraseña" autocomplete="new-password">
+              <button type="button"
+                      onclick="togglePwNuevo('nuevoVendedorConf','iconNuevoVendedorConf')"
+                      style="position:absolute;right:0;top:0;height:100%;background:transparent;border:none;padding:0 14px;color:#aaa;cursor:pointer">
+                <i class="fa fa-eye" id="iconNuevoVendedorConf"></i>
+              </button>
+            </div>
+          </div>
+          <p class="text-muted mb-0" style="font-size:0.8rem">
+            <i class="fa fa-info-circle me-1"></i>
+            Entrégale esta contraseña a la vendedora; podrá cambiarla desde «Clave».
+          </p>
+        </div>
+        <div class="modal-footer border-0">
+          <button type="button" class="btn btn-outline-secondary"
+                  data-bs-dismiss="modal">Cancelar</button>
+          <button type="submit" class="btn btn-naranja fw-bold">Crear vendedor</button>
+        </div>
+      </form>
+    </div>
+  </div>
 </div>
 
 {% if not personal %}
@@ -106,4 +170,18 @@
   </div>
 </div>
 {% endfor %}
+
+<script>
+function togglePwNuevo(inputId, iconId) {
+    const input = document.getElementById(inputId);
+    const icon = document.getElementById(iconId);
+    if (input.type === 'password') {
+        input.type = 'text';
+        icon.classList.replace('fa-eye', 'fa-eye-slash');
+    } else {
+        input.type = 'password';
+        icon.classList.replace('fa-eye-slash', 'fa-eye');
+    }
+}
+</script>
 {% endblock %}

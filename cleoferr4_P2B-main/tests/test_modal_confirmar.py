@@ -197,9 +197,9 @@ def test_admin_render_con_componente():
     # Clientes: ídem
     html = c.get('/clientes').get_data(as_text=True)
     assert 'data-confirm="¿Eliminar este cliente?"' in html
-    # producto_form: aviso de imagen > 5 MB por toast (campo se limpia igual)
+    # producto_form: aviso de imagen > 4 MB por toast (campo se limpia igual)
     html = c.get('/productos/nuevo').get_data(as_text=True)
-    assert "avisoAccion({ mensaje: 'La imagen supera los 5 MB.'" in html
+    assert "avisoAccion({ mensaje: 'La imagen supera los 4 MB.'" in html
     assert "this.value = ''" in html
 
 

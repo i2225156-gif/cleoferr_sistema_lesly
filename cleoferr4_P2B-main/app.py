@@ -38,6 +38,7 @@ from db import db
 from db_supabase import (get_connection_auth, get_connection_tienda,
                          opciones_pool)
 from psycopg2 import errors as _pg_errores
+from services import almacenamiento
 from services import captcha
 from services import permisos
 from services.comprobantes import (EMISOR, UMBRAL_BOLETA_SIN_DOC,
@@ -55,7 +56,8 @@ from services.ofertas import (SQL_IMPORTE_LINEA, SQL_PRECIO_VIGENTE,
                               precios_vigentes)
 from services.reportes import (NOMBRES_TIPO, TIPOS_REPORTE, reporte,
                                sql_top_productos)
-from services.validacion import (correo as _correo_valido, documento_proveedor,
+from services.validacion import (contrasena as _contrasena_valida,
+                                 correo as _correo_valido, documento_proveedor,
                                  entero, nombre_persona,
                                  numero, requerido, telefono as _telefono_valido,
                                  texto)
@@ -100,7 +102,10 @@ app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_SECURE']   = bool(os.environ.get('VERCEL'))
 UPLOAD_FOLDER      = os.path.join(app.root_path, 'static', 'img')
 ALLOWED_EXTENSIONS = {'jpg', 'jpeg', 'png', 'webp', 'gif'}
-app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024   # 5 MB máximo
+MAX_IMAGE_BYTES    = 4 * 1024 * 1024                 # 4 MB por imagen
+# Vercel limita el cuerpo de la petición a 4.5 MB: dejamos margen para el
+# multipart sin permitir imágenes de más de 4 MB.
+app.config['MAX_CONTENT_LENGTH'] = int(4.5 * 1024 * 1024)
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 
@@ -161,6 +166,20 @@ def allowed_file(filename):
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
+def _tipo_mime_imagen(contenido):
+    """Tipo MIME real según los magic bytes (None si no es imagen válida)."""
+    if contenido.startswith(b'\xff\xd8\xff'):
+        return 'image/jpeg'
+    if contenido.startswith(b'\x89PNG\r\n\x1a\n'):
+        return 'image/png'
+    if contenido.startswith((b'GIF87a', b'GIF89a')):
+        return 'image/gif'
+    if (len(contenido) >= 12 and contenido[:4] == b'RIFF'
+            and contenido[8:12] == b'WEBP'):
+        return 'image/webp'
+    return None
+
+
 def guardar_imagen(file_field):
     archivo = request.files.get(file_field)
     if not archivo or archivo.filename == '':
@@ -168,15 +187,57 @@ def guardar_imagen(file_field):
     if not allowed_file(archivo.filename):
         flash('Formato no permitido. Usa JPG, PNG, WEBP o GIF.', 'danger')
         return None
-    ext          = archivo.filename.rsplit('.', 1)[1].lower()
+    ext = archivo.filename.rsplit('.', 1)[1].lower()
+    contenido = archivo.read()
+    if len(contenido) > MAX_IMAGE_BYTES:
+        flash('La imagen supera los 4 MB. El producto se guardará sin imagen nueva.',
+              'warning')
+        return None
+    tipo_mime = _tipo_mime_imagen(contenido)
+    if tipo_mime is None:
+        flash('Formato no permitido. El archivo no es una imagen JPG, PNG, '
+              'WEBP o GIF válida.', 'danger')
+        return None
+
     nombre_unico = f"{uuid.uuid4().hex}.{ext}"
+
+    # En Vercel el disco es de solo lectura: si Storage está configurado, la
+    # imagen vive allí y en producto.imagen se guarda la URL completa.
+    if almacenamiento.configurado():
+        url = almacenamiento.subir(contenido, nombre_unico, tipo_mime)
+        if url:
+            return url
+        app.logger.warning(
+            "No se pudo subir la imagen del producto a Storage.")
+        flash('No se pudo subir la imagen. El producto se guardará sin imagen nueva.',
+              'warning')
+        return None
+
+    # Desarrollo local: se conserva el guardado en static/img.
     try:
+        archivo.stream.seek(0)
         archivo.save(os.path.join(UPLOAD_FOLDER, nombre_unico))
     except OSError:
         app.logger.warning("No se pudo guardar la imagen del producto por un error de disco.")
         flash('No se pudo guardar la imagen. El producto se guardará sin imagen nueva.', 'warning')
         return None
     return nombre_unico
+
+
+def url_imagen(valor):
+    """URL final de una imagen de producto: remota o local de static/img.
+
+    Vacío devuelve '' para que las plantillas conserven su icono/placeholder.
+    """
+    valor = (valor or '').strip()
+    if not valor:
+        return ''
+    if valor.lower().startswith(('http://', 'https://')):
+        return valor
+    return url_for('static', filename='img/' + valor)
+
+
+app.jinja_env.filters['url_imagen'] = url_imagen
 db.init_app(app)
 bcrypt = Bcrypt(app)
 
@@ -333,7 +394,8 @@ _CSRF_PROTEGIDAS = {
     # Alertas: resolver una alerta es escritura (POST + CSRF); el fetch de
     # la pagina manda X-CSRFToken y el formulario el token oculto.
     'alertas_resolver',
-    # Panel de usuarios: permisos, estado y desbloqueo son escritura.
+    # Panel de usuarios: alta, permisos, estado y desbloqueo son escritura.
+    'admin_usuarios_nuevo',
     'admin_usuarios_permisos', 'admin_usuarios_estado',
     'admin_usuarios_desbloquear',
     # Alta rápida desde el formulario de producto (fetch JSON).
@@ -4507,9 +4569,10 @@ def registro_cliente():
         return _login_cliente(
                                error='Las contraseñas no coinciden.',
                                registro_activo=True)
-    if len(contrasena) < 6:
+    _, error_clave = _contrasena_valida(contrasena)
+    if error_clave:
         return _login_cliente(
-                               error='La contraseña debe tener al menos 6 caracteres.',
+                               error=error_clave,
                                registro_activo=True)
 
     # Ley 29733: la casilla de privacidad es OBLIGATORIA y se valida
@@ -6724,6 +6787,93 @@ def admin_usuarios():
     return render_template('admin_usuarios.html', personal=filas,
                            catalogo=permisos.CATALOGO,
                            seccion_activa='usuarios')
+
+
+@app.route('/admin/usuarios/nuevo', methods=['POST'])
+@login_required
+@admin_required
+def admin_usuarios_nuevo():
+    """Crea una cuenta de vendedor con la plantilla de permisos del rol.
+
+    Todo ocurre en UNA transacción: validación, unicidad del correo,
+    alta, copia de rol_permiso y auditoría de cada permiso. La
+    contraseña va solo al hash; jamás a logs, flashes ni HTML.
+    """
+    correo, error = _correo_valido(request.form.get('correo'), 120)
+    if error:
+        flash(error, 'danger')
+        return redirect(url_for('admin_usuarios'))
+    clave = request.form.get('contrasena') or ''
+    confirmar = request.form.get('confirmar') or ''
+    _, error = _contrasena_valida(clave)
+    if error:
+        flash(error, 'danger')
+        return redirect(url_for('admin_usuarios'))
+    if clave != confirmar:
+        flash('Las contraseñas no coinciden.', 'danger')
+        return redirect(url_for('admin_usuarios'))
+
+    id_admin = session.get('usuario_id')
+    conn = get_connection_auth()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("""SELECT id_usuario FROM usuario
+                           WHERE LOWER(TRIM(email)) = %s""", (correo,))
+        if cursor.fetchone():
+            flash('Ya existe una cuenta con ese correo electrónico.', 'warning')
+            return redirect(url_for('admin_usuarios'))
+
+        cursor.execute("""SELECT id_rol FROM rol
+                           WHERE LOWER(TRIM(nombre)) = 'vendedor'
+                             AND activo = TRUE""")
+        fila_rol = cursor.fetchone()
+        if fila_rol is None:
+            raise RuntimeError('El rol vendedor no está disponible')
+
+        hash_pw = bcrypt.generate_password_hash(clave).decode('utf-8')
+        cursor.execute("""INSERT INTO usuario
+                               (email, contrasena, id_rol, nombres, activo,
+                                intentos_fallidos)
+                          VALUES (%s, %s, %s, %s, TRUE, 0)
+                          RETURNING id_usuario""",
+                       (correo, hash_pw, fila_rol['id_rol'], 'Vendedor'))
+        id_nuevo = cursor.fetchone()['id_usuario']
+
+        cursor.execute("""INSERT INTO usuario_permiso
+                               (id_usuario, id_permiso, asignado_por,
+                                fecha_asignacion)
+                          SELECT %s, rp.id_permiso, %s, now()
+                            FROM rol_permiso rp
+                            JOIN permiso p ON p.id_permiso = rp.id_permiso
+                           WHERE rp.id_rol = %s AND p.activo = TRUE
+                          ON CONFLICT (id_usuario, id_permiso) DO NOTHING""",
+                       (id_nuevo, id_admin, fila_rol['id_rol']))
+        if not cursor.rowcount:
+            for permiso_clave in permisos.POR_DEFECTO_VENDEDOR:
+                permisos.dar_permiso(conn, id_admin, id_nuevo, permiso_clave)
+
+        conn.commit()
+
+        cursor.execute("""SELECT p.nombre
+                            FROM usuario_permiso up
+                            JOIN permiso p ON p.id_permiso = up.id_permiso
+                           WHERE up.id_usuario = %s
+                           ORDER BY p.nombre""", (id_nuevo,))
+        modulos = [permisos.CATALOGO.get(fila['nombre'], fila['nombre'])
+                   for fila in cursor.fetchall()]
+        app.logger.info('Vendedor creado: usuario_id=%s por administrador_id=%s',
+                        id_nuevo, id_admin)
+        flash('Vendedor creado; sus módulos iniciales son: %s.'
+              % (', '.join(modulos) or 'ninguno'), 'success')
+    except HTTPException:
+        raise
+    except Exception:
+        conn.rollback()
+        app.logger.exception('Error al crear el vendedor')
+        flash('No se pudo crear el vendedor. Revisa el log.', 'danger')
+    finally:
+        conn.close()
+    return redirect(url_for('admin_usuarios'))
 
 
 @app.route('/admin/usuarios/<int:id>/permisos', methods=['POST'])
